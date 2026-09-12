@@ -1,0 +1,15 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      DB_PATH: /data/app.db
+    volumes:
+      # Named volume, never a bind mount: SQLite locking is unreliable on
+      # macOS bind mounts.
+      - appdata:/data
+    restart: unless-stopped
+
+volumes:
+  appdata:

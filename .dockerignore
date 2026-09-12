@@ -1,0 +1,10 @@
+.git
+node_modules
+.venv
+data
+frontend/dist
+.superpowers
+.remember
+__pycache__
+.env
+docs
