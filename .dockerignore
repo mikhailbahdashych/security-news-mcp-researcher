@@ -1,0 +1,12 @@
+.git
+**/node_modules
+**/.venv
+data
+frontend/dist
+.superpowers
+.remember
+**/__pycache__
+**/.pytest_cache
+**/.ruff_cache
+.env
+docs
