@@ -7,7 +7,7 @@ from typing import Annotated
 
 from anthropic import AsyncAnthropic
 from fastapi import Depends, Request
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.services import settings as settings_service
 
@@ -32,6 +32,28 @@ async def get_db(request: Request) -> AsyncIterator[AsyncSession]:
 
 
 DbSession = Annotated[AsyncSession, Depends(get_db)]
+
+
+def get_session_factory(request: Request) -> async_sessionmaker[AsyncSession]:
+    """The app's session factory, for services that open their own transactions.
+
+    A request-scoped session is the wrong tool when a service fans out over eight
+    concurrent feed fetches: each one should commit as soon as it is done rather
+    than hold a single SQLite write transaction open for the whole batch. Such a
+    service is handed the factory instead, through this dependency so that tests can
+    override it exactly as they override ``get_db``.
+    """
+    session_factory = getattr(request.app.state, "session_factory", None)
+    if session_factory is None:
+        raise RuntimeError(
+            "The database is not initialised. The application lifespan did not run — "
+            "tests that drive the app through ASGITransport must override "
+            "get_session_factory."
+        )
+    return session_factory
+
+
+SessionFactory = Annotated[async_sessionmaker[AsyncSession], Depends(get_session_factory)]
 
 
 async def get_anthropic_client(session: DbSession) -> AsyncIterator[AsyncAnthropic | None]:
@@ -60,4 +82,11 @@ async def get_anthropic_client(session: DbSession) -> AsyncIterator[AsyncAnthrop
 AnthropicClient = Annotated[AsyncAnthropic | None, Depends(get_anthropic_client)]
 
 
-__all__ = ["AnthropicClient", "DbSession", "get_anthropic_client", "get_db"]
+__all__ = [
+    "AnthropicClient",
+    "DbSession",
+    "SessionFactory",
+    "get_anthropic_client",
+    "get_db",
+    "get_session_factory",
+]
