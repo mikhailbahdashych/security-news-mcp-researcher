@@ -48,7 +48,13 @@ logger = logging.getLogger(__name__)
 MAX_CONCURRENT_FEEDS = 8
 
 #: Seeded by ``POST /api/feeds/seed-defaults``. Every URL was fetched and confirmed
-#: to return a parseable feed at implementation time; see the task report.
+#: to return a parseable feed at implementation time.
+#:
+#: Two of them sit behind edge bot protection (CISA on Akamai, BleepingComputer on
+#: Cloudflare) that judges the TLS/HTTP client fingerprint, not the ``User-Agent``:
+#: curl gets 200 where any Python HTTP client gets 403. They are kept because the
+#: URLs are correct and current — the refresher records ``HTTP 403`` on those rows
+#: and the rest of the batch is unaffected — but do not be surprised by the error.
 DEFAULT_FEEDS: tuple[tuple[str, str], ...] = (
     ("The Hacker News", "https://feeds.feedburner.com/TheHackersNews"),
     ("BleepingComputer", "https://www.bleepingcomputer.com/feed/"),

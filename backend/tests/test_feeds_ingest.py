@@ -98,7 +98,12 @@ async def test_reingesting_the_same_feed_adds_nothing(
 
     assert first.total_new == 3
     assert second.total_new == 0
+    # "Zero new" has to mean the duplicates were skipped, not that the INSERT blew
+    # up on the unique index and the whole batch was written off as an error.
+    assert second.results[0].error is None
     assert len(await items_of(db_session, feed.id)) == 3
+    await db_session.refresh(feed)
+    assert feed.last_status == "ok"
 
 
 async def test_guid_falls_back_to_the_link_then_to_a_hash(
