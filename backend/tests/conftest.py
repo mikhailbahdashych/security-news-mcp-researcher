@@ -1,3 +1,4 @@
+import socket
 from collections.abc import AsyncIterator
 
 import httpx2
@@ -6,7 +7,7 @@ from fastapi import FastAPI
 from httpx2 import ASGITransport
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from app.api.deps import get_db
+from app.api.deps import get_db, get_session_factory
 from app.config import Settings
 from app.db.engine import create_db_engine, create_session_factory
 from app.db.init import init_db
@@ -23,6 +24,27 @@ def isolated_api_key_env(monkeypatch: pytest.MonkeyPatch) -> None:
     set it themselves.
     """
     monkeypatch.delenv(settings_service.API_KEY_ENV_VAR, raising=False)
+
+
+#: A public address (example.com's). The stub resolver below hands it out so that
+#: fixture hostnames like ``example.test`` pass the outbound-URL guard.
+PUBLIC_TEST_ADDRESS = "93.184.216.34"
+
+
+@pytest.fixture(autouse=True)
+def offline_dns(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Resolve every hostname to a public address, without touching the network.
+
+    The URL guard resolves hosts before fetching them, and the suite's fixture hosts
+    (``example.test``, ``atom.example.test``, ...) do not exist. Autouse so that no
+    test can reach a real resolver by accident; the guard's own tests override this
+    with whatever answer they need.
+    """
+
+    def fake_getaddrinfo(host, port, *args, **kwargs):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (PUBLIC_TEST_ADDRESS, port or 0))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
 
 
 @pytest.fixture
@@ -74,6 +96,7 @@ def app(db_engine: AsyncEngine, tmp_path) -> FastAPI:
             yield session
 
     application.dependency_overrides[get_db] = override_get_db
+    application.dependency_overrides[get_session_factory] = lambda: session_factory
     return application
 
 

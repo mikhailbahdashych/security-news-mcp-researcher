@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import FeedItem, utcnow
 from app.services import settings as settings_service
 from app.services.http import build_client
+from app.services.url_guard import MAX_FETCH_BYTES, GuardError, fetch_guarded
 
 logger = logging.getLogger(__name__)
 
@@ -100,9 +101,15 @@ async def extract_article(
     """
     try:
         async with build_client(timeout_s, transport=transport) as client:
-            response = await client.get(url)
+            # Nobody typed this URL — it came out of a feed, and from Task 4 it can
+            # come out of the model — so every hop is checked, the first included.
+            response = await fetch_guarded(
+                client, url, max_bytes=MAX_FETCH_BYTES, validate_first_hop=True
+            )
             response.raise_for_status()
             html = response.text
+    except GuardError as exc:
+        return ExtractResult(ok=False, reason=str(exc))
     except httpx2.HTTPStatusError as exc:
         return ExtractResult(ok=False, reason=f"HTTP {exc.response.status_code}")
     except httpx2.TimeoutException:

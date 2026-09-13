@@ -2,9 +2,13 @@
 
 Several security blogs (Cloudflare- or Akamai-fronted) answer a library's default
 ``User-Agent`` with 403, so every outbound fetch in this application presents a
-real browser UA. Redirects are followed because feed URLs move (Project Zero's
-Blogspot feed now redirects to ``projectzero.google``) and because news links
-routinely pass through a shortener.
+real browser UA.
+
+Redirects are **not** followed by the client: feed URLs move (Project Zero's
+Blogspot feed now redirects to ``projectzero.google``) and news links routinely
+pass through a shortener, so they do have to be followed — but by
+``app.services.url_guard.fetch_guarded``, which validates every hop before
+connecting to it. Letting httpx follow them would skip that check.
 """
 
 from __future__ import annotations
@@ -33,14 +37,15 @@ def build_client(
     *,
     transport: httpx2.AsyncBaseTransport | None = None,
 ) -> httpx2.AsyncClient:
-    """An ``AsyncClient`` with this application's UA, redirect and timeout policy.
+    """An ``AsyncClient`` with this application's UA and timeout policy.
 
-    ``transport`` exists so tests can hand in an ``httpx2.MockTransport`` and keep
-    the whole suite off the network.
+    Redirect following is off on purpose — use ``url_guard.fetch_guarded`` so that
+    each hop is validated. ``transport`` exists so tests can hand in an
+    ``httpx2.MockTransport`` and keep the whole suite off the network.
     """
     return httpx2.AsyncClient(
         headers=DEFAULT_HEADERS,
-        follow_redirects=True,
+        follow_redirects=False,
         timeout=httpx2.Timeout(timeout_s),
         transport=transport,
     )

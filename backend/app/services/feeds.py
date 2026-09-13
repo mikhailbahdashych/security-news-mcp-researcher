@@ -39,6 +39,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.db.models import Feed, FeedItem, utcnow
 from app.services import settings as settings_service
 from app.services.http import build_client
+from app.services.url_guard import MAX_FEED_BYTES, GuardError, fetch_guarded
 
 logger = logging.getLogger(__name__)
 
@@ -241,7 +242,11 @@ async def _refresh_one(
     fetched_at = utcnow()
 
     try:
-        response = await client.get(url)
+        # The operator typed this URL, so its first hop is trusted (a feed reader on
+        # the LAN is a legitimate target); every redirect it takes is still checked.
+        response = await fetch_guarded(
+            client, url, max_bytes=MAX_FEED_BYTES, validate_first_hop=False
+        )
         response.raise_for_status()
         parsed = await parse_feed(response.content)
 
@@ -252,6 +257,8 @@ async def _refresh_one(
             rows = _entry_rows(feed_id, parsed, fetched_at)
         else:
             error = _bozo_message(parsed)
+    except GuardError as exc:
+        error = str(exc)
     except httpx2.HTTPStatusError as exc:
         error = f"HTTP {exc.response.status_code}"
     except httpx2.TimeoutException:
