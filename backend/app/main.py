@@ -62,6 +62,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             allow_headers=["*"],
         )
 
+    # Deliberately no GZipMiddleware: it buffers responses, which turns the chat
+    # SSE stream into a connection that appears to hang until the turn is over.
+    # If compression is ever wanted, it has to exclude the streaming routes.
+
     # API routes first...
     app.include_router(api_router, prefix="/api")
     # ...and the SPA catch-all last, so it can never shadow an API route.

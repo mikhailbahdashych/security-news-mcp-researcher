@@ -179,6 +179,7 @@ def turn_tool_use(
     stop_reason: str = "tool_use",
     *,
     text: str | None = None,
+    delay_s: float = 0.0,
 ) -> ScriptedTurn:
     """One or more ``tool_use`` blocks, optionally preceded by some text."""
     events: list[Any] = []
@@ -213,7 +214,7 @@ def turn_tool_use(
         index += 1
 
     events.append(BetaRawMessageStopEvent(type="message_stop"))
-    return ScriptedTurn(events=events, message=_message(content, stop_reason))
+    return ScriptedTurn(events=events, message=_message(content, stop_reason), delay_s=delay_s)
 
 
 def turn_thinking_then_text(

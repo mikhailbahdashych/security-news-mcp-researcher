@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Annotated
 
 from anthropic import AsyncAnthropic
@@ -82,11 +82,34 @@ async def get_anthropic_client(session: DbSession) -> AsyncIterator[AsyncAnthrop
 AnthropicClient = Annotated[AsyncAnthropic | None, Depends(get_anthropic_client)]
 
 
+def build_anthropic_client(api_key: str) -> AsyncAnthropic:
+    return AsyncAnthropic(api_key=api_key)
+
+
+def get_chat_client_factory() -> Callable[[str], AsyncAnthropic]:
+    """How a *streaming* route gets its client.
+
+    ``get_anthropic_client`` is the wrong tool for a streamed turn: FastAPI closes
+    a yield-dependency when the route function returns, which for a streaming
+    response is *before* the body has been sent — the pool would go away
+    underneath the open stream. A streaming route therefore builds its own client
+    from this factory and closes it itself when the stream finalises. Tests
+    override this dependency to hand back a scripted fake.
+    """
+    return build_anthropic_client
+
+
+ChatClientFactory = Annotated[Callable[[str], AsyncAnthropic], Depends(get_chat_client_factory)]
+
+
 __all__ = [
     "AnthropicClient",
+    "ChatClientFactory",
     "DbSession",
     "SessionFactory",
+    "build_anthropic_client",
     "get_anthropic_client",
+    "get_chat_client_factory",
     "get_db",
     "get_session_factory",
 ]
