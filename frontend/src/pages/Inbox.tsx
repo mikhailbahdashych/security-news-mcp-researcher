@@ -1,5 +1,6 @@
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useMemo, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 
 import {
   bulkSetStatus,
@@ -16,6 +17,7 @@ import {
   type RefreshResponse,
   type StatusFilter,
 } from '../api/inbox'
+import type { ChatNavigationState } from './ChatPage'
 import BulkBar from '../components/inbox/BulkBar'
 import FilterBar from '../components/inbox/FilterBar'
 import ItemRow from '../components/inbox/ItemRow'
@@ -34,6 +36,7 @@ const secondaryButtonClass =
 
 export default function InboxPage() {
   const queryClient = useQueryClient()
+  const navigate = useNavigate()
 
   const [status, setStatus] = useState<StatusFilter>('unread')
   const [feedId, setFeedId] = useState<number | null>(null)
@@ -123,7 +126,8 @@ export default function InboxPage() {
     })
   }
 
-  const selectedIds = items.filter((item) => selected.has(item.id)).map((item) => item.id)
+  const selectedItems = items.filter((item) => selected.has(item.id))
+  const selectedIds = selectedItems.map((item) => item.id)
   const busy = triage.isPending || bulk.isPending || extract.isPending
   const allOnPageSelected = items.length > 0 && selectedIds.length === items.length
 
@@ -192,6 +196,12 @@ export default function InboxPage() {
           onStar={() => bulk.mutate({ ids: selectedIds, next: 'starred' })}
           onDismiss={() => bulk.mutate({ ids: selectedIds, next: 'dismissed' })}
           onMarkUnread={() => bulk.mutate({ ids: selectedIds, next: 'unread' })}
+          onResearch={() => {
+            // The Chat page reads these off the route state and pre-attaches
+            // them to the first message.
+            const state: ChatNavigationState = { attachedItems: selectedItems }
+            navigate('/chat', { state })
+          }}
           onClear={() => setSelected(new Set())}
         />
       ) : null}

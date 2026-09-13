@@ -4,6 +4,7 @@ interface BulkBarProps {
   onStar: () => void
   onDismiss: () => void
   onMarkUnread: () => void
+  onResearch: () => void
   onClear: () => void
 }
 
@@ -18,6 +19,7 @@ export default function BulkBar({
   onStar,
   onDismiss,
   onMarkUnread,
+  onResearch,
   onClear,
 }: BulkBarProps) {
   return (
@@ -40,7 +42,7 @@ export default function BulkBar({
       <button type="button" disabled className={buttonClass} title="Coming in a later task">
         Generate notes
       </button>
-      <button type="button" disabled className={buttonClass} title="Coming in a later task">
+      <button type="button" disabled={busy} onClick={onResearch} className={buttonClass}>
         Research these
       </button>
 
