@@ -4,7 +4,7 @@ import httpx2
 import pytest
 from fastapi import FastAPI
 from httpx2 import ASGITransport
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.api.deps import get_db
 from app.config import Settings
@@ -38,6 +38,17 @@ async def db_engine(tmp_path) -> AsyncIterator[AsyncEngine]:
         yield engine
     finally:
         await engine.dispose()
+
+
+@pytest.fixture
+def session_factory(db_engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
+    """The session factory services take when they open their own transactions.
+
+    ``refresh_feeds`` keeps one short transaction per feed rather than holding a
+    request-scoped session open across every fetch, so it is handed the factory the
+    way the route hands it ``request.app.state.session_factory``.
+    """
+    return create_session_factory(db_engine)
 
 
 @pytest.fixture

@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Example Project Zero</title>
+  <link href="https://atom.example.test/"/>
+  <updated>2026-03-02T10:00:00Z</updated>
+  <id>https://atom.example.test/feed</id>
+  <entry>
+    <title>Racing a kernel allocator</title>
+    <link href="https://atom.example.test/2026/03/race.html" rel="alternate"/>
+    <id>https://atom.example.test/2026/03/race.html</id>
+    <updated>2026-03-02T10:00:00Z</updated>
+    <published>2026-03-02T08:15:00Z</published>
+    <summary>A write-up of a use-after-free.</summary>
+  </entry>
+  <entry>
+    <title>Only updated, never published</title>
+    <link href="https://atom.example.test/2026/02/updated.html" rel="alternate"/>
+    <id>https://atom.example.test/2026/02/updated.html</id>
+    <updated>2026-02-20T12:00:00Z</updated>
+    <summary>This entry carries no published date.</summary>
+  </entry>
+</feed>

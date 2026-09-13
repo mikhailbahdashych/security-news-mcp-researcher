@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Guidless Weekly</title>
+    <link>https://guidless.test/</link>
+    <description>Every item here is missing a guid.</description>
+    <item>
+      <title>Item with a link but no guid</title>
+      <link>https://guidless.test/a</link>
+      <pubDate>Mon, 02 Mar 2026 09:30:00 +0000</pubDate>
+      <description>Falls back to the link.</description>
+    </item>
+    <item>
+      <title>Item with neither guid nor link</title>
+      <description>Falls back to a hash of title and link.</description>
+    </item>
+  </channel>
+</rss>

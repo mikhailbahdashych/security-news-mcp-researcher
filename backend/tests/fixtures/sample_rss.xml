@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Example Security Blog</title>
+    <link>https://example.test/</link>
+    <description>Security news for the tests.</description>
+    <item>
+      <title>Critical RCE patched in ExampleOS</title>
+      <link>https://example.test/posts/rce-patched</link>
+      <guid isPermaLink="false">tag:example.test,2026:post-1</guid>
+      <pubDate>Mon, 02 Mar 2026 09:30:00 +0000</pubDate>
+      <author>reporter@example.test (A. Reporter)</author>
+      <description>&lt;p&gt;A remote code execution bug was fixed.&lt;/p&gt;</description>
+    </item>
+    <item>
+      <title>Phishing kit targets 100% of logins</title>
+      <link>https://example.test/posts/phishing-kit</link>
+      <guid isPermaLink="false">tag:example.test,2026:post-2</guid>
+      <pubDate>Sun, 01 Mar 2026 18:00:00 +0000</pubDate>
+      <description>A new kit bypasses MFA.</description>
+    </item>
+    <item>
+      <title>Undated advisory</title>
+      <link>https://example.test/posts/undated</link>
+      <guid isPermaLink="false">tag:example.test,2026:post-3</guid>
+      <description>No pubDate on this one at all.</description>
+    </item>
+  </channel>
+</rss>
