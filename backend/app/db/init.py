@@ -9,22 +9,22 @@ from __future__ import annotations
 
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from app.db.engine import get_engine, get_session_factory
+from app.db.engine import create_session_factory
 from app.db.models import Base
 from app.services.settings import seed_defaults
 
 
 async def init_db(
-    engine: AsyncEngine | None = None,
+    engine: AsyncEngine,
     session_factory: async_sessionmaker[AsyncSession] | None = None,
 ) -> None:
     """Create every table (if absent) and seed the default settings.
 
-    Both arguments default to the process-wide engine/session factory; tests pass
-    their own. Safe to call repeatedly.
+    The engine is explicit so the caller decides which database is initialised;
+    ``session_factory`` defaults to a fresh factory over that same engine. Safe to
+    call repeatedly.
     """
-    engine = engine or get_engine()
-    session_factory = session_factory or get_session_factory()
+    session_factory = session_factory or create_session_factory(engine)
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)

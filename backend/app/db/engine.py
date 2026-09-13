@@ -1,8 +1,9 @@
 """Async SQLAlchemy engine and session factory for the local SQLite file.
 
-The application runs one engine for the lifetime of the process. Tests build their
-own with :func:`create_db_engine` against a temporary file and override the
-``get_db`` dependency, so nothing here depends on import-time global state.
+There is no module-level engine on purpose: the application builds one per app from
+the ``Settings`` it was handed (see ``create_app``/``lifespan`` in ``app.main``) and
+keeps it on ``app.state``, so an app constructed with a different ``db_path`` really
+does use that database. Tests build their own the same way.
 """
 
 from __future__ import annotations
@@ -18,8 +19,6 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
-
-from app.config import settings as default_settings
 
 # WAL lets the feed poller write while a request reads; NORMAL synchronous is the
 # usual companion for WAL; busy_timeout turns "database is locked" into a short
@@ -56,39 +55,4 @@ def create_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSessi
     return async_sessionmaker(engine, expire_on_commit=False)
 
 
-_engine: AsyncEngine | None = None
-_session_factory: async_sessionmaker[AsyncSession] | None = None
-
-
-def get_engine() -> AsyncEngine:
-    """The process-wide engine, built from the configured ``db_path`` on first use."""
-    global _engine
-    if _engine is None:
-        _engine = create_db_engine(default_settings.db_path)
-    return _engine
-
-
-def get_session_factory() -> async_sessionmaker[AsyncSession]:
-    """The process-wide session factory."""
-    global _session_factory
-    if _session_factory is None:
-        _session_factory = create_session_factory(get_engine())
-    return _session_factory
-
-
-async def dispose_engine() -> None:
-    """Close the process-wide engine; called from the application's shutdown hook."""
-    global _engine, _session_factory
-    if _engine is not None:
-        await _engine.dispose()
-    _engine = None
-    _session_factory = None
-
-
-__all__ = [
-    "create_db_engine",
-    "create_session_factory",
-    "dispose_engine",
-    "get_engine",
-    "get_session_factory",
-]
+__all__ = ["create_db_engine", "create_session_factory"]

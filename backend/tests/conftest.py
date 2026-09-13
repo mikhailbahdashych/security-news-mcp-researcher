@@ -7,6 +7,7 @@ from httpx2 import ASGITransport
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from app.api.deps import get_db
+from app.config import Settings
 from app.db.engine import create_db_engine, create_session_factory
 from app.db.init import init_db
 from app.main import create_app
@@ -47,13 +48,14 @@ async def db_session(db_engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
 
 
 @pytest.fixture
-def app(db_engine: AsyncEngine) -> FastAPI:
+def app(db_engine: AsyncEngine, tmp_path) -> FastAPI:
     """The application wired to the test database.
 
     ``ASGITransport`` does not run the lifespan, so the schema is created by the
-    ``db_engine`` fixture rather than by the app's startup hook.
+    ``db_engine`` fixture and ``get_db`` is overridden to use it — the app's own
+    settings name the same file so the two cannot drift apart.
     """
-    application = create_app()
+    application = create_app(Settings(db_path=tmp_path / "app.db", static_dir=tmp_path / "absent"))
     session_factory = create_session_factory(db_engine)
 
     async def override_get_db() -> AsyncIterator[AsyncSession]:

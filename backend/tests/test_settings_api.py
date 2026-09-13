@@ -154,3 +154,28 @@ async def test_test_key_error_never_contains_the_key(
     response = await client.post("/api/settings/test-key")
 
     assert RAW_KEY not in response.text
+
+
+async def test_anthropic_client_is_closed_when_the_request_ends(db_session) -> None:
+    """The client owns an httpx2 pool; leaking one per request would leak sockets."""
+    await settings_service.set_value(db_session, "anthropic_api_key", RAW_KEY)
+
+    dependency = get_anthropic_client(db_session)
+    client = await anext(dependency)
+
+    assert client is not None
+    assert not client.is_closed()
+
+    with pytest.raises(StopAsyncIteration):
+        await anext(dependency)
+
+    assert client.is_closed()
+
+
+async def test_anthropic_client_is_none_without_a_key(db_session) -> None:
+    dependency = get_anthropic_client(db_session)
+
+    assert await anext(dependency) is None
+
+    with pytest.raises(StopAsyncIteration):
+        await anext(dependency)

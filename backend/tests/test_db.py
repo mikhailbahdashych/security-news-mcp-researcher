@@ -5,15 +5,20 @@ WAL journal mode and the foreign-key pragmas are exercised the way they are in
 production.
 """
 
+import sqlite3
 from pathlib import Path
 
+import httpx2
 import pytest
+from httpx2 import ASGITransport
 from sqlalchemy import inspect, select, text
 from sqlalchemy.exc import IntegrityError
 
+from app.config import Settings
 from app.db.engine import create_db_engine, create_session_factory
 from app.db.init import init_db
 from app.db.models import Feed, FeedItem, Message, ResearchSession, Setting, utcnow
+from app.main import create_app
 from app.services import settings as settings_service
 
 EXPECTED_TABLES = {
@@ -154,3 +159,59 @@ async def test_feed_item_guid_is_unique_per_feed(db_session):
     db_session.add(item(feed.id))
     with pytest.raises(IntegrityError):
         await db_session.flush()
+
+
+async def test_feed_items_may_have_no_published_date(db_session):
+    """Feeds routinely omit dates; the item is still storable and still sorts."""
+    feed = Feed(url="https://example.test/feed.xml")
+    db_session.add(feed)
+    await db_session.flush()
+
+    dated = FeedItem(
+        feed_id=feed.id, guid="dated", title="Dated", published_at=utcnow(), fetched_at=utcnow()
+    )
+    undated = FeedItem(
+        feed_id=feed.id, guid="undated", title="Undated", published_at=None, fetched_at=utcnow()
+    )
+    db_session.add_all([dated, undated])
+    await db_session.commit()
+
+    ordered = (
+        (await db_session.execute(select(FeedItem.guid).order_by(FeedItem.published_at.desc())))
+        .scalars()
+        .all()
+    )
+    # SQLite sorts NULLs last under DESC, so undated items fall to the bottom
+    # rather than masquerading as the newest news.
+    assert ordered == ["dated", "undated"]
+
+
+async def test_create_app_uses_the_injected_db_path(tmp_path: Path):
+    """The settings handed to create_app decide which database the app opens."""
+    db_path = tmp_path / "injected" / "app.db"
+    application = create_app(Settings(db_path=db_path, static_dir=tmp_path / "absent"))
+
+    assert not db_path.exists()
+
+    # ASGITransport skips the lifespan, so run it explicitly.
+    async with application.router.lifespan_context(application):
+        assert db_path.exists()
+
+        async with httpx2.AsyncClient(
+            transport=ASGITransport(app=application), base_url="http://test"
+        ) as client:
+            assert (await client.get("/api/settings")).json()["model"] == "claude-opus-5"
+            assert (
+                await client.put("/api/settings", json={"model": "claude-sonnet-5"})
+            ).status_code == 200
+
+    # The write went to *that* file — get_db used the app's own session factory.
+    connection = sqlite3.connect(db_path)
+    try:
+        stored = connection.execute("SELECT value FROM settings WHERE key = 'model'").fetchone()
+    finally:
+        connection.close()
+
+    assert stored == ("claude-sonnet-5",)
+    # Shutdown released the engine.
+    assert application.state.session_factory is None

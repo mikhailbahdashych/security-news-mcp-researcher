@@ -8,26 +8,36 @@ from app import __version__
 from app.api import api_router
 from app.config import Settings
 from app.config import settings as default_settings
-from app.db.engine import dispose_engine
+from app.db.engine import create_db_engine, create_session_factory
 from app.db.init import init_db
 from app.static import mount_spa
 
 
 @asynccontextmanager
-async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Application startup/shutdown hooks.
 
-    Startup: create the schema and seed default settings (later tasks: start the
-    feed scheduler). Shutdown: dispose the database engine (later tasks: close MCP
-    sessions).
+    Startup: open the database named by *this app's* settings, create the schema and
+    seed the default settings, then publish the session factory on ``app.state`` for
+    ``get_db`` (later tasks: start the feed scheduler). Shutdown: dispose the engine
+    (later tasks: close MCP sessions).
 
     Note that Starlette only runs this for a real server; the test suite drives the
     app through ``ASGITransport``, which skips the lifespan, so tests initialise
-    their own database.
+    their own database and override ``get_db``.
     """
-    await init_db()
-    yield
-    await dispose_engine()
+    settings: Settings = app.state.settings
+    engine = create_db_engine(settings.db_path)
+    app.state.db_engine = engine
+    app.state.session_factory = create_session_factory(engine)
+
+    await init_db(engine, app.state.session_factory)
+    try:
+        yield
+    finally:
+        app.state.session_factory = None
+        app.state.db_engine = None
+        await engine.dispose()
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -37,6 +47,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         version=__version__,
         lifespan=lifespan,
     )
+    # The single source of truth for this app: the lifespan and every dependency
+    # read the database path, CORS origins and static dir from here.
+    app.state.settings = settings
+    app.state.db_engine = None
+    app.state.session_factory = None
 
     if settings.cors_origins:
         app.add_middleware(

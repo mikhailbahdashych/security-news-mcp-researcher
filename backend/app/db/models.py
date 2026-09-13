@@ -99,7 +99,10 @@ class FeedItem(Base):
     # Filled in lazily by the article extractor, hence nullable.
     content_text: Mapped[str | None] = mapped_column(Text)
     extracted_at: Mapped[datetime | None] = mapped_column(DateTime)
-    published_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    # Nullable on purpose: plenty of RSS/Atom entries carry no date, and inventing
+    # one would erase the difference between "published then" and "first seen then".
+    # SQLite sorts NULLs last under DESC, so the newest-first indexes still work.
+    published_at: Mapped[datetime | None] = mapped_column(DateTime)
     fetched_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="unread")
     created_at: Mapped[datetime] = _created_at()
