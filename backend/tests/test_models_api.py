@@ -2,7 +2,7 @@
 
 import httpx2
 import pytest
-from fake_anthropic import FakeAnthropicClient, api_error, model
+from fakes.anthropic import FakeAnthropicClient, api_error, model
 
 from app.api.deps import get_anthropic_client
 from app.services import anthropic_models
