@@ -10,6 +10,18 @@ from app.api.deps import get_db
 from app.db.engine import create_db_engine, create_session_factory
 from app.db.init import init_db
 from app.main import create_app
+from app.services import settings as settings_service
+
+
+@pytest.fixture(autouse=True)
+def isolated_api_key_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep an ambient ``ANTHROPIC_API_KEY`` out of the suite.
+
+    Without this, a developer who exports a real key would have the "no key
+    configured" tests quietly make live API calls. Tests that want the override
+    set it themselves.
+    """
+    monkeypatch.delenv(settings_service.API_KEY_ENV_VAR, raising=False)
 
 
 @pytest.fixture
