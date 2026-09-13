@@ -1,0 +1,178 @@
+"""The application's key/value settings store.
+
+Everything configurable lives in the ``settings`` table as TEXT, with the typed
+accessors below doing the parsing. Callers read through :func:`get_effective_api_key`
+rather than the raw key so that an ``ANTHROPIC_API_KEY`` environment variable can
+override the stored value without ever being written to the database.
+
+The raw API key must never reach a response body or a log line — use
+:func:`mask_key` for anything user-visible.
+"""
+
+from __future__ import annotations
+
+import os
+from collections.abc import Mapping
+
+from sqlalchemy import select
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.db.models import Setting, utcnow
+
+API_KEY_ENV_VAR = "ANTHROPIC_API_KEY"
+
+DEFAULT_NOTE_TEMPLATE = """For each news item, produce a section with these headings:
+## {Item title}
+**What happened** — …
+**Root cause** — …
+**Why it matters** — …
+**Lessons learned** — …
+**Recommended actions for teams** — …"""
+
+DEFAULT_SETTINGS: dict[str, str] = {
+    "anthropic_api_key": "",
+    "model": "claude-opus-5",
+    "effort": "high",
+    "thinking_display": "summarized",
+    "web_search_enabled": "true",
+    "web_search_max_uses": "8",
+    "web_fetch_enabled": "true",
+    "max_tool_turns": "12",
+    "note_template": DEFAULT_NOTE_TEMPLATE,
+    "system_prompt_extra": "",
+    "feed_timeout_s": "15",
+}
+
+_TRUE_VALUES = frozenset({"true", "1", "yes", "on"})
+_FALSE_VALUES = frozenset({"false", "0", "no", "off", ""})
+
+
+def mask_key(key: str | None) -> str:
+    """Render an API key for display: ``sk-ant-…a1b2``. Empty key -> empty string.
+
+    Only the last four characters are ever revealed, and only when the key is long
+    enough that those four characters are not most of it.
+    """
+    key = (key or "").strip()
+    if not key:
+        return ""
+    prefix = "sk-ant-" if key.startswith("sk-ant-") else ""
+    suffix = key[-4:] if len(key) - len(prefix) > 4 else ""
+    return f"{prefix}…{suffix}"
+
+
+async def get(session: AsyncSession, key: str, default: str | None = None) -> str | None:
+    """Read one setting, falling back to ``default`` when the row is absent."""
+    value = await session.scalar(select(Setting.value).where(Setting.key == key))
+    return default if value is None else value
+
+
+async def get_all(session: AsyncSession) -> dict[str, str]:
+    """Every stored setting as a plain dict."""
+    rows = (await session.execute(select(Setting.key, Setting.value))).all()
+    return {key: value or "" for key, value in rows}
+
+
+async def set_value(session: AsyncSession, key: str, value: str) -> None:
+    """Insert or update a single setting."""
+    await set_many(session, {key: value})
+
+
+async def set_many(session: AsyncSession, values: Mapping[str, str]) -> None:
+    """Insert or update several settings in one statement."""
+    if not values:
+        return
+
+    now = utcnow()
+    statement = sqlite_insert(Setting).values(
+        [
+            {"key": key, "value": value, "created_at": now, "updated_at": now}
+            for key, value in values.items()
+        ]
+    )
+    await session.execute(
+        statement.on_conflict_do_update(
+            index_elements=[Setting.key],
+            set_={"value": statement.excluded.value, "updated_at": now},
+        )
+    )
+    # Rows written by Core statements are invisible to objects already in the
+    # identity map; expiring keeps a long-lived session honest.
+    session.expire_all()
+
+
+async def seed_defaults(session: AsyncSession) -> None:
+    """Insert any default that is not already stored, leaving existing values alone."""
+    existing = set(await get_all(session))
+    missing = {key: value for key, value in DEFAULT_SETTINGS.items() if key not in existing}
+    await set_many(session, missing)
+
+
+async def get_str(session: AsyncSession, key: str) -> str:
+    """A setting as a string, falling back to its documented default."""
+    value = await get(session, key)
+    if value is None:
+        return DEFAULT_SETTINGS.get(key, "")
+    return value
+
+
+async def get_bool(session: AsyncSession, key: str) -> bool:
+    """A setting as a boolean; unparsable values fall back to the default."""
+    return _parse_bool(await get(session, key), key)
+
+
+async def get_int(session: AsyncSession, key: str) -> int:
+    """A setting as an integer; unparsable values fall back to the default."""
+    return _parse_int(await get(session, key), key)
+
+
+async def get_effective_api_key(session: AsyncSession) -> str:
+    """The API key actually used for Anthropic calls.
+
+    ``ANTHROPIC_API_KEY`` wins when set and non-empty; otherwise the stored key is
+    used. The environment value is never written back to the database.
+    """
+    from_env = (os.environ.get(API_KEY_ENV_VAR) or "").strip()
+    if from_env:
+        return from_env
+    return (await get(session, "anthropic_api_key") or "").strip()
+
+
+def _parse_bool(value: str | None, key: str) -> bool:
+    if value is not None:
+        lowered = value.strip().lower()
+        if lowered in _TRUE_VALUES:
+            return True
+        if lowered in _FALSE_VALUES:
+            return False
+    fallback = DEFAULT_SETTINGS.get(key, "false")
+    return fallback.strip().lower() in _TRUE_VALUES
+
+
+def _parse_int(value: str | None, key: str) -> int:
+    for candidate in (value, DEFAULT_SETTINGS.get(key)):
+        if candidate is None:
+            continue
+        try:
+            return int(candidate.strip())
+        except ValueError:
+            continue
+    return 0
+
+
+__all__ = [
+    "API_KEY_ENV_VAR",
+    "DEFAULT_NOTE_TEMPLATE",
+    "DEFAULT_SETTINGS",
+    "get",
+    "get_all",
+    "get_bool",
+    "get_effective_api_key",
+    "get_int",
+    "get_str",
+    "mask_key",
+    "seed_defaults",
+    "set_many",
+    "set_value",
+]

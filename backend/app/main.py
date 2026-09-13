@@ -8,6 +8,8 @@ from app import __version__
 from app.api import api_router
 from app.config import Settings
 from app.config import settings as default_settings
+from app.db.engine import dispose_engine
+from app.db.init import init_db
 from app.static import mount_spa
 
 
@@ -15,10 +17,17 @@ from app.static import mount_spa
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """Application startup/shutdown hooks.
 
-    Startup (later tasks): initialise the SQLite schema, start the feed scheduler.
-    Shutdown (later tasks): close MCP sessions and the database connection.
+    Startup: create the schema and seed default settings (later tasks: start the
+    feed scheduler). Shutdown: dispose the database engine (later tasks: close MCP
+    sessions).
+
+    Note that Starlette only runs this for a real server; the test suite drives the
+    app through ``ASGITransport``, which skips the lifespan, so tests initialise
+    their own database.
     """
+    await init_db()
     yield
+    await dispose_engine()
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
