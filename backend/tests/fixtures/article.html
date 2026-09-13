@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Critical RCE patched in ExampleOS — Example Security Blog</title>
+</head>
+<body>
+  <nav id="site-nav"><a href="/">Home</a> <a href="/about">About</a> <a href="/subscribe">Subscribe</a></nav>
+  <header><h1>Critical RCE patched in ExampleOS</h1><p class="byline">By A. Reporter, 2 March 2026</p></header>
+  <article>
+    <p>ExampleOS shipped an out-of-band update on Monday that fixes a remote code execution
+    flaw in its update daemon. The bug, tracked as CVE-2026-11111, carries a CVSS score of
+    9.8 and can be reached by any host on the same network segment as a vulnerable machine.</p>
+
+    <h2>What went wrong</h2>
+    <p>The update daemon parsed a length-prefixed manifest without validating the declared
+    length against the size of the buffer it had allocated. A manifest claiming a larger
+    payload than it carried caused the daemon to read past the end of the allocation and,
+    with careful shaping of the heap, to write attacker-controlled bytes over a function
+    pointer that was called later in the same request.</p>
+    <p>The daemon runs as root on every supported platform, so a successful exploit yields
+    full control of the host without any further privilege escalation.</p>
+
+    <h2>Who is affected</h2>
+    <p>Every release in the 7.x line before 7.4.9 is vulnerable, as is 8.0.0. The vendor says
+    it has no evidence of exploitation in the wild, but a proof of concept was published to a
+    public repository within hours of the advisory, and honeypot operators reported scanning
+    for the affected port the following morning.</p>
+
+    <h2>What to do</h2>
+    <p>Apply 7.4.9 or 8.0.1. Where patching has to wait, block inbound traffic to TCP 7331 at
+    the host firewall; the daemon offers no way to disable the network listener while keeping
+    automatic updates working. Administrators should also audit the daemon's logs for
+    manifests with implausible declared lengths, which is the clearest signal of an attempt.</p>
+  </article>
+  <footer><p>Copyright 2026 Example Security Blog. All rights reserved.</p></footer>
+  <script>window.analytics = { track: function () {} }</script>
+</body>
+</html>
