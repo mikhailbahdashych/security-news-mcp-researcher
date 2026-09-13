@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Sloppy XML Daily</title>
+    <link>https://sloppy.test/</link>
+    <description>Raw & unescaped ampersands, but the entries survive.</description>
+    <item>
+      <title>Attack chain uses PowerShell & WMI</title>
+      <link>https://sloppy.test/posts/chain</link>
+      <guid>https://sloppy.test/posts/chain</guid>
+      <pubDate>Mon, 02 Mar 2026 07:00:00 +0000</pubDate>
+      <description>Still parseable despite the bad XML.</description>
+    </item>
+  </channel>
