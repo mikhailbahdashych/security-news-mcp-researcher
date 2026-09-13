@@ -27,6 +27,35 @@ Then open <http://localhost:5173>.
 Prerequisites: [uv](https://docs.astral.sh/uv/) and Node 22+.
 Copy `.env.example` to `.env` if you want to override defaults.
 
+## The inbox
+
+Feeds are pulled on demand — press **Refresh feeds** — and each entry is deduplicated
+on its feed's own guid (falling back to the entry link, then to a hash of title and
+link), so refreshing twice adds nothing. Headlines are triaged star / dismiss, and
+**Extract article** fetches the page behind an item and stores its text as markdown;
+a paywalled or JavaScript-only page is reported rather than stored, and the feed
+summary stays as the fallback. **Seed defaults** adds a starter set of security
+sources (The Hacker News, BleepingComputer, Krebs on Security, CISA advisories, SANS
+ISC, Google Project Zero).
+
+## Outbound fetch safety
+
+Everything the server fetches is influenced by someone else: a feed is third-party
+content, article URLs come out of that content, and later the research agent can
+propose URLs of its own. So every outbound request goes through
+`backend/app/services/url_guard.py`, which resolves the host and refuses anything
+that is not a public address — loopback, private ranges (10/8, 172.16/12,
+192.168/16), link-local (169.254/16, including the cloud metadata endpoint),
+carrier-grade NAT, IPv6 unique-local, multicast and reserved space — and re-checks
+**every redirect hop**, because a redirect is the usual way past a check that only
+looks at the URL you started with. Response bodies are capped, and non-http(s)
+schemes are refused outright.
+
+One exemption: the **first hop of a feed URL you typed yourself** is not checked.
+Pointing this app at a FreshRSS or Miniflux instance on your own LAN is a legitimate
+setup, and you are the one who configured it. Everything that URL redirects to is
+still checked, and article URLs — which nobody typed — are checked from the first hop.
+
 ## Tests and linting
 
 ```sh

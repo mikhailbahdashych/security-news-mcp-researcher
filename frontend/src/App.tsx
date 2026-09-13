@@ -1,9 +1,9 @@
 import { NavLink, Route, Routes } from 'react-router-dom'
 
 import BackendStatus from './components/BackendStatus'
+import ChatPage from './pages/ChatPage'
 import InboxPage from './pages/Inbox'
 import NotesPage from './pages/Notes'
-import ResearchPage from './pages/Research'
 import SettingsPage from './pages/Settings'
 
 const NAV = [
@@ -49,7 +49,8 @@ export default function App() {
       <main className="flex-1 overflow-y-auto">
         <Routes>
           <Route path="/" element={<InboxPage />} />
-          <Route path="/chat" element={<ResearchPage />} />
+          <Route path="/chat" element={<ChatPage />} />
+          <Route path="/chat/:id" element={<ChatPage />} />
           <Route path="/notes" element={<NotesPage />} />
           <Route path="/settings" element={<SettingsPage />} />
         </Routes>

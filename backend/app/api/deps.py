@@ -1,5 +1,115 @@
-"""Shared FastAPI dependencies.
+"""Shared FastAPI dependencies."""
 
-Placeholder for now — later tasks add the database session, the settings store and
-the MCP client dependencies here.
-"""
+from __future__ import annotations
+
+from collections.abc import AsyncIterator, Callable
+from typing import Annotated
+
+from anthropic import AsyncAnthropic
+from fastapi import Depends, Request
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from app.services import settings as settings_service
+
+
+async def get_db(request: Request) -> AsyncIterator[AsyncSession]:
+    """One database session per request, from the session factory this app owns.
+
+    The factory is put on ``app.state`` by the lifespan, so an app built with
+    ``create_app(Settings(db_path=...))`` really does talk to that database.
+
+    Nothing is committed automatically: routes commit their own writes, so a route
+    that raises leaves the database untouched.
+    """
+    session_factory = getattr(request.app.state, "session_factory", None)
+    if session_factory is None:
+        raise RuntimeError(
+            "The database is not initialised. The application lifespan did not run — "
+            "tests that drive the app through ASGITransport must override get_db."
+        )
+    async with session_factory() as session:
+        yield session
+
+
+DbSession = Annotated[AsyncSession, Depends(get_db)]
+
+
+def get_session_factory(request: Request) -> async_sessionmaker[AsyncSession]:
+    """The app's session factory, for services that open their own transactions.
+
+    A request-scoped session is the wrong tool when a service fans out over eight
+    concurrent feed fetches: each one should commit as soon as it is done rather
+    than hold a single SQLite write transaction open for the whole batch. Such a
+    service is handed the factory instead, through this dependency so that tests can
+    override it exactly as they override ``get_db``.
+    """
+    session_factory = getattr(request.app.state, "session_factory", None)
+    if session_factory is None:
+        raise RuntimeError(
+            "The database is not initialised. The application lifespan did not run — "
+            "tests that drive the app through ASGITransport must override "
+            "get_session_factory."
+        )
+    return session_factory
+
+
+SessionFactory = Annotated[async_sessionmaker[AsyncSession], Depends(get_session_factory)]
+
+
+async def get_anthropic_client(session: DbSession) -> AsyncIterator[AsyncAnthropic | None]:
+    """A client built from the effective API key, or ``None`` when none is configured.
+
+    The client owns an httpx2 connection pool, so it is closed when the request ends;
+    a client per request rather than a shared one keeps that lifetime unambiguous,
+    which matters once a streaming chat turn holds a connection open for minutes and
+    the key can change underneath it.
+
+    Returning ``None`` rather than raising keeps "no key yet" an ordinary state for
+    the settings page. Tests override this dependency with a stub client.
+    """
+    api_key = await settings_service.get_effective_api_key(session)
+    if not api_key:
+        yield None
+        return
+
+    client = AsyncAnthropic(api_key=api_key)
+    try:
+        yield client
+    finally:
+        await client.close()
+
+
+AnthropicClient = Annotated[AsyncAnthropic | None, Depends(get_anthropic_client)]
+
+
+def build_anthropic_client(api_key: str) -> AsyncAnthropic:
+    return AsyncAnthropic(api_key=api_key)
+
+
+def get_chat_client_factory() -> Callable[[str], AsyncAnthropic]:
+    """How a *streaming* route gets its client.
+
+    ``get_anthropic_client`` is the wrong tool for a streamed turn: FastAPI closes
+    a yield-dependency when the route function returns, which for a streaming
+    response is *before* the body has been sent — the pool would go away
+    underneath the open stream. A streaming route therefore builds its own client
+    from this factory and closes it itself when the stream finalises. Tests
+    override this dependency to hand back a scripted fake.
+    """
+    return build_anthropic_client
+
+
+ChatClientFactory = Annotated[Callable[[str], AsyncAnthropic], Depends(get_chat_client_factory)]
+
+
+__all__ = [
+    "AnthropicClient",
+    "ChatClientFactory",
+    "DbSession",
+    "SessionFactory",
+    "build_anthropic_client",
+    "get_anthropic_client",
+    "get_chat_client_factory",
+    "get_db",
+    "get_session_factory",
+]
