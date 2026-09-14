@@ -322,6 +322,36 @@ async def update_tool_call_result(
         await session.commit()
 
 
+async def record_server_tool_result(
+    factory: SessionFactory,
+    session_id: int,
+    tool_use_id: str,
+    *,
+    result_json: Any,
+    is_error: bool,
+) -> bool:
+    """Attach a server tool's result to its row, wherever that row lives.
+
+    A server-tool result does not always arrive in the same assistant message as
+    its ``server_tool_use`` — code execution in particular often reports back in
+    a later turn — so this looks the row up by ``tool_use_id`` across the whole
+    session rather than within one message. Returns whether a row was updated.
+    """
+    async with factory() as session:
+        row = await session.scalar(
+            select(ToolCall)
+            .join(Message, Message.id == ToolCall.message_id)
+            .where(Message.session_id == session_id, ToolCall.tool_use_id == tool_use_id)
+            .order_by(ToolCall.id.asc())
+        )
+        if row is None:
+            return False
+        row.result_json = result_json
+        row.is_error = is_error
+        await session.commit()
+        return True
+
+
 async def bump_session_usage(
     factory: SessionFactory, session_id: int, input_tokens: int, output_tokens: int
 ) -> None:
@@ -396,6 +426,17 @@ class Persistence:
             duration_ms=duration_ms,
         )
 
+    async def server_tool_result(
+        self, tool_use_id: str, *, result_json: Any, is_error: bool
+    ) -> bool:
+        return await record_server_tool_result(
+            self.factory,
+            self.session_id,
+            tool_use_id,
+            result_json=result_json,
+            is_error=is_error,
+        )
+
     async def usage(self, input_tokens: int, output_tokens: int) -> None:
         await bump_session_usage(self.factory, self.session_id, input_tokens, output_tokens)
 
@@ -435,6 +476,11 @@ class NullPersistence(Persistence):
     ) -> None:
         return None
 
+    async def server_tool_result(
+        self, tool_use_id: str, *, result_json: Any, is_error: bool
+    ) -> bool:
+        return False
+
     async def usage(self, input_tokens: int, output_tokens: int) -> None:
         return None
 
@@ -453,6 +499,7 @@ __all__ = [
     "bump_session_usage",
     "flatten_text",
     "load_history",
+    "record_server_tool_result",
     "record_tool_calls",
     "repair_unanswered_tool_use",
     "update_tool_call_result",

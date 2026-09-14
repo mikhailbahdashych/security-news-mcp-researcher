@@ -59,6 +59,17 @@ export default function ChatPage() {
     enabled: sessionId !== null,
   })
 
+  // Leaving the conversation the live state belongs to drops it — this is what
+  // catches browser back/forward, which no click handler sees. It cannot fire
+  // mid-turn: `send` stamps the new session id onto the state before navigating,
+  // so the two only diverge once the user has genuinely moved on.
+  const staleSession = live.sessionId !== null && live.sessionId !== sessionId
+  useEffect(() => {
+    if (staleSession) {
+      dispatch({ kind: 'reset' })
+    }
+  }, [staleSession])
+
   // Clear the handover off the history entry so a reload does not re-attach.
   useEffect(() => {
     if ((location.state as ChatNavigationState | null)?.attachedItems) {
@@ -80,6 +91,9 @@ export default function ChatPage() {
     onSuccess: (_data, id) => {
       queryClient.invalidateQueries({ queryKey: sessionsQueryKey })
       if (id === sessionId) {
+        // Without this the deleted session's terminal error would follow the
+        // user onto the blank /chat view.
+        dispatch({ kind: 'reset' })
         navigate('/chat')
       }
     },
@@ -97,7 +111,7 @@ export default function ChatPage() {
 
       const itemIds = attached.map((item) => item.id)
       setAttached([])
-      dispatch({ kind: 'start', prompt: text })
+      dispatch({ kind: 'start', prompt: text, sessionId: id })
 
       const controller = new AbortController()
       abort.current = controller

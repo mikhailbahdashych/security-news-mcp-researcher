@@ -103,12 +103,16 @@ def model(id_: str, display_name: str, year: int) -> FakeModelInfo:
 from typing import Any  # noqa: E402
 
 from anthropic.types.beta import (  # noqa: E402
+    BetaBashCodeExecutionResultBlock,
+    BetaBashCodeExecutionToolResultBlock,
+    BetaContainer,
     BetaInputJSONDelta,
     BetaMessage,
     BetaRawContentBlockDeltaEvent,
     BetaRawContentBlockStartEvent,
     BetaRawContentBlockStopEvent,
     BetaRawMessageStopEvent,
+    BetaServerToolUseBlock,
     BetaTextBlock,
     BetaTextDelta,
     BetaThinkingBlock,
@@ -118,7 +122,12 @@ from anthropic.types.beta import (  # noqa: E402
 )
 
 
-def _message(content: list[Any], stop_reason: str, stop_details: Any = None) -> BetaMessage:
+def _message(
+    content: list[Any],
+    stop_reason: str,
+    stop_details: Any = None,
+    container_id: str | None = None,
+) -> BetaMessage:
     return BetaMessage(
         id="msg_test",
         content=content,
@@ -129,6 +138,17 @@ def _message(content: list[Any], stop_reason: str, stop_details: Any = None) -> 
         stop_sequence=None,
         type="message",
         usage=BetaUsage(input_tokens=11, output_tokens=7),
+        # web_search/web_fetch `_20260209` run code execution under the hood and
+        # allocate one of these; continuation requests have to name it.
+        container=(
+            None
+            if container_id is None
+            else BetaContainer(
+                id=container_id,
+                expires_at=datetime(2099, 1, 1, tzinfo=UTC),
+                skills=[],
+            )
+        ),
     )
 
 
@@ -169,11 +189,19 @@ def _chunks(text: str, size: int = 8) -> list[str]:
     return [text[i : i + size] for i in range(0, len(text), size)] or [""]
 
 
-def turn_text(text: str, stop_reason: str = "end_turn", *, delay_s: float = 0.0) -> ScriptedTurn:
+def turn_text(
+    text: str,
+    stop_reason: str = "end_turn",
+    *,
+    delay_s: float = 0.0,
+    container_id: str | None = None,
+) -> ScriptedTurn:
     """A plain text answer."""
     return ScriptedTurn(
         events=[*_text_events(text), BetaRawMessageStopEvent(type="message_stop")],
-        message=_message([BetaTextBlock(type="text", text=text)], stop_reason),
+        message=_message(
+            [BetaTextBlock(type="text", text=text)], stop_reason, container_id=container_id
+        ),
         delay_s=delay_s,
     )
 
@@ -185,6 +213,7 @@ def turn_tool_use(
     text: str | None = None,
     delay_s: float = 0.0,
     teardown_s: float = 0.0,
+    container_id: str | None = None,
 ) -> ScriptedTurn:
     """One or more ``tool_use`` blocks, optionally preceded by some text."""
     events: list[Any] = []
@@ -221,7 +250,7 @@ def turn_tool_use(
     events.append(BetaRawMessageStopEvent(type="message_stop"))
     return ScriptedTurn(
         events=events,
-        message=_message(content, stop_reason),
+        message=_message(content, stop_reason, container_id=container_id),
         delay_s=delay_s,
         teardown_s=teardown_s,
     )
@@ -373,3 +402,69 @@ class ScriptedAnthropic:
 
     async def close(self) -> None:
         return None
+
+
+def turn_code_execution(
+    *,
+    tool_use_id: str = "srvtoolu_0",
+    command: str = "date -u",
+    stdout: str = "Mon Sep 14 08:40:53 UTC 2026\n",
+    return_code: int = 0,
+    stop_reason: str = "end_turn",
+    container_id: str | None = "cont_1",
+    extra_content: list[Any] | None = None,
+) -> ScriptedTurn:
+    """A server-side code-execution call and its result, in one turn.
+
+    This is what a `web_search_20260209` turn actually looks like: the dynamic
+    filtering variant runs code execution under the hood, so blocks the app never
+    declared a tool for show up in `content`.
+    """
+    use = BetaServerToolUseBlock(
+        type="server_tool_use",
+        id=tool_use_id,
+        name="bash_code_execution",
+        input={"command": command},
+    )
+    result = BetaBashCodeExecutionToolResultBlock(
+        type="bash_code_execution_tool_result",
+        tool_use_id=tool_use_id,
+        content=BetaBashCodeExecutionResultBlock(
+            type="bash_code_execution_result",
+            content=[],
+            return_code=return_code,
+            stderr="",
+            stdout=stdout,
+        ),
+    )
+    content: list[Any] = [use, result, *(extra_content or [])]
+    events: list[Any] = [
+        BetaRawContentBlockStartEvent(type="content_block_start", index=0, content_block=use),
+        BetaRawContentBlockStopEvent(type="content_block_stop", index=0),
+        BetaRawContentBlockStartEvent(type="content_block_start", index=1, content_block=result),
+        BetaRawContentBlockStopEvent(type="content_block_stop", index=1),
+        BetaRawMessageStopEvent(type="message_stop"),
+    ]
+    return ScriptedTurn(
+        events=events,
+        message=_message(content, stop_reason, container_id=container_id),
+    )
+
+
+def turn_text_with_usage(
+    text: str,
+    *,
+    input_tokens: int = 11,
+    output_tokens: int = 7,
+    cache_read: int = 0,
+    cache_write: int = 0,
+) -> ScriptedTurn:
+    """A text turn whose usage counters are set explicitly."""
+    turn = turn_text(text)
+    turn.message.usage = BetaUsage(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_read_input_tokens=cache_read,
+        cache_creation_input_tokens=cache_write,
+    )
+    return turn

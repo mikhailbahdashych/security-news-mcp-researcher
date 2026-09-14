@@ -60,20 +60,45 @@ PREVIEW_CHARS = 600
 #: mid-output fallback boundary.
 _INTERNAL_BLOCK_TYPES = frozenset({"thinking", "redacted_thinking", "tool_use"})
 
-#: Block types we recognise as safe to echo (anything else before a fallback
-#: boundary is treated as model-internal and dropped).
-_KNOWN_BLOCK_TYPES = frozenset(
+#: Every result block a server tool can produce. The web_search/web_fetch
+#: `_20260209` variants run code execution under the hood, so a turn that
+#: searches the web also emits the code-execution result types — they are server
+#: tools we never declared, and dropping them orphans their server_tool_use.
+_SERVER_RESULT_TYPES = frozenset(
     {
-        "text",
-        "thinking",
-        "redacted_thinking",
-        "tool_use",
-        "server_tool_use",
         "web_search_tool_result",
         "web_fetch_tool_result",
-        "fallback",
+        "code_execution_tool_result",
+        "bash_code_execution_tool_result",
+        "text_editor_code_execution_tool_result",
     }
 )
+
+#: Block types we recognise as safe to echo (anything else before a fallback
+#: boundary is treated as model-internal and dropped).
+_KNOWN_BLOCK_TYPES = (
+    frozenset(
+        {
+            "text",
+            "thinking",
+            "redacted_thinking",
+            "tool_use",
+            "server_tool_use",
+            "fallback",
+        }
+    )
+    | _SERVER_RESULT_TYPES
+)
+
+#: Result block type -> the tool name to show when the matching server_tool_use
+#: block arrived in an earlier assistant message and is not in hand.
+_SERVER_RESULT_NAMES = {
+    "web_search_tool_result": "web_search",
+    "web_fetch_tool_result": "web_fetch",
+    "code_execution_tool_result": "code_execution",
+    "bash_code_execution_tool_result": "bash_code_execution",
+    "text_editor_code_execution_tool_result": "text_editor_code_execution",
+}
 
 
 def _block_type(block: Any) -> str | None:
@@ -129,9 +154,7 @@ def sanitize_for_replay(content: Any) -> list[Any]:
         return list(content)
 
     paired_server_tool_ids = {
-        _tool_use_id(block)
-        for block in content
-        if (_block_type(block) or "").endswith("_tool_result")
+        _tool_use_id(block) for block in content if _block_type(block) in _SERVER_RESULT_TYPES
     }
 
     kept: list[Any] = []
@@ -169,6 +192,8 @@ def _server_tool_result_payload(block: Any) -> tuple[bool, Any]:
 
     Server-tool errors do not raise: they come back HTTP 200 with an *object* in
     ``content`` where a *list* would otherwise be. Branch on that before indexing.
+    A code-execution result is an object too, but a successful one — so the
+    error test is the ``error_code`` field, not the container type.
     """
     dumped = _to_dict(block)
     content = dumped.get("content") if isinstance(dumped, dict) else None
@@ -181,8 +206,19 @@ def _server_tool_result_payload(block: Any) -> tuple[bool, Any]:
         return False, results
 
     if isinstance(content, dict):
-        if content.get("type") == "web_fetch_result":
+        kind = content.get("type") or ""
+        if kind == "web_fetch_result":
             return False, {"url": content.get("url"), "retrieved_at": content.get("retrieved_at")}
+        if kind.endswith("code_execution_result"):
+            return_code = content.get("return_code")
+            return bool(return_code), {
+                "stdout": content.get("stdout"),
+                "stderr": content.get("stderr"),
+                "return_code": return_code,
+            }
+        if kind.startswith("text_editor_code_execution"):
+            # These carry file contents; a compact shape is all the UI wants.
+            return False, {"type": kind, "is_file_update": content.get("is_file_update")}
         return True, content
 
     return False, content
@@ -198,6 +234,9 @@ async def _stream_turn(
     Execution reads the parsed ``input`` dict off ``get_final_message()``.
     """
     open_tool_blocks: dict[int, str] = {}
+    #: server_tool_use id -> name, so a result block can be labelled with the
+    #: tool that actually produced it rather than a guess from its own type.
+    server_tool_names: dict[str, str] = {}
 
     async for event in stream:
         kind = getattr(event, "type", None)
@@ -212,16 +251,22 @@ async def _stream_turn(
                 yield ev.ToolUseStart(tool_use_id=block.id, name=block.name, source=source)
             elif block_type == "server_tool_use":
                 raw_input = getattr(block, "input", None)
+                server_tool_names[block.id] = block.name
                 yield ev.ServerToolUse(
                     tool_use_id=block.id,
                     name=block.name,
                     input=raw_input if isinstance(raw_input, dict) else {},
                 )
-            elif block_type in ("web_search_tool_result", "web_fetch_tool_result"):
+            elif block_type in _SERVER_RESULT_TYPES:
                 is_error, payload = _server_tool_result_payload(block)
+                tool_use_id = _tool_use_id(block) or ""
                 yield ev.ServerToolResult(
-                    tool_use_id=_tool_use_id(block) or "",
-                    name="web_search" if block_type.startswith("web_search") else "web_fetch",
+                    tool_use_id=tool_use_id,
+                    # The matching use may have arrived in an earlier assistant
+                    # message, so fall back to the result type's own name.
+                    name=server_tool_names.get(
+                        tool_use_id, _SERVER_RESULT_NAMES.get(block_type, block_type)
+                    ),
                     is_error=is_error,
                     results=payload,
                 )
@@ -291,28 +336,37 @@ async def run(
         else NullPersistence()
     )
 
-    tools = await registry.tools(subset=tool_subset)
-    tool_definitions = [tool.definition for tool in tools]
-    by_name = {tool.name: tool for tool in tools}
-    system_prompt = build_system_prompt(override=system_override, extra=system_extra)
-
-    messages = await store.load_history()
-    if messages and messages[-1]["role"] == "user":
-        # load_history's repair can leave a synthesised tool_result message at the
-        # end; merging keeps user/assistant strictly alternating rather than
-        # relying on the API to coalesce two user turns.
-        messages[-1]["content"] = list(messages[-1]["content"]) + list(user_content)
-    else:
-        messages.append({"role": "user", "content": user_content})
-    # What is *persisted* is only ever the user's own content — the repair blocks
-    # belong to the interrupted turn, not to this one.
-    await store.user_message(user_content)
-
     turn = 0
     pause_restarts = 0
     terminal: ev.Error | None = None
+    #: Turn-scoped. web_search/web_fetch `_20260209` run code execution under the
+    #: hood, which allocates a container; every continuation request of the same
+    #: turn has to name it or the API rejects the pending tool uses with a 400.
+    #: It is deliberately not carried across turns — the server owns its lifetime.
+    container_id: str | None = None
 
+    # Everything from here down is inside the safety net, including the setup:
+    # listing tools, loading history (which runs the replay repair) and the first
+    # commit can all fail, and an exception escaping the generator would leave
+    # the consumer on a stream with no `error` and no `done`.
     try:
+        tools = await registry.tools(subset=tool_subset)
+        tool_definitions = [tool.definition for tool in tools]
+        by_name = {tool.name: tool for tool in tools}
+        system_prompt = build_system_prompt(override=system_override, extra=system_extra)
+
+        messages = await store.load_history()
+        if messages and messages[-1]["role"] == "user":
+            # load_history's repair can leave a synthesised tool_result message at
+            # the end; merging keeps user/assistant strictly alternating rather
+            # than relying on the API to coalesce two user turns.
+            messages[-1]["content"] = list(messages[-1]["content"]) + list(user_content)
+        else:
+            messages.append({"role": "user", "content": user_content})
+        # What is *persisted* is only ever the user's own content — the repair
+        # blocks belong to the interrupted turn, not to this one.
+        await store.user_message(user_content)
+
         while True:
             yield ev.TurnStart(turn=turn)
 
@@ -323,6 +377,11 @@ async def run(
                 "fallbacks": FALLBACKS,
                 "thinking": {"type": "adaptive", "display": thinking_display},
                 "output_config": {"effort": effort},
+                # Auto-caches the last cacheable block, so the tools array, the
+                # system prompt and the transcript so far are a cache read on the
+                # next request instead of full-price input. The whole prefix is
+                # kept byte-stable for exactly this reason.
+                "cache_control": {"type": "ephemeral"},
                 "system": system_prompt,
                 # A snapshot: the loop keeps appending to `messages`, and handing
                 # the live list to the SDK would let a later turn mutate a request
@@ -331,23 +390,56 @@ async def run(
             }
             if tool_definitions:
                 request["tools"] = tool_definitions
+            if container_id is not None:
+                request["container"] = container_id
 
-            try:
-                async with client.beta.messages.stream(**request) as stream:
-                    async for event in _stream_turn(stream, by_name):
-                        yield event
-                    final = await stream.get_final_message()
-            except anthropic.RateLimitError as exc:
-                terminal = ev.Error(error_type="rate_limit", message=str(exc))
+            final = None
+            # At most two attempts, and only ever a second one to drop a container
+            # id the server has stopped accepting. A container rejection is a 400
+            # raised before any content streams, so the retry cannot duplicate
+            # events the consumer has already seen.
+            for attempt in range(2):
+                sent_container = request.get("container")
+                try:
+                    async with client.beta.messages.stream(**request) as stream:
+                        async for event in _stream_turn(stream, by_name):
+                            yield event
+                        final = await stream.get_final_message()
+                    break
+                except anthropic.RateLimitError as exc:
+                    terminal = ev.Error(error_type="rate_limit", message=str(exc))
+                    break
+                except anthropic.APIStatusError as exc:
+                    if attempt == 0 and sent_container and _is_container_rejection(exc):
+                        logger.warning(
+                            "Container %s was rejected; retrying the request without it",
+                            sent_container,
+                        )
+                        request.pop("container", None)
+                        container_id = None
+                        continue
+                    terminal = ev.Error(
+                        error_type="api_error", message=str(exc), status=exc.status_code
+                    )
+                    break
+                except anthropic.APIConnectionError as exc:
+                    terminal = ev.Error(error_type="connection", message=str(exc))
+                    break
+
+            if terminal is not None:
                 break
-            except anthropic.APIStatusError as exc:
+            if final is None:
                 terminal = ev.Error(
-                    error_type="api_error", message=str(exc), status=exc.status_code
+                    error_type="api_error", message="The model returned no message."
                 )
                 break
-            except anthropic.APIConnectionError as exc:
-                terminal = ev.Error(error_type="connection", message=str(exc))
-                break
+
+            # The container belongs to this turn: every continuation request has
+            # to name it, or the API rejects the pending tool uses with
+            # "container_id is required when there are pending tool uses".
+            container = getattr(final, "container", None)
+            if container is not None and getattr(container, "id", None):
+                container_id = container.id
 
             stop_reason = getattr(final, "stop_reason", None)
             usage = _usage_dict(getattr(final, "usage", None))
@@ -364,6 +456,8 @@ async def run(
             turn_meta: dict[str, Any] = dict(usage)
             if details is not None:
                 turn_meta["stop_details"] = _to_dict(details)
+            if container_id is not None:
+                turn_meta["container_id"] = container_id
 
             assistant_message_id = await store.assistant_message(
                 content_dicts, stop_reason, turn_meta or None
@@ -398,7 +492,28 @@ async def run(
                 for block in server_tool_blocks
             ]
             await store.tool_calls(assistant_message_id, pending_records)
-            await store.usage(usage.get("input_tokens", 0), usage.get("output_tokens", 0))
+            # A server tool's result often lands in a *later* assistant message
+            # than its server_tool_use — code execution especially — so fill the
+            # row by tool_use_id across the session rather than by message.
+            for block in getattr(final, "content", None) or []:
+                if _block_type(block) not in _SERVER_RESULT_TYPES:
+                    continue
+                result_is_error, _payload = _server_tool_result_payload(block)
+                await store.server_tool_result(
+                    _tool_use_id(block) or "",
+                    result_json=_to_dict(block),
+                    is_error=result_is_error,
+                )
+            # Count the cached tokens too. With cache_control on, `input_tokens`
+            # is only the *uncached* remainder — on a long cached session it
+            # reads as single digits — so the session totals would understate
+            # the turn by orders of magnitude if they used it alone.
+            await store.usage(
+                usage.get("input_tokens", 0)
+                + usage.get("cache_read_input_tokens", 0)
+                + usage.get("cache_creation_input_tokens", 0),
+                usage.get("output_tokens", 0),
+            )
 
             yield ev.TurnEnd(turn=turn, stop_reason=stop_reason, usage=usage)
 
@@ -535,6 +650,15 @@ async def run(
     if terminal is not None:
         yield terminal
     yield ev.Done(session_id=session_id, message_ids=list(store.message_ids))
+
+
+def _is_container_rejection(exc: anthropic.APIStatusError) -> bool:
+    """Is this 400 the API refusing the container id we sent?
+
+    The id is server-owned and can expire between turns, so one retry without it
+    is far cheaper than losing the turn's work.
+    """
+    return exc.status_code == 400 and "container" in str(exc).lower()
 
 
 async def _persist_interrupted_tool_results(

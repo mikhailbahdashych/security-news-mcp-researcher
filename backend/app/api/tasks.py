@@ -21,6 +21,11 @@ logger = logging.getLogger(__name__)
 _tasks: dict[str, asyncio.Task] = {}
 _lock = asyncio.Lock()
 
+#: How long :func:`cancel_and_wait` waits for a task to actually stop. A task can
+#: refuse to die — a shielded write, a handler that swallows CancelledError — and
+#: an unbounded wait would hang the DELETE request behind it forever.
+CANCEL_WAIT_S = 10.0
+
 
 def session_key(session_id: int) -> str:
     return f"session:{session_id}"
@@ -65,10 +70,21 @@ async def cancel_and_wait(key: str) -> bool:
     if task is None or task.done():
         return False
     task.cancel()
-    # gather(..., return_exceptions=True) so the CancelledError we just caused
-    # does not propagate into the caller's own task.
-    await asyncio.gather(task, return_exceptions=True)
-    logger.info("Cancelled and awaited in-flight task %s", key)
+    # asyncio.wait never re-raises the task's exception and never cancels the
+    # caller, so a task that dies of anything (including the CancelledError we
+    # just caused) is simply reported as done.
+    done, _pending = await asyncio.wait({task}, timeout=CANCEL_WAIT_S)
+    if not done:
+        # Proceed anyway: the caller's work matters more than a wedged task, and
+        # anything it still manages to write now fails inside run()'s safety net
+        # rather than escaping.
+        logger.warning(
+            "Task %s did not stop within %.0fs of being cancelled; continuing without it",
+            key,
+            CANCEL_WAIT_S,
+        )
+    else:
+        logger.info("Cancelled and awaited in-flight task %s", key)
     return True
 
 
@@ -84,6 +100,7 @@ async def clear() -> None:
 
 
 __all__ = [
+    "CANCEL_WAIT_S",
     "cancel",
     "cancel_and_wait",
     "clear",

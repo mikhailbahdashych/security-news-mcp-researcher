@@ -383,3 +383,80 @@ async def test_delete_during_a_running_turn_cancels_and_awaits_it_first(
     async with session_factory() as session:
         assert await session.scalar(select(func.count()).select_from(Message)) == 0
         assert await session.scalar(select(func.count()).select_from(ResearchSession)) == 0
+
+
+async def test_delete_does_not_hang_on_a_task_that_ignores_cancellation(monkeypatch):
+    """Finding 7: `cancel_and_wait` must be bounded.
+
+    A task can refuse to die — a shielded write, a handler that swallows
+    CancelledError — and an unbounded await would park the DELETE behind it
+    forever. The wait is capped; the delete goes ahead regardless.
+    """
+    monkeypatch.setattr(task_registry, "CANCEL_WAIT_S", 0.05)
+    await task_registry.clear()
+
+    started = asyncio.Event()
+    refused = asyncio.Event()
+
+    async def ignores_cancellation() -> None:
+        started.set()
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            refused.set()
+            # Deliberately does not re-raise, and keeps working.
+            await asyncio.sleep(30)
+
+    task = asyncio.create_task(ignores_cancellation())
+    await started.wait()
+    await task_registry.register("session:99", task)
+
+    began = asyncio.get_running_loop().time()
+    cancelled = await task_registry.cancel_and_wait("session:99")
+    elapsed = asyncio.get_running_loop().time() - began
+
+    assert cancelled is True
+    assert refused.is_set() is True
+    assert task.done() is False  # it really did ignore us
+    assert elapsed < 1.0  # ...and we did not wait for it
+
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    await task_registry.clear()
+
+
+async def test_delete_still_returns_204_when_the_turn_will_not_stop(
+    app, with_key, session_factory, monkeypatch
+):
+    monkeypatch.setattr(task_registry, "CANCEL_WAIT_S", 0.05)
+    scripted = ScriptedAnthropic(
+        [
+            turn_tool_use(
+                [("search_feed_items", {"q": "x"})],
+                text="looking",
+                delay_s=0.02,
+                # Far longer than the capped wait: the delete must not block on it.
+                teardown_s=0.8,
+            ),
+            turn_text("done"),
+        ]
+    )
+    app.dependency_overrides[get_chat_client_factory] = lambda: lambda _key: scripted
+
+    async with httpx2.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as http:
+        session_id = await create_session(http)
+        stream = asyncio.create_task(
+            http.post(f"/api/sessions/{session_id}/messages", json={"content": "go"})
+        )
+        await asyncio.sleep(0.08)
+
+        began = asyncio.get_running_loop().time()
+        deleted = await http.delete(f"/api/sessions/{session_id}")
+        elapsed = asyncio.get_running_loop().time() - began
+
+        assert deleted.status_code == 204
+        assert elapsed < 1.0
+        await stream
+
+    async with session_factory() as session:
+        assert await session.scalar(select(func.count()).select_from(ResearchSession)) == 0
