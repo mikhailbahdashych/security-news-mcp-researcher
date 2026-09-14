@@ -468,3 +468,64 @@ def turn_text_with_usage(
         cache_creation_input_tokens=cache_write,
     )
     return turn
+
+
+def turn_text_editor(
+    *,
+    tool_use_id: str = "srvtoolu_te",
+    error_code: str | None = None,
+    error_message: str | None = None,
+    stop_reason: str = "end_turn",
+    container_id: str | None = "cont_1",
+) -> ScriptedTurn:
+    """A server-side text-editor action and its result — failed or successful.
+
+    The failure shape matters: ``text_editor_code_execution_tool_result_error``
+    starts with the same prefix as the success types, so a classifier that matches
+    on the prefix reads a failure as a success.
+    """
+    from anthropic.types.beta import (
+        BetaTextEditorCodeExecutionToolResultBlock,
+        BetaTextEditorCodeExecutionToolResultError,
+        BetaTextEditorCodeExecutionViewResultBlock,
+    )
+
+    use = BetaServerToolUseBlock(
+        type="server_tool_use",
+        id=tool_use_id,
+        # The SDK constrains this to a literal set; the editor tool is called
+        # `text_editor_code_execution` on the wire, not by its client-side name.
+        name="text_editor_code_execution",
+        input={"command": "view", "path": "/tmp/report.md"},
+    )
+    if error_code is not None:
+        inner: Any = BetaTextEditorCodeExecutionToolResultError(
+            type="text_editor_code_execution_tool_result_error",
+            error_code=error_code,
+            error_message=error_message,
+        )
+    else:
+        inner = BetaTextEditorCodeExecutionViewResultBlock(
+            type="text_editor_code_execution_view_result",
+            content="line one\nline two\n",
+            file_type="text",
+            num_lines=2,
+            start_line=1,
+            total_lines=2,
+        )
+    result = BetaTextEditorCodeExecutionToolResultBlock(
+        type="text_editor_code_execution_tool_result",
+        tool_use_id=tool_use_id,
+        content=inner,
+    )
+    events: list[Any] = [
+        BetaRawContentBlockStartEvent(type="content_block_start", index=0, content_block=use),
+        BetaRawContentBlockStopEvent(type="content_block_stop", index=0),
+        BetaRawContentBlockStartEvent(type="content_block_start", index=1, content_block=result),
+        BetaRawContentBlockStopEvent(type="content_block_stop", index=1),
+        BetaRawMessageStopEvent(type="message_stop"),
+    ]
+    return ScriptedTurn(
+        events=events,
+        message=_message([use, result], stop_reason, container_id=container_id),
+    )

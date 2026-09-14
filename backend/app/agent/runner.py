@@ -187,13 +187,39 @@ def _usage_dict(usage: Any) -> dict[str, Any]:
     }
 
 
+#: Small scalars worth surfacing from a text-editor result. The result block can
+#: also carry the file's whole body; that is not something the UI wants in a card.
+_TEXT_EDITOR_SUMMARY_FIELDS = (
+    "file_type",
+    "num_lines",
+    "total_lines",
+    "start_line",
+    "is_file_update",
+    "old_lines",
+    "new_lines",
+)
+
+
+def _is_server_tool_error(kind: str, content: dict[str, Any]) -> bool:
+    """Is this result object a failure?
+
+    Two independent signals, because neither alone is reliable across the family:
+    every SDK error block's ``type`` ends in ``_tool_result_error``, and every one
+    carries ``error_code``. Matching on the *success* type prefixes instead is the
+    bug this replaced — ``text_editor_code_execution_tool_result_error`` starts
+    with ``text_editor_code_execution`` and was being read as a success.
+    """
+    return kind.endswith("_tool_result_error") or content.get("error_code") is not None
+
+
 def _server_tool_result_payload(block: Any) -> tuple[bool, Any]:
     """Turn a server-tool result block into ``(is_error, payload)``.
 
     Server-tool errors do not raise: they come back HTTP 200 with an *object* in
     ``content`` where a *list* would otherwise be. Branch on that before indexing.
-    A code-execution result is an object too, but a successful one — so the
-    error test is the ``error_code`` field, not the container type.
+    An object is not on its own a failure, though — a successful code-execution or
+    text-editor result is an object too — so failure is decided by
+    :func:`_is_server_tool_error`, and that test runs *before* any success branch.
     """
     dumped = _to_dict(block)
     content = dumped.get("content") if isinstance(dumped, dict) else None
@@ -207,6 +233,15 @@ def _server_tool_result_payload(block: Any) -> tuple[bool, Any]:
 
     if isinstance(content, dict):
         kind = content.get("type") or ""
+
+        if _is_server_tool_error(kind, content):
+            return True, {
+                "type": kind,
+                "error_code": content.get("error_code"),
+                # Only the text-editor errors carry one; null elsewhere.
+                "error_message": content.get("error_message"),
+            }
+
         if kind == "web_fetch_result":
             return False, {"url": content.get("url"), "retrieved_at": content.get("retrieved_at")}
         if kind.endswith("code_execution_result"):
@@ -217,8 +252,15 @@ def _server_tool_result_payload(block: Any) -> tuple[bool, Any]:
                 "return_code": return_code,
             }
         if kind.startswith("text_editor_code_execution"):
-            # These carry file contents; a compact shape is all the UI wants.
-            return False, {"type": kind, "is_file_update": content.get("is_file_update")}
+            summary: dict[str, Any] = {"type": kind}
+            summary.update(
+                {
+                    field: content[field]
+                    for field in _TEXT_EDITOR_SUMMARY_FIELDS
+                    if content.get(field) is not None
+                }
+            )
+            return False, summary
         return True, content
 
     return False, content

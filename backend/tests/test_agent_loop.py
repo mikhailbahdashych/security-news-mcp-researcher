@@ -1054,3 +1054,100 @@ async def test_session_totals_include_cached_input_tokens(session_factory, sessi
     async with session_factory() as session:
         research = await session.get(ResearchSession, session_id)
     assert research.total_input_tokens == 10_004
+
+
+# ------------------------- round-3: server-tool error classification
+
+
+async def test_a_failed_text_editor_action_is_an_error_result(session_factory, session_id):
+    """Finding 13: the error type shares its prefix with the success types.
+
+    ``text_editor_code_execution_tool_result_error`` starts with
+    ``text_editor_code_execution``, so a prefix match read a failure as a success
+    and threw the error details away.
+    """
+    from fakes.anthropic import turn_text_editor
+
+    collected = await drive(
+        ScriptedAnthropic(
+            [
+                turn_text_editor(
+                    tool_use_id="srvtoolu_te",
+                    error_code="file_not_found",
+                    error_message="no such file",
+                )
+            ]
+        ),
+        session_factory,
+        session_id,
+    )
+
+    result = next(e for e in collected if e.type == "server_tool_result")
+    assert result.is_error is True
+    assert result.results["error_code"] == "file_not_found"
+    assert result.results["error_message"] == "no such file"
+    assert result.to_sse()[1]["is_error"] is True
+
+    async with session_factory() as session:
+        row = (await session.execute(select(ToolCall))).scalars().one()
+    assert row.is_error is True
+    assert row.result_json["content"]["error_code"] == "file_not_found"
+
+
+async def test_a_successful_text_editor_action_is_not_an_error(session_factory, session_id):
+    from fakes.anthropic import turn_text_editor
+
+    collected = await drive(
+        ScriptedAnthropic([turn_text_editor(tool_use_id="srvtoolu_ok")]),
+        session_factory,
+        session_id,
+    )
+
+    result = next(e for e in collected if e.type == "server_tool_result")
+    assert result.is_error is False
+    assert result.results["type"] == "text_editor_code_execution_view_result"
+    # A compact summary, not the file body.
+    assert result.results["num_lines"] == 2
+    assert "content" not in result.results
+
+    async with session_factory() as session:
+        row = (await session.execute(select(ToolCall))).scalars().one()
+    assert row.is_error is False
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "web_search_tool_result_error",
+        "web_fetch_tool_result_error",
+        "bash_code_execution_tool_result_error",
+        "code_execution_tool_result_error",
+        "text_editor_code_execution_tool_result_error",
+    ],
+)
+def test_every_sdk_error_block_type_classifies_as_an_error(kind):
+    """One rule for the whole family, so a new member cannot slip through."""
+    block = {
+        "type": kind.replace("_error", ""),
+        "tool_use_id": "srvtoolu_0",
+        "content": {"type": kind, "error_code": "unavailable"},
+    }
+
+    is_error, payload = runner_module._server_tool_result_payload(block)
+
+    assert is_error is True
+    assert payload["error_code"] == "unavailable"
+
+
+def test_an_error_code_alone_is_enough_to_classify_a_failure():
+    """The second signal: an error object whose type we do not recognise."""
+    block = {
+        "type": "web_search_tool_result",
+        "tool_use_id": "srvtoolu_0",
+        "content": {"error_code": "max_uses_exceeded"},
+    }
+
+    is_error, payload = runner_module._server_tool_result_payload(block)
+
+    assert is_error is True
+    assert payload["error_code"] == "max_uses_exceeded"
