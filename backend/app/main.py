@@ -10,6 +10,7 @@ from app.config import Settings
 from app.config import settings as default_settings
 from app.db.engine import create_db_engine, create_session_factory
 from app.db.init import init_db
+from app.mcp.manager import McpManager
 from app.static import mount_spa
 
 
@@ -19,8 +20,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     Startup: open the database named by *this app's* settings, create the schema and
     seed the default settings, then publish the session factory on ``app.state`` for
-    ``get_db`` (later tasks: start the feed scheduler). Shutdown: dispose the engine
-    (later tasks: close MCP sessions).
+    ``get_db`` (later tasks: start the feed scheduler). Shutdown: close every MCP
+    connection — which is what terminates their stdio subprocesses — and then
+    dispose the engine.
+
+    MCP servers are deliberately **not** connected here. A server that is slow to
+    start, or that never speaks protocol at all, would otherwise hold up boot and
+    the health check; connections are made on first use instead.
 
     Note that Starlette only runs this for a real server; the test suite drives the
     app through ``ASGITransport``, which skips the lifespan, so tests initialise
@@ -35,6 +41,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        manager: McpManager | None = getattr(app.state, "mcp_manager", None)
+        if manager is not None:
+            await manager.aclose()
         app.state.session_factory = None
         app.state.db_engine = None
         await engine.dispose()
@@ -52,6 +61,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
     app.state.db_engine = None
     app.state.session_factory = None
+    # Created empty and never connected here: the configured servers are read from
+    # the database on first use, and the manager is what the lifespan closes.
+    app.state.mcp_manager = McpManager()
 
     if settings.cors_origins:
         app.add_middleware(

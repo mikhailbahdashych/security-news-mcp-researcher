@@ -9,6 +9,7 @@ from anthropic import AsyncAnthropic
 from fastapi import Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.mcp.manager import McpManager
 from app.services import settings as settings_service
 
 
@@ -54,6 +55,22 @@ def get_session_factory(request: Request) -> async_sessionmaker[AsyncSession]:
 
 
 SessionFactory = Annotated[async_sessionmaker[AsyncSession], Depends(get_session_factory)]
+
+
+def get_mcp_manager(request: Request) -> McpManager:
+    """The app's MCP manager, created by ``create_app`` and closed by the lifespan.
+
+    It is built in ``create_app`` rather than in the lifespan because it holds no
+    resources until something asks it for a tool — creating it early costs nothing
+    and means the test suite, which does not run the lifespan, still has one.
+    """
+    manager = getattr(request.app.state, "mcp_manager", None)
+    if manager is None:  # pragma: no cover - create_app always sets it
+        raise RuntimeError("The MCP manager is missing from app.state.")
+    return manager
+
+
+McpManagerDep = Annotated[McpManager, Depends(get_mcp_manager)]
 
 
 async def get_anthropic_client(session: DbSession) -> AsyncIterator[AsyncAnthropic | None]:
@@ -106,10 +123,12 @@ __all__ = [
     "AnthropicClient",
     "ChatClientFactory",
     "DbSession",
+    "McpManagerDep",
     "SessionFactory",
     "build_anthropic_client",
     "get_anthropic_client",
     "get_chat_client_factory",
     "get_db",
+    "get_mcp_manager",
     "get_session_factory",
 ]

@@ -16,6 +16,7 @@ dependencies = [
     "trafilatura>=2.0.0",
     "anyio>=4.0",
     "sse-starlette>=3.0",
+    "mcp>=2.2.0,<3",
 ]
 
 [dependency-groups]
