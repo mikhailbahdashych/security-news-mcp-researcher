@@ -8,6 +8,8 @@ import {
   deleteSession,
   fetchSession,
   fetchSessions,
+  formatTokens,
+  groupTurns,
   messagesUrl,
   renameSession,
   sessionQueryKey,
@@ -18,17 +20,18 @@ import {
   type SessionFilters,
 } from '../api/chat'
 import type { FeedItem } from '../api/inbox'
-import type { EmbeddablePageProps } from '../components/ui/PageHost'
+import { fetchSettings, settingsQueryKey } from '../api/settings'
+import AnswerTurn from '../components/chat/AnswerTurn'
 import Composer from '../components/chat/Composer'
-import { emptyTurn, liveTurnReducer } from '../components/chat/liveTurn'
-import Markdown from '../components/chat/Markdown'
-import SessionSidebar from '../components/chat/SessionSidebar'
-import ThinkingPane from '../components/chat/ThinkingPane'
-import ToolCallCard from '../components/chat/ToolCallCard'
-import Transcript from '../components/chat/Transcript'
+import EmptyResearch from '../components/chat/EmptyResearch'
+import HistoryDrawer from '../components/chat/HistoryDrawer'
 import TurnError from '../components/chat/TurnError'
+import { emptyTurn, liveSteps, liveTurnReducer } from '../components/chat/liveTurn'
 import useDebouncedValue from '../components/inbox/useDebouncedValue'
 import GenerateNotesDialog from '../components/notes/GenerateNotesDialog'
+import Button from '../components/ui/Button'
+import IconButton from '../components/ui/IconButton'
+import type { EmbeddablePageProps } from '../components/ui/PageHost'
 import { SSEHttpError, streamSSE } from '../lib/sse'
 
 /** What the Inbox's "Research these" button hands over. */
@@ -67,9 +70,11 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
     embedded ? [] : ((location.state as ChatNavigationState | null)?.attachedItems ?? []),
   )
   const [notesOpen, setNotesOpen] = useState(false)
+  const [historyOpen, setHistoryOpen] = useState(false)
   const [sessionSearch, setSessionSearch] = useState('')
   const [showArchived, setShowArchived] = useState(false)
   const abort = useRef<AbortController | null>(null)
+  const scroller = useRef<HTMLDivElement>(null)
   const bottom = useRef<HTMLDivElement>(null)
 
   const debouncedSessionSearch = useDebouncedValue(sessionSearch)
@@ -86,6 +91,9 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
     queryFn: ({ pageParam }) => fetchSessions(sessionFilters, pageParam as string | undefined),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (page) => page.next_cursor ?? undefined,
+    // The drawer is an overlay; there is no point paying for the list while it
+    // is shut, and opening it is instant off the cache afterwards.
+    enabled: historyOpen,
   })
 
   const detail = useQuery({
@@ -93,6 +101,10 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
     queryFn: () => fetchSession(sessionId as number),
     enabled: sessionId !== null,
   })
+
+  // The configured model, for the composer's "what will answer this" line. The
+  // session's own model is authoritative once there is one.
+  const settings = useQuery({ queryKey: settingsQueryKey, queryFn: fetchSettings })
 
   // Leaving the conversation the live state belongs to drops it — this is what
   // catches browser back/forward, which no click handler sees. It cannot fire
@@ -112,9 +124,24 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
     }
   }, [embedded, location.pathname, location.state, navigate])
 
+  const messages = detail.data?.messages
+  const turns = useMemo(() => groupTurns(messages ?? []), [messages])
+
+  // Opening a conversation lands at its latest answer, without animating
+  // through the whole history to get there.
   useEffect(() => {
-    bottom.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [live.text, live.cards.length, detail.data?.messages.length])
+    const element = scroller.current
+    if (element) {
+      element.scrollTop = element.scrollHeight
+    }
+  }, [sessionId, turns.length])
+
+  // While a turn is running, follow it.
+  useEffect(() => {
+    if (live.prompt !== null) {
+      bottom.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
+    }
+  }, [live.prompt, live.text, live.steps.length])
 
   const rename = useMutation({
     mutationFn: ({ id, title }: { id: number; title: string }) => renameSession(id, title),
@@ -211,124 +238,156 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
     }
   }, [sessionId])
 
+  const newChat = useCallback(() => {
+    dispatch({ kind: 'reset' })
+    setAttached([])
+    setHistoryOpen(false)
+    openSession(null)
+  }, [openSession])
+
   const allSessions = sessions.data?.pages.flatMap((page) => page.sessions) ?? []
-  // Which row is mid-write, so the sidebar can grey it out while it saves.
+  // Which row is mid-write, so the drawer can grey it out while it saves.
   const busyId =
     (rename.isPending ? rename.variables?.id : undefined) ??
     (archive.isPending ? archive.variables?.id : undefined) ??
     (remove.isPending ? remove.variables : undefined) ??
     null
-  const messages = detail.data?.messages ?? []
-  const awaitingFirstText = live.streaming && live.text === ''
+
+  const session = detail.data?.session
+  const model = session?.model ?? settings.data?.model ?? null
+  const steps = useMemo(() => liveSteps(live), [live])
+  // `settle` clears the prompt but keeps a terminal error, so once the stream is
+  // over the notice belongs under the last answer — not in a turn of its own
+  // with a divider above it and no question to explain it.
+  const settledError = live.prompt === null ? live.error : null
+  const liveTurnVisible = live.prompt !== null
+  const empty = turns.length === 0 && !liveTurnVisible && settledError === null
+
+  const headerMeta =
+    session && model
+      ? `${model} · ${formatTokens(session.total_input_tokens)} in / ${formatTokens(session.total_output_tokens)} out`
+      : ''
+
+  const attachProps = {
+    attached,
+    onAttach: (item: FeedItem) =>
+      setAttached((current) =>
+        current.some((existing) => existing.id === item.id) ? current : [...current, item],
+      ),
+    onDetach: (id: number) => setAttached((current) => current.filter((item) => item.id !== id)),
+    onSend: (text: string) => void send(text),
+    onStop: stop,
+  }
 
   return (
-    <div className="flex h-full">
-      <SessionSidebar
-        sessions={allSessions}
-        activeId={sessionId}
-        search={sessionSearch}
-        showArchived={showArchived}
-        isPending={sessions.isPending}
-        isError={sessions.isError}
-        hasMore={Boolean(sessions.hasNextPage)}
-        loadingMore={sessions.isFetchingNextPage}
-        busyId={busyId}
-        onSearchChange={setSessionSearch}
-        onShowArchivedChange={setShowArchived}
-        onNew={() => {
-          dispatch({ kind: 'reset' })
-          openSession(null)
-        }}
-        onOpen={(id) => {
-          dispatch({ kind: 'reset' })
-          openSession(id)
-        }}
-        onRename={(id, title) => rename.mutate({ id, title })}
-        onArchive={(id, archived) => archive.mutate({ id, archived })}
-        onDelete={(id) => remove.mutate(id)}
-        onLoadMore={() => void sessions.fetchNextPage()}
-      />
-
-      <section className="flex min-w-0 flex-1 flex-col">
-        <header className="flex items-start justify-between gap-3 border-b border-slate-200 px-6 py-3">
-          <div className="min-w-0">
-            <h1 className="truncate text-sm font-semibold text-slate-900">
-              {detail.data?.session.title || 'New chat'}
-            </h1>
-            {detail.data ? (
-              <p className="text-xs text-slate-500">
-                {detail.data.session.model} · {detail.data.session.total_input_tokens} in /{' '}
-                {detail.data.session.total_output_tokens} out
-              </p>
-            ) : (
-              <p className="text-xs text-slate-500">
-                Ask about the inbox, an advisory, or a URL you paste.
-              </p>
-            )}
-          </div>
+    <section className="relative flex h-full flex-col overflow-hidden bg-bg text-ink">
+      <header className="flex h-[49px] shrink-0 items-center gap-2 border-b border-line px-4">
+        <IconButton
+          icon="history"
+          label="Chat history"
+          size={16}
+          active={historyOpen}
+          onClick={() => setHistoryOpen((open) => !open)}
+        />
+        <div className="flex min-w-0 flex-1 items-baseline gap-2 overflow-hidden">
+          <h1 className="m-0 min-w-0 shrink truncate text-[13px] font-semibold">
+            {session?.title || 'New research'}
+          </h1>
+          {/* Shrinks four times faster than the title: in a narrow split pane
+              the name of the chat is worth more than its token count. */}
+          {headerMeta ? (
+            <span className="min-w-0 shrink-4 truncate text-[11px] text-faint">{headerMeta}</span>
+          ) : null}
+        </div>
+        <div className="flex shrink-0 items-center gap-1.5">
           {sessionId !== null ? (
-            <button
-              type="button"
-              disabled={live.streaming}
-              onClick={() => setNotesOpen(true)}
-              className="shrink-0 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:border-slate-400 disabled:opacity-40"
-            >
-              Generate notes from this session
-            </button>
+            <Button size="sm" disabled={live.streaming} onClick={() => setNotesOpen(true)}>
+              Generate notes
+            </Button>
           ) : null}
-        </header>
+          <Button size="sm" onClick={newChat}>
+            New chat
+          </Button>
+        </div>
+      </header>
 
-        <div className="flex-1 overflow-y-auto px-6 py-4">
-          {sessionId === null && messages.length === 0 && !live.prompt ? (
-            <p className="mx-auto max-w-xl pt-16 text-center text-sm text-slate-500">
-              Start a chat. The assistant searches your local feed inbox first, then the web.
-            </p>
-          ) : null}
+      {historyOpen ? (
+        <HistoryDrawer
+          sessions={allSessions}
+          activeId={sessionId}
+          search={sessionSearch}
+          showArchived={showArchived}
+          isPending={sessions.isPending}
+          isError={sessions.isError}
+          hasMore={Boolean(sessions.hasNextPage)}
+          loadingMore={sessions.isFetchingNextPage}
+          busyId={busyId}
+          onSearchChange={setSessionSearch}
+          onShowArchivedChange={setShowArchived}
+          onOpen={(id) => {
+            dispatch({ kind: 'reset' })
+            setHistoryOpen(false)
+            openSession(id)
+          }}
+          onRename={(id, title) => rename.mutate({ id, title })}
+          onArchive={(id, archived) => archive.mutate({ id, archived })}
+          onDelete={(id) => remove.mutate(id)}
+          onLoadMore={() => void sessions.fetchNextPage()}
+          onClose={() => setHistoryOpen(false)}
+        />
+      ) : null}
 
-          <Transcript messages={messages} />
+      {empty ? (
+        <EmptyResearch
+          streaming={live.streaming}
+          meta={model ? `${model} · inbox first, then web` : undefined}
+          {...attachProps}
+        />
+      ) : (
+        <>
+          <div ref={scroller} className="flex-1 overflow-y-auto">
+            <div className="mx-auto flex max-w-[720px] flex-col gap-3.5 px-6 pt-6 pb-4">
+              {turns.map((turn, index) => (
+                <AnswerTurn
+                  key={turn.key}
+                  question={turn.question}
+                  attachments={turn.attachments}
+                  steps={turn.steps}
+                  answer={turn.answer}
+                  error={turn.error}
+                  followUp={index > 0}
+                />
+              ))}
 
-          {live.prompt !== null || live.error !== null ? (
-            <div className="mt-4 space-y-2">
-              {live.prompt !== null ? (
-                <div className="flex justify-end">
-                  <div className="max-w-2xl whitespace-pre-wrap rounded-lg bg-slate-900 px-3 py-2 text-sm text-white">
-                    {live.prompt}
-                  </div>
-                </div>
+              {liveTurnVisible ? (
+                <AnswerTurn
+                  question={live.prompt ?? ''}
+                  attachments={[]}
+                  steps={steps}
+                  answer={live.text}
+                  error={live.error}
+                  followUp={turns.length > 0}
+                  streaming={live.streaming}
+                />
               ) : null}
 
-              <ThinkingPane text={live.thinking} streaming={awaitingFirstText} />
-              {live.cards.map((card) => (
-                <ToolCallCard key={card.toolUseId} card={card} />
-              ))}
-              {live.text ? <Markdown>{live.text}</Markdown> : null}
-              {live.error ? <TurnError error={live.error} /> : null}
+              {settledError ? <TurnError error={settledError} /> : null}
+
+              <div ref={bottom} />
             </div>
-          ) : null}
+          </div>
 
-          <div ref={bottom} />
-        </div>
+          <div className="shrink-0 px-6 pt-2.5 pb-4">
+            <div className="mx-auto max-w-[720px]">
+              <Composer variant="bar" streaming={live.streaming} {...attachProps} />
+            </div>
+          </div>
+        </>
+      )}
 
-        {notesOpen && sessionId !== null ? (
-          <GenerateNotesDialog
-            initialSessionId={sessionId}
-            onClose={() => setNotesOpen(false)}
-          />
-        ) : null}
-
-        <Composer
-          streaming={live.streaming}
-          attached={attached}
-          onAttach={(item) =>
-            setAttached((current) =>
-              current.some((existing) => existing.id === item.id) ? current : [...current, item],
-            )
-          }
-          onDetach={(id) => setAttached((current) => current.filter((item) => item.id !== id))}
-          onSend={(text) => void send(text)}
-          onStop={stop}
-        />
-      </section>
-    </div>
+      {notesOpen && sessionId !== null ? (
+        <GenerateNotesDialog initialSessionId={sessionId} onClose={() => setNotesOpen(false)} />
+      ) : null}
+    </section>
   )
 }
