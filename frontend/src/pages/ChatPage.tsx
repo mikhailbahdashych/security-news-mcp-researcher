@@ -1,5 +1,5 @@
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
 
 import {
@@ -11,8 +11,11 @@ import {
   messagesUrl,
   renameSession,
   sessionQueryKey,
+  sessionsListKey,
   sessionsQueryKey,
+  setSessionArchived,
   type ErrorPayload,
+  type SessionFilters,
 } from '../api/chat'
 import type { FeedItem } from '../api/inbox'
 import Composer from '../components/chat/Composer'
@@ -23,6 +26,7 @@ import ThinkingPane from '../components/chat/ThinkingPane'
 import ToolCallCard from '../components/chat/ToolCallCard'
 import Transcript from '../components/chat/Transcript'
 import TurnError from '../components/chat/TurnError'
+import useDebouncedValue from '../components/inbox/useDebouncedValue'
 import GenerateNotesDialog from '../components/notes/GenerateNotesDialog'
 import { SSEHttpError, streamSSE } from '../lib/sse'
 
@@ -45,12 +49,23 @@ export default function ChatPage() {
     () => (location.state as ChatNavigationState | null)?.attachedItems ?? [],
   )
   const [notesOpen, setNotesOpen] = useState(false)
+  const [sessionSearch, setSessionSearch] = useState('')
+  const [showArchived, setShowArchived] = useState(false)
   const abort = useRef<AbortController | null>(null)
   const bottom = useRef<HTMLDivElement>(null)
 
+  const debouncedSessionSearch = useDebouncedValue(sessionSearch)
+  const sessionFilters = useMemo<SessionFilters>(
+    () => ({ q: debouncedSessionSearch, archived: showArchived ? 'true' : 'false' }),
+    [debouncedSessionSearch, showArchived],
+  )
+
   const sessions = useInfiniteQuery({
-    queryKey: sessionsQueryKey,
-    queryFn: ({ pageParam }) => fetchSessions(pageParam as string | undefined),
+    // Keyed by the filters, prefixed by `sessionsQueryKey` so one invalidation
+    // after a rename or an archive still refreshes whichever variant is on
+    // screen.
+    queryKey: sessionsListKey(sessionFilters),
+    queryFn: ({ pageParam }) => fetchSessions(sessionFilters, pageParam as string | undefined),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (page) => page.next_cursor ?? undefined,
   })
@@ -85,6 +100,14 @@ export default function ChatPage() {
 
   const rename = useMutation({
     mutationFn: ({ id, title }: { id: number; title: string }) => renameSession(id, title),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: sessionsQueryKey }),
+  })
+
+  const archive = useMutation({
+    mutationFn: ({ id, archived }: { id: number; archived: boolean }) =>
+      setSessionArchived(id, archived),
+    // Invalidate rather than patch the cache: an archived row leaves the default
+    // list entirely, which is not an edit to a row but a change of membership.
     onSuccess: () => queryClient.invalidateQueries({ queryKey: sessionsQueryKey }),
   })
 
@@ -171,6 +194,12 @@ export default function ChatPage() {
   }, [sessionId])
 
   const allSessions = sessions.data?.pages.flatMap((page) => page.sessions) ?? []
+  // Which row is mid-write, so the sidebar can grey it out while it saves.
+  const busyId =
+    (rename.isPending ? rename.variables?.id : undefined) ??
+    (archive.isPending ? archive.variables?.id : undefined) ??
+    (remove.isPending ? remove.variables : undefined) ??
+    null
   const messages = detail.data?.messages ?? []
   const awaitingFirstText = live.streaming && live.text === ''
 
@@ -179,8 +208,15 @@ export default function ChatPage() {
       <SessionSidebar
         sessions={allSessions}
         activeId={sessionId}
+        search={sessionSearch}
+        showArchived={showArchived}
+        isPending={sessions.isPending}
+        isError={sessions.isError}
         hasMore={Boolean(sessions.hasNextPage)}
         loadingMore={sessions.isFetchingNextPage}
+        busyId={busyId}
+        onSearchChange={setSessionSearch}
+        onShowArchivedChange={setShowArchived}
         onNew={() => {
           dispatch({ kind: 'reset' })
           navigate('/chat')
@@ -190,6 +226,7 @@ export default function ChatPage() {
           navigate(`/chat/${id}`)
         }}
         onRename={(id, title) => rename.mutate({ id, title })}
+        onArchive={(id, archived) => archive.mutate({ id, archived })}
         onDelete={(id) => remove.mutate(id)}
         onLoadMore={() => void sessions.fetchNextPage()}
       />

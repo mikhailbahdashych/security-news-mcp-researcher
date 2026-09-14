@@ -73,11 +73,39 @@ export interface SessionDetail {
 
 export const SESSION_PAGE_SIZE = 30
 
+/** The three states of `GET /api/sessions?archived=`. */
+export type ArchivedFilter = 'false' | 'true' | 'all'
+
+export interface SessionFilters {
+  q: string
+  archived: ArchivedFilter
+}
+
+export const DEFAULT_SESSION_FILTERS: SessionFilters = { q: '', archived: 'false' }
+
+/**
+ * The prefix every sessions list shares.
+ *
+ * Invalidating this one key refreshes every filtered variant below it, which is
+ * what a rename, an archive or a delete needs — it cannot know which filter the
+ * sidebar is showing.
+ */
 export const sessionsQueryKey = ['sessions'] as const
+export const sessionsListKey = (filters: SessionFilters) =>
+  ['sessions', 'list', filters.archived, filters.q] as const
 export const sessionQueryKey = (id: number) => ['session', id] as const
 
-export function fetchSessions(cursor?: string): Promise<SessionPage> {
-  const params = new URLSearchParams({ archived: 'false', limit: String(SESSION_PAGE_SIZE) })
+export function fetchSessions(
+  filters: SessionFilters = DEFAULT_SESSION_FILTERS,
+  cursor?: string,
+): Promise<SessionPage> {
+  const params = new URLSearchParams({
+    archived: filters.archived,
+    limit: String(SESSION_PAGE_SIZE),
+  })
+  if (filters.q.trim()) {
+    params.set('q', filters.q.trim())
+  }
   if (cursor) {
     params.set('cursor', cursor)
   }
@@ -92,6 +120,10 @@ export const fetchSession = (id: number): Promise<SessionDetail> =>
 
 export const renameSession = (id: number, title: string): Promise<ResearchSession> =>
   apiPatch<ResearchSession>(`/sessions/${id}`, { title })
+
+/** Archive or unarchive — the same endpoint both ways. */
+export const setSessionArchived = (id: number, archived: boolean): Promise<ResearchSession> =>
+  apiPatch<ResearchSession>(`/sessions/${id}`, { archived })
 
 export const deleteSession = (id: number): Promise<void> => apiDelete<void>(`/sessions/${id}`)
 
