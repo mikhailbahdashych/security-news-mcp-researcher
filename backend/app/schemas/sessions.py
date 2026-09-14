@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+
+#: What ``GET /api/sessions?archived=`` accepts. A string rather than a bool
+#: because there are three states, not two: archiving is only useful if the
+#: default list hides archived threads, and "all" has to be sayable.
+ArchivedFilter = Literal["false", "true", "all"]
 
 
 class SessionRead(BaseModel):
@@ -103,12 +108,8 @@ class MessageCreate(BaseModel):
     attached_item_ids: list[int] = Field(default_factory=list, max_length=50)
 
 
-class CancelResponse(BaseModel):
-    cancelled: bool
-
-
 __all__ = [
-    "CancelResponse",
+    "ArchivedFilter",
     "MessageCreate",
     "MessageRead",
     "SessionCreate",

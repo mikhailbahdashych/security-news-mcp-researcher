@@ -81,23 +81,47 @@ async def db_session(db_engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
 
 
 @pytest.fixture
-def app(db_engine: AsyncEngine, tmp_path) -> FastAPI:
-    """The application wired to the test database.
+def app_factory(db_engine: AsyncEngine):
+    """Build an app around given ``Settings``, wired to the test database.
 
     ``ASGITransport`` does not run the lifespan, so the schema is created by the
-    ``db_engine`` fixture and ``get_db`` is overridden to use it — the app's own
-    settings name the same file so the two cannot drift apart.
+    ``db_engine`` fixture and ``get_db`` is overridden to use it. Tests that need
+    an app with different settings — the ``.env`` API key, a log level — build one
+    here rather than re-deriving the overrides.
     """
-    application = create_app(Settings(db_path=tmp_path / "app.db", static_dir=tmp_path / "absent"))
-    session_factory = create_session_factory(db_engine)
 
-    async def override_get_db() -> AsyncIterator[AsyncSession]:
-        async with session_factory() as session:
-            yield session
+    def build(settings: Settings) -> FastAPI:
+        application = create_app(settings)
+        session_factory = create_session_factory(db_engine)
 
-    application.dependency_overrides[get_db] = override_get_db
-    application.dependency_overrides[get_session_factory] = lambda: session_factory
-    return application
+        async def override_get_db() -> AsyncIterator[AsyncSession]:
+            async with session_factory() as session:
+                yield session
+
+        application.dependency_overrides[get_db] = override_get_db
+        application.dependency_overrides[get_session_factory] = lambda: session_factory
+        return application
+
+    return build
+
+
+@pytest.fixture
+def app(app_factory, tmp_path) -> FastAPI:
+    """The application wired to the test database.
+
+    The app's own settings name the same database file so the two cannot drift
+    apart, and ``anthropic_api_key`` is pinned empty for the same reason
+    ``isolated_api_key_env`` deletes the environment variable: ``Settings`` reads
+    ``.env``, so a developer with a real key in theirs would otherwise turn every
+    "no key configured" test into a live API call.
+    """
+    return app_factory(
+        Settings(
+            db_path=tmp_path / "app.db",
+            static_dir=tmp_path / "absent",
+            anthropic_api_key="",
+        )
+    )
 
 
 @pytest.fixture

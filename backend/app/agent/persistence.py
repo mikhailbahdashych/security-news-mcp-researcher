@@ -68,6 +68,23 @@ def flatten_text(content: Any) -> str:
     return " ".join(" ".join(parts).split())
 
 
+def derive_title(text: str, limit: int = TITLE_CHARS) -> str:
+    """A session title from the head of the first thing the user said.
+
+    Cut on a word boundary when one is reasonably near the limit, so a title does
+    not end mid-word, and mark the cut with an ellipsis so the sidebar shows that
+    there is more to the question than the row has room for.
+    """
+    collapsed = " ".join(text.split())
+    if len(collapsed) <= limit:
+        return collapsed
+    head = collapsed[:limit]
+    boundary = head.rfind(" ")
+    if boundary >= limit // 2:
+        head = head[:boundary]
+    return f"{head.rstrip()}\u2026"
+
+
 async def _next_seq(session: AsyncSession, session_id: int) -> int:
     """Allocate the next ``seq`` *inside* the write transaction.
 
@@ -108,7 +125,7 @@ async def _append(
         if research_session is not None:
             research_session.updated_at = utcnow()
             if set_title_from_content and not (research_session.title or "").strip():
-                title = flatten_text(content)[:TITLE_CHARS].strip()
+                title = derive_title(flatten_text(content))
                 if title:
                     research_session.title = title
 
@@ -497,6 +514,7 @@ __all__ = [
     "append_tool_result_message",
     "append_user_message",
     "bump_session_usage",
+    "derive_title",
     "flatten_text",
     "load_history",
     "record_server_tool_result",

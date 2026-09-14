@@ -7,7 +7,6 @@ overridden app-wide, so no test can reach the network even by accident.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 
 import httpx2
@@ -15,10 +14,12 @@ import pytest
 from fakes.anthropic import ScriptedAnthropic, turn_text, turn_tool_use
 from httpx2 import ASGITransport
 from sqlalchemy import func, select
+from sse_util import parse_sse
 
+from app.agent import persistence
 from app.api import tasks as task_registry
 from app.api.deps import get_chat_client_factory
-from app.db.models import Feed, FeedItem, Message, ResearchSession, ToolCall, utcnow
+from app.db.models import Feed, FeedItem, Message, Note, ResearchSession, ToolCall, utcnow
 from app.services import settings as settings_service
 
 
@@ -40,26 +41,6 @@ def use_script(app, *turns) -> ScriptedAnthropic:
     client = ScriptedAnthropic(list(turns))
     app.dependency_overrides[get_chat_client_factory] = lambda: lambda _key: client
     return client
-
-
-def parse_sse(body: str) -> list[tuple[str, dict]]:
-    """Parse a raw SSE body into ``(event, payload)`` pairs, ignoring heartbeats."""
-    parsed: list[tuple[str, dict]] = []
-    for frame in body.replace("\r\n", "\n").split("\n\n"):
-        name = "message"
-        data: list[str] = []
-        for line in frame.split("\n"):
-            if not line or line.startswith(":"):
-                continue
-            field, _, value = line.partition(":")
-            value = value[1:] if value.startswith(" ") else value
-            if field == "event":
-                name = value
-            elif field == "data":
-                data.append(value)
-        if data:
-            parsed.append((name, json.loads("\n".join(data))))
-    return parsed
 
 
 async def create_session(client: httpx2.AsyncClient) -> int:
@@ -126,6 +107,280 @@ async def test_sessions_list_searches_titles(client):
     assert [row["title"] for row in found.json()["sessions"]] == ["AcmeVPN advisory"]
 
 
+async def test_sessions_list_searches_message_previews(client, session_factory):
+    """The sidebar filter has to find a chat by what was said in it.
+
+    A title is the first sixty characters of the first question; everything asked
+    afterwards would be unfindable if only titles were searched.
+    """
+    match = await create_session(client)
+    other = await create_session(client)
+    async with session_factory() as session:
+        session.add(
+            Message(
+                session_id=match,
+                seq=1,
+                role="user",
+                kind="user",
+                content_json=[],
+                text_preview="does CVE-2026-12345 affect us?",
+            )
+        )
+        session.add(
+            Message(
+                session_id=other,
+                seq=1,
+                role="user",
+                kind="user",
+                content_json=[],
+                text_preview="unrelated chatter",
+            )
+        )
+        await session.commit()
+
+    found = await client.get("/api/sessions", params={"q": "cve-2026-12345"})
+
+    assert [row["id"] for row in found.json()["sessions"]] == [match]
+
+
+async def test_sessions_list_search_escapes_like_wildcards(client):
+    await client.post("/api/sessions", json={"title": "rollout 100% done"})
+    await client.post("/api/sessions", json={"title": "1000 hosts affected"})
+
+    found = await client.get("/api/sessions", params={"q": "100%"})
+
+    assert [row["title"] for row in found.json()["sessions"]] == ["rollout 100% done"]
+
+
+async def test_a_session_matching_many_messages_appears_once(client, session_factory):
+    session_id = await create_session(client)
+    async with session_factory() as session:
+        for seq in range(1, 4):
+            session.add(
+                Message(
+                    session_id=session_id,
+                    seq=seq,
+                    role="user",
+                    kind="user",
+                    content_json=[],
+                    text_preview=f"message {seq} about CVE-2026-12345",
+                )
+            )
+        await session.commit()
+
+    found = await client.get("/api/sessions", params={"q": "CVE-2026-12345"})
+
+    assert [row["id"] for row in found.json()["sessions"]] == [session_id]
+
+
+# --------------------------------------------------------------- archived filter
+
+
+async def test_archived_filter_has_three_states(client):
+    live = await create_session(client)
+    archived = await create_session(client)
+    await client.patch(f"/api/sessions/{archived}", json={"archived": True})
+
+    async def ids(**params) -> list[int]:
+        response = await client.get("/api/sessions", params=params)
+        assert response.status_code == 200
+        return sorted(row["id"] for row in response.json()["sessions"])
+
+    assert await ids() == [live]
+    assert await ids(archived="false") == [live]
+    assert await ids(archived="true") == [archived]
+    assert await ids(archived="all") == sorted([live, archived])
+
+
+async def test_an_unknown_archived_value_is_a_422(client):
+    assert (await client.get("/api/sessions", params={"archived": "nope"})).status_code == 422
+
+
+# ------------------------------------------------------------------ pagination
+
+
+async def test_keyset_pagination_walks_every_session_exactly_once(client):
+    created = [await create_session(client) for _ in range(7)]
+
+    seen: list[int] = []
+    cursor: str | None = None
+    for _ in range(10):  # a guard against a cursor that never terminates
+        params = {"limit": 3}
+        if cursor:
+            params["cursor"] = cursor
+        page = (await client.get("/api/sessions", params=params)).json()
+        seen.extend(row["id"] for row in page["sessions"])
+        cursor = page["next_cursor"]
+        if cursor is None:
+            break
+
+    assert cursor is None
+    assert sorted(seen) == sorted(created)
+    assert len(seen) == len(set(seen))
+
+
+async def test_a_malformed_cursor_is_a_422(client):
+    assert (await client.get("/api/sessions", params={"cursor": "!!"})).status_code == 422
+
+
+# ---------------------------------------------------------------------- PATCH
+
+
+async def test_patch_renames_and_bumps_updated_at(client):
+    session_id = await create_session(client)
+    before = (await client.get(f"/api/sessions/{session_id}")).json()["session"]["updated_at"]
+
+    renamed = await client.patch(f"/api/sessions/{session_id}", json={"title": "  Renamed  "})
+
+    assert renamed.status_code == 200
+    assert renamed.json()["title"] == "Renamed"
+    assert renamed.json()["updated_at"] > before
+
+
+async def test_patch_with_an_empty_title_clears_it(client):
+    session_id = await create_session(client)
+    await client.patch(f"/api/sessions/{session_id}", json={"title": "Named"})
+
+    cleared = await client.patch(f"/api/sessions/{session_id}", json={"title": ""})
+
+    assert cleared.json()["title"] is None
+
+
+async def test_archiving_round_trips(client):
+    session_id = await create_session(client)
+
+    assert (
+        await client.patch(f"/api/sessions/{session_id}", json={"archived": True})
+    ).json()["archived"] is True
+    assert (
+        await client.patch(f"/api/sessions/{session_id}", json={"archived": False})
+    ).json()["archived"] is False
+    assert [row["id"] for row in (await client.get("/api/sessions")).json()["sessions"]] == [
+        session_id
+    ]
+
+
+async def test_patching_an_unknown_session_is_a_404(client):
+    assert (await client.patch("/api/sessions/999", json={"title": "x"})).status_code == 404
+
+
+async def test_deleting_an_unknown_session_is_a_404(client):
+    assert (await client.delete("/api/sessions/999")).status_code == 404
+
+
+# ------------------------------------------------------------- delete cascade
+
+
+async def test_the_test_engine_enforces_foreign_keys(db_engine):
+    """Without this pragma the cascade tests below would pass for the wrong reason.
+
+    SQLite ignores ``ON DELETE`` clauses unless ``foreign_keys`` is on, so a
+    cascade test on an engine without it asserts nothing at all.
+    """
+    async with db_engine.connect() as connection:
+        result = await connection.exec_driver_sql("PRAGMA foreign_keys")
+        assert result.scalar() == 1
+
+
+async def test_delete_keeps_the_notes_the_session_produced(client, session_factory):
+    """The load-bearing cascade: messages and tool calls go, notes stay.
+
+    A note outlives the chat that produced it — ``notes.session_id`` is
+    ON DELETE SET NULL — so deleting a session must not take the week's write-up
+    with it. Asserted against the tables directly rather than through the API,
+    because an ORM-level cascade could satisfy the API and still leave orphans.
+    """
+    session_id = await create_session(client)
+    async with session_factory() as session:
+        for seq in (1, 2):
+            message = Message(
+                session_id=session_id,
+                seq=seq,
+                role="assistant",
+                kind="assistant",
+                content_json=[],
+            )
+            session.add(message)
+            await session.flush()
+            session.add(
+                ToolCall(
+                    message_id=message.id,
+                    tool_use_id=f"toolu_{seq}",
+                    name="search_feed_items",
+                    source="builtin",
+                )
+            )
+        session.add(
+            Note(title="Weekly notes", body_md="# Weekly\n\nthe body", session_id=session_id)
+        )
+        await session.commit()
+
+    assert (await client.delete(f"/api/sessions/{session_id}")).status_code == 204
+
+    async with session_factory() as session:
+        assert await session.scalar(select(func.count()).select_from(Message)) == 0
+        assert await session.scalar(select(func.count()).select_from(ToolCall)) == 0
+        note = await session.scalar(select(Note))
+        assert note is not None
+        assert note.session_id is None
+        assert note.body_md == "# Weekly\n\nthe body"
+
+
+# ------------------------------------------------------------------ auto-title
+
+
+async def test_the_first_user_message_titles_an_untitled_session(client, session_factory):
+    session_id = await create_session(client)
+
+    await persistence.append_user_message(
+        session_factory, session_id, [{"type": "text", "text": "  what is\n CVE-2026-12345?  "}]
+    )
+
+    title = (await client.get(f"/api/sessions/{session_id}")).json()["session"]["title"]
+    assert title == "what is CVE-2026-12345?"
+
+
+async def test_a_long_first_message_is_cut_on_a_word_boundary(client, session_factory):
+    session_id = await create_session(client)
+    long_text = "the quick brown fox jumps over the lazy dog and keeps on running for miles"
+
+    await persistence.append_user_message(
+        session_factory, session_id, [{"type": "text", "text": long_text}]
+    )
+
+    title = (await client.get(f"/api/sessions/{session_id}")).json()["session"]["title"]
+    assert title.endswith("\u2026")
+    assert len(title) <= persistence.TITLE_CHARS + 1
+    assert long_text.startswith(title[:-1])
+    assert not title[:-1].endswith(" ")
+
+
+async def test_a_title_set_by_hand_is_never_overwritten(client, session_factory):
+    session_id = await create_session(client)
+    await client.patch(f"/api/sessions/{session_id}", json={"title": "Mine"})
+
+    await persistence.append_user_message(
+        session_factory, session_id, [{"type": "text", "text": "something else entirely"}]
+    )
+
+    title = (await client.get(f"/api/sessions/{session_id}")).json()["session"]["title"]
+    assert title == "Mine"
+
+
+async def test_a_later_message_does_not_retitle_a_titled_session(client, session_factory):
+    session_id = await create_session(client)
+    await persistence.append_user_message(
+        session_factory, session_id, [{"type": "text", "text": "first question"}]
+    )
+
+    await persistence.append_user_message(
+        session_factory, session_id, [{"type": "text", "text": "second question"}]
+    )
+
+    title = (await client.get(f"/api/sessions/{session_id}")).json()["session"]["title"]
+    assert title == "first question"
+
+
 # ------------------------------------------------------------------- SSE
 
 
@@ -190,6 +445,31 @@ async def test_no_api_key_yields_an_error_event(app, client):
     assert [name for name, _ in events] == ["error", "done"]
     assert events[0][1]["type"] == "api_error"
     assert events[0][1]["message"] == "no API key configured"
+
+
+async def test_no_api_key_still_keeps_the_question(app, client):
+    """The question survives the error, in the transcript.
+
+    Nothing else was persisted on this path, so the user typed a question, saw
+    "no API key configured", and watched their own message disappear on the next
+    refetch — with nothing to copy out and re-send once the key was set.
+    """
+    session_id = await create_session(client)
+
+    response = await client.post(
+        f"/api/sessions/{session_id}/messages", json={"content": "what is CVE-2026-1234?"}
+    )
+
+    done = parse_sse(response.text)[-1]
+    detail = (await client.get(f"/api/sessions/{session_id}")).json()
+    assert [message["kind"] for message in detail["messages"]] == ["user"]
+    assert detail["messages"][0]["content_json"] == [
+        {"type": "text", "text": "what is CVE-2026-1234?"}
+    ]
+    # The id is announced, so the live view can reconcile instead of duplicating.
+    assert done[1]["message_ids"] == [detail["messages"][0]["id"]]
+    # And the session is titled from it, exactly as a successful turn would.
+    assert detail["session"]["title"] == "what is CVE-2026-1234?"
 
 
 async def test_attached_item_ids_are_resolved_into_the_persisted_content(

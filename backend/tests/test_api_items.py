@@ -32,6 +32,7 @@ async def make_items(session: AsyncSession, feed: Feed, specs: list[dict]) -> li
             url=spec.get("url", f"https://example.test/{index}"),
             title=spec["title"],
             summary=spec.get("summary"),
+            content_text=spec.get("content_text"),
             status=spec.get("status", "unread"),
             published_at=spec.get("published_at", BASE - timedelta(minutes=index)),
             fetched_at=spec.get("fetched_at", BASE),
@@ -153,6 +154,32 @@ async def test_the_search_filter_covers_title_and_summary(
     body = (await client.get("/api/items?q=LOG4")).json()
 
     assert sorted(titles(body)) == ["Log4Shell resurfaces", "Patch Tuesday"]
+
+
+async def test_the_search_filter_covers_the_extracted_article(
+    client: httpx2.AsyncClient, db_session: AsyncSession, feed: Feed
+) -> None:
+    """The CVE is only in the article body — as it is for most extracted items.
+
+    Global search matches ``content_text``, so an inbox that did not would send a
+    search hit to a filtered inbox showing zero rows.
+    """
+    await make_items(
+        db_session,
+        feed,
+        [
+            {
+                "title": "Vendor ships an out-of-band patch",
+                "summary": "Details to follow.",
+                "content_text": "The flaw is tracked as CVE-2026-31337 and is exploited.",
+            },
+            {"title": "Unrelated outage", "summary": "DNS again."},
+        ],
+    )
+
+    body = (await client.get("/api/items?q=CVE-2026-31337")).json()
+
+    assert titles(body) == ["Vendor ships an out-of-band patch"]
 
 
 async def test_search_treats_sql_wildcards_as_literal_text(

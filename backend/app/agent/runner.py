@@ -751,9 +751,11 @@ def _server_result_for(final: Any, use_block: Any) -> Any:
 def parse_tool_input(raw: str) -> dict[str, Any]:
     """Parse an accumulated ``input_json_delta`` buffer.
 
-    Only used by tests and diagnostics — the loop reads the parsed dict off the
-    final message. Opus 5 varies its JSON string escaping, so anything that needs
-    the values must go through a real JSON parse, never string matching.
+    The loop itself never needs this — it reads the parsed dict off the final
+    message — but a consumer watching only the *events* does: note generation
+    harvests the URLs the model fetched out of these buffers. Opus 5 varies its
+    JSON string escaping, so anything that needs the values must go through a
+    real JSON parse, never string matching.
     """
     try:
         parsed = json.loads(raw or "{}")

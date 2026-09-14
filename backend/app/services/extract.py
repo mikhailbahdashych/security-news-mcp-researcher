@@ -112,7 +112,9 @@ async def extract_article(
         return ExtractResult(ok=False, reason=str(exc))
     except httpx2.HTTPStatusError as exc:
         return ExtractResult(ok=False, reason=f"HTTP {exc.response.status_code}")
-    except httpx2.TimeoutException:
+    except (httpx2.TimeoutException, TimeoutError):
+        # ``TimeoutError`` is the whole-fetch budget in ``fetch_guarded`` firing;
+        # ``TimeoutException`` is httpx's per-operation one. Same story to the user.
         return ExtractResult(ok=False, reason="timed out")
     except httpx2.HTTPError as exc:
         return ExtractResult(

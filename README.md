@@ -27,6 +27,21 @@ Then open <http://localhost:5173>.
 Prerequisites: [uv](https://docs.astral.sh/uv/) and Node 22+.
 Copy `.env.example` to `.env` if you want to override defaults.
 
+## The Anthropic API key
+
+Set it either way — both work, neither is written to the other:
+
+- **Settings → Anthropic API key** in the app. Stored in the SQLite database and
+  only ever read back masked (`sk-ant-…a1b2`).
+- **`ANTHROPIC_API_KEY`** in `.env` (copied from `.env.example`) or in the real
+  process environment (`ANTHROPIC_API_KEY=... make dev-api`).
+
+Precedence is process environment, then `.env`, then the stored key; an externally
+supplied key overrides the stored one and is never saved to the database. `GET
+/api/settings` reports which one is in force as `key_source`
+(`env` / `stored` / `none`), while `has_api_key` means only "a key is stored in
+this database".
+
 ## The inbox
 
 Feeds are pulled on demand — press **Refresh feeds** — and each entry is deduplicated
@@ -56,11 +71,95 @@ Pointing this app at a FreshRSS or Miniflux instance on your own LAN is a legiti
 setup, and you are the one who configured it. Everything that URL redirects to is
 still checked, and article URLs — which nobody typed — are checked from the first hop.
 
+## MCP servers
+
+Settings → **MCP servers** takes the same `mcpServers` JSON you would paste into Claude
+Desktop. Saved servers' tools become callable from the research chat, namespaced
+`mcp__{server}__{tool}`, alongside the built-in inbox tools and Anthropic's web search.
+
+```json
+{
+  "mcpServers": {
+    "files": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/data/scratch"]
+    },
+    "remote": {
+      "url": "https://example.com/mcp",
+      "headers": { "Authorization": "Bearer ..." }
+    }
+  }
+}
+```
+
+An entry needs **either** `command` (a local stdio process) **or** `url` (Streamable
+HTTP) — never both, never neither — and unknown keys are rejected rather than quietly
+producing a server with no transport. Server names must match `^[A-Za-z0-9_-]{1,64}$`,
+because the name becomes part of every tool name. `"enabled": false` parks a server
+without deleting it.
+
+Unlike the Anthropic API key, `env` and `headers` values come back from `GET
+/api/mcp/servers` exactly as they were stored: the whole blob is edited in place, and a
+config whose credentials had been replaced by `***` could not be saved again without
+retyping them. They are still kept out of logs and error messages.
+
+Nothing connects when you save. The first connect happens when you open the tool list,
+press **Reconnect**, or start a chat turn — a server that is slow or broken can never
+hold up boot, the health check, or a turn that does not use it. A server gets 10 s to
+start and speak protocol and 60 s per tool call; past either it is marked `error` with
+the reason, its tools disappear, and everything else keeps working.
+
+Per-tool toggles live under **Show tools**. A disabled tool is not offered to the model
+at all. Keep the total under about 40: large tool sets make models pick worse and the
+definitions cost prompt tokens on every turn, so the panel warns above that.
+
+### stdio servers run inside the container
+
+In Docker, a `command` server is spawned **inside the container's namespace**:
+
+- Paths are container paths. `/data` is the mounted volume — put scratch directories
+  there (`/data/scratch`), not on your Mac. Your home directory is not reachable.
+- `localhost` is the container, not your machine. A service on your host is not
+  reachable at `http://localhost:...` from a stdio server started in here.
+- Secrets must go in the entry's `env` block. The MCP SDK does **not** hand the
+  subprocess this app's environment — it gets an allow-list (`HOME`, `LOGNAME`, `PATH`,
+  `SHELL`, `TERM`, `USER`) with `env` merged on top. So `npx` resolves through `PATH`,
+  but a server's API key only exists if you wrote it into `env`.
+- The first `npx -y ...` downloads the package inside the container, which can take
+  longer than the 10 s connect budget on a cold cache. If it trips, press **Reconnect** —
+  the download has finished by then. The cache lives on the `/data` volume, so it
+  survives a rebuild and only the very first run is slow.
+
+**The escape hatch**: if a server genuinely needs your host — your real filesystem, a
+local database, an SSH agent — run the backend on the host instead:
+
+```sh
+make dev-api     # stdio servers now spawn on your machine, not in a container
+make dev-web     # and the UI, on :5173 — dev-api serves the API only
+```
+
+Two things are **not** shared with the Docker app. It is a **separate database**:
+`make dev-api` uses `backend/data/app.db`, while the container's data lives in the
+named `appdata` volume — your feeds, chats and notes are not there. And `make dev-api`
+serves no UI: without `make dev-web` there is nothing at `:5173` to open.
+
+To work against the container's data instead, copy it out of the volume and point
+`DB_PATH` at the copy (a copy, not the live file — two processes writing one SQLite
+database across a Docker mount is how it gets corrupted):
+
+```sh
+docker compose cp app:/data/app.db backend/data/from-docker.db
+DB_PATH=./data/from-docker.db make dev-api
+```
+
+`url`-transport servers behave identically in both modes and are the better choice for
+anything remote.
+
 ## Tests and linting
 
 ```sh
-make test        # cd backend && uv run pytest
-make lint        # cd backend && uv run ruff check .
+make test        # backend: uv run pytest, then frontend: npx vitest run
+make lint        # backend: uv run ruff check ., then frontend: npm run lint (oxlint)
 ```
 
 ## Layout

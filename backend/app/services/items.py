@@ -23,7 +23,7 @@ from sqlalchemy import Select, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import FEED_ITEM_STATUSES, Feed, FeedItem
-from app.db.util import LIKE_ESCAPE_CHAR, escape_like
+from app.db.util import matches
 
 ItemStatus = Literal["unread", "starred", "dismissed"]
 StatusFilter = Literal["unread", "starred", "dismissed", "all"]
@@ -45,8 +45,13 @@ class ItemPage:
     next_cursor: str | None = None
 
 
-def _sort_key():
-    """The newest-first sort expression — see the module docstring."""
+def sort_key():
+    """The newest-first sort expression — see the module docstring.
+
+    Public because global search orders the same rows and must not invent its own
+    definition of "newest": ordering by ``published_at`` alone put every undated
+    item at the bottom of the results while the inbox had it interleaved.
+    """
     return func.coalesce(FeedItem.published_at, FeedItem.fetched_at)
 
 
@@ -83,13 +88,19 @@ def _apply_filters(
     if feed_id is not None:
         statement = statement.where(FeedItem.feed_id == feed_id)
     if q and q.strip():
-        # One escaping rule for the whole app (app.db.util), so a query containing
+        # One matching rule for the whole app (app.db.util), so a query containing
         # % or _ searches for those characters instead of turning into a wildcard.
-        pattern = f"%{escape_like(q.strip())}%"
+        #
+        # The extracted article counts too, and has to: the global search matches
+        # it, so without it a search hit would deep-link to an inbox filtered by
+        # the same query and showing no rows — and the model's `search_feed_items`
+        # could not find a CVE that only ever appears in an article body.
+        needle = q.strip()
         statement = statement.where(
             or_(
-                FeedItem.title.ilike(pattern, escape=LIKE_ESCAPE_CHAR),
-                FeedItem.summary.ilike(pattern, escape=LIKE_ESCAPE_CHAR),
+                matches(FeedItem.title, needle),
+                matches(FeedItem.summary, needle),
+                matches(FeedItem.content_text, needle),
             )
         )
     return statement
@@ -107,14 +118,15 @@ async def list_items(
     """One newest-first page of feed items.
 
     ``status`` is one of :data:`STATUS_FILTERS` (``"all"`` means no status filter);
-    ``q`` is a case-insensitive substring of the title or summary. Raises
-    ``ValueError`` for an unknown status or a malformed cursor.
+    ``q`` is a case-insensitive substring of the title, the summary or the
+    extracted article text. Raises ``ValueError`` for an unknown status or a
+    malformed cursor.
     """
     if status not in STATUS_FILTERS:
         raise ValueError(f"Unknown status filter: {status!r}")
     limit = max(1, min(limit, MAX_LIMIT))
 
-    sort_key = _sort_key()
+    sorted_by = sort_key()
     statement = _apply_filters(select(FeedItem), status=status, feed_id=feed_id, q=q)
 
     if cursor:
@@ -122,11 +134,14 @@ async def list_items(
         # Expanded rather than a row-value comparison: identical semantics, and it
         # reads the same on any backend the app might grow into.
         statement = statement.where(
-            or_(sort_key < after_sort, (sort_key == after_sort) & (FeedItem.id < after_id))
+            or_(
+                sorted_by < after_sort,
+                (sorted_by == after_sort) & (FeedItem.id < after_id),
+            )
         )
 
     # One extra row is the cheapest way to know whether a next page exists.
-    statement = statement.order_by(sort_key.desc(), FeedItem.id.desc()).limit(limit + 1)
+    statement = statement.order_by(sorted_by.desc(), FeedItem.id.desc()).limit(limit + 1)
     rows = list((await session.execute(statement)).scalars())
 
     next_cursor: str | None = None
@@ -178,4 +193,5 @@ __all__ = [
     "feed_titles",
     "list_items",
     "set_status",
+    "sort_key",
 ]

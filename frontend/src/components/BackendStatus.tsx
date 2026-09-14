@@ -2,7 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 
 import { fetchHealth } from '../api/client'
 
-/** Demo usage of the API client + React Query: live backend health in the sidebar footer. */
+/** Live backend health in the sidebar footer, polled every 30 s. */
 export default function BackendStatus() {
   const { data, isPending, isError } = useQuery({
     queryKey: ['health'],

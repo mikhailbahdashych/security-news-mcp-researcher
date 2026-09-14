@@ -2,8 +2,9 @@
 
 Everything configurable lives in the ``settings`` table as TEXT, with the typed
 accessors below doing the parsing. Callers read through :func:`get_effective_api_key`
-rather than the raw key so that an ``ANTHROPIC_API_KEY`` environment variable can
-override the stored value without ever being written to the database.
+rather than the raw key so that an ``ANTHROPIC_API_KEY`` supplied from outside the
+database — the process environment, or ``.env`` by way of :class:`app.config.Settings`
+— can override the stored value without ever being written to the database.
 
 The raw API key must never reach a response body or a log line — use
 :func:`mask_key` for anything user-visible.
@@ -13,14 +14,21 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
+from typing import Literal
 
 from sqlalchemy import select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import Settings
 from app.db.models import Setting, utcnow
 
 API_KEY_ENV_VAR = "ANTHROPIC_API_KEY"
+
+#: Where the key actually used for Anthropic calls came from. ``"env"`` covers both
+#: spellings of "configured outside the app" — the process environment and the
+#: ``ANTHROPIC_API_KEY`` line of ``.env``, which reaches us as ``Settings``.
+KeySource = Literal["env", "stored", "none"]
 
 DEFAULT_NOTE_TEMPLATE = """For each news item, produce a section with these headings:
 ## {Item title}
@@ -127,16 +135,54 @@ async def get_int(session: AsyncSession, key: str) -> int:
     return _parse_int(await get(session, key), key)
 
 
-async def get_effective_api_key(session: AsyncSession) -> str:
-    """The API key actually used for Anthropic calls.
+def external_api_key(settings: Settings | None = None) -> str:
+    """The key configured outside the database, or ``""``.
 
-    ``ANTHROPIC_API_KEY`` wins when set and non-empty; otherwise the stored key is
-    used. The environment value is never written back to the database.
+    Two places count, in this order: the real process environment
+    (``ANTHROPIC_API_KEY=... make dev-api``), then the app's :class:`Settings`,
+    which is what actually loads a key written into ``.env`` — pydantic-settings
+    reads ``.env`` into its own fields and never exports it to ``os.environ``, so
+    reading the environment alone silently ignored it.
+
+    ``settings`` is optional so that this stays a plain service function: passing
+    ``None`` means "no ``Settings`` source", which is what a caller that has no app
+    handy (and every test that has not opted in) wants.
     """
     from_env = (os.environ.get(API_KEY_ENV_VAR) or "").strip()
     if from_env:
         return from_env
+    return (settings.anthropic_api_key or "").strip() if settings is not None else ""
+
+
+async def get_effective_api_key(
+    session: AsyncSession, settings: Settings | None = None
+) -> str:
+    """The API key actually used for Anthropic calls.
+
+    Precedence: process environment, then the app ``Settings`` (i.e. ``.env``),
+    then the key stored in the database. Neither external value is ever written
+    back to the database.
+    """
+    external = external_api_key(settings)
+    if external:
+        return external
     return (await get(session, "anthropic_api_key") or "").strip()
+
+
+async def get_key_source(
+    session: AsyncSession, settings: Settings | None = None
+) -> KeySource:
+    """Which of the three sources :func:`get_effective_api_key` would use.
+
+    Purely informational: ``has_api_key`` still means "a key is stored in this
+    database", so the Settings page can keep saying whether *its* key is set while
+    still telling the user that an external one is overriding it.
+    """
+    if external_api_key(settings):
+        return "env"
+    if (await get(session, "anthropic_api_key") or "").strip():
+        return "stored"
+    return "none"
 
 
 def _parse_bool(value: str | None, key: str) -> bool:
@@ -165,11 +211,14 @@ __all__ = [
     "API_KEY_ENV_VAR",
     "DEFAULT_NOTE_TEMPLATE",
     "DEFAULT_SETTINGS",
+    "KeySource",
+    "external_api_key",
     "get",
     "get_all",
     "get_bool",
     "get_effective_api_key",
     "get_int",
+    "get_key_source",
     "get_str",
     "mask_key",
     "seed_defaults",

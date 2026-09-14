@@ -57,8 +57,9 @@ SEARCH_FEED_ITEMS_DEFINITION = {
             "q": {
                 "type": "string",
                 "description": (
-                    "Case-insensitive keyword or phrase to match against item titles and "
-                    "summaries, e.g. a CVE ID, vendor name, or malware family."
+                    "Case-insensitive keyword or phrase to match against item titles, "
+                    "summaries and any already-extracted article text, e.g. a CVE ID, "
+                    "vendor name, or malware family."
                 ),
             },
             "status": {

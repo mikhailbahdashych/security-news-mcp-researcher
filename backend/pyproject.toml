@@ -16,13 +16,16 @@ dependencies = [
     "trafilatura>=2.0.0",
     "anyio>=4.0",
     "sse-starlette>=3.0",
+    "mcp>=2.2.0,<3",
+    # Runtime, not a test helper: every outbound fetch in the app (feeds,
+    # articles, the URL guard, the MCP HTTP transport) is httpx2, not httpx.
+    "httpx2",
 ]
 
 [dependency-groups]
 dev = [
     "pytest",
     "pytest-asyncio",
-    "httpx2",
     "ruff",
 ]
 

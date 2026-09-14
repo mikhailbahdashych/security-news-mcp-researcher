@@ -5,6 +5,8 @@ interface ItemRowProps {
   item: FeedItem
   selected: boolean
   busy: boolean
+  /** The row a search result pointed at — called out so it is findable on a long page. */
+  highlighted?: boolean
   onToggleSelect: (id: number, selected: boolean) => void
   onStar: (item: FeedItem) => void
   onDismiss: (item: FeedItem) => void
@@ -36,6 +38,7 @@ export default function ItemRow({
   item,
   selected,
   busy,
+  highlighted = false,
   onToggleSelect,
   onStar,
   onDismiss,
@@ -46,7 +49,13 @@ export default function ItemRow({
   const dismissed = item.status === 'dismissed'
 
   return (
-    <li className={`flex gap-3 px-4 py-3.5 ${dismissed ? 'opacity-60' : ''}`}>
+    <li
+      // The id is the anchor the Inbox scrolls to for a `?item=` deep link.
+      id={`item-${item.id}`}
+      className={`flex gap-3 px-4 py-3.5 ${dismissed ? 'opacity-60' : ''} ${
+        highlighted ? 'bg-amber-50 ring-2 ring-inset ring-amber-300' : ''
+      }`}
+    >
       <input
         type="checkbox"
         checked={selected}

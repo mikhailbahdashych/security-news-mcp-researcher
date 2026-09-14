@@ -1,5 +1,5 @@
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
 
 import {
@@ -11,8 +11,11 @@ import {
   messagesUrl,
   renameSession,
   sessionQueryKey,
+  sessionsListKey,
   sessionsQueryKey,
+  setSessionArchived,
   type ErrorPayload,
+  type SessionFilters,
 } from '../api/chat'
 import type { FeedItem } from '../api/inbox'
 import Composer from '../components/chat/Composer'
@@ -23,6 +26,8 @@ import ThinkingPane from '../components/chat/ThinkingPane'
 import ToolCallCard from '../components/chat/ToolCallCard'
 import Transcript from '../components/chat/Transcript'
 import TurnError from '../components/chat/TurnError'
+import useDebouncedValue from '../components/inbox/useDebouncedValue'
+import GenerateNotesDialog from '../components/notes/GenerateNotesDialog'
 import { SSEHttpError, streamSSE } from '../lib/sse'
 
 /** What the Inbox's "Research these" button hands over. */
@@ -43,12 +48,24 @@ export default function ChatPage() {
   const [attached, setAttached] = useState<FeedItem[]>(
     () => (location.state as ChatNavigationState | null)?.attachedItems ?? [],
   )
+  const [notesOpen, setNotesOpen] = useState(false)
+  const [sessionSearch, setSessionSearch] = useState('')
+  const [showArchived, setShowArchived] = useState(false)
   const abort = useRef<AbortController | null>(null)
   const bottom = useRef<HTMLDivElement>(null)
 
+  const debouncedSessionSearch = useDebouncedValue(sessionSearch)
+  const sessionFilters = useMemo<SessionFilters>(
+    () => ({ q: debouncedSessionSearch, archived: showArchived ? 'true' : 'false' }),
+    [debouncedSessionSearch, showArchived],
+  )
+
   const sessions = useInfiniteQuery({
-    queryKey: sessionsQueryKey,
-    queryFn: ({ pageParam }) => fetchSessions(pageParam as string | undefined),
+    // Keyed by the filters, prefixed by `sessionsQueryKey` so one invalidation
+    // after a rename or an archive still refreshes whichever variant is on
+    // screen.
+    queryKey: sessionsListKey(sessionFilters),
+    queryFn: ({ pageParam }) => fetchSessions(sessionFilters, pageParam as string | undefined),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (page) => page.next_cursor ?? undefined,
   })
@@ -83,6 +100,14 @@ export default function ChatPage() {
 
   const rename = useMutation({
     mutationFn: ({ id, title }: { id: number; title: string }) => renameSession(id, title),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: sessionsQueryKey }),
+  })
+
+  const archive = useMutation({
+    mutationFn: ({ id, archived }: { id: number; archived: boolean }) =>
+      setSessionArchived(id, archived),
+    // Invalidate rather than patch the cache: an archived row leaves the default
+    // list entirely, which is not an edit to a row but a change of membership.
     onSuccess: () => queryClient.invalidateQueries({ queryKey: sessionsQueryKey }),
   })
 
@@ -169,6 +194,12 @@ export default function ChatPage() {
   }, [sessionId])
 
   const allSessions = sessions.data?.pages.flatMap((page) => page.sessions) ?? []
+  // Which row is mid-write, so the sidebar can grey it out while it saves.
+  const busyId =
+    (rename.isPending ? rename.variables?.id : undefined) ??
+    (archive.isPending ? archive.variables?.id : undefined) ??
+    (remove.isPending ? remove.variables : undefined) ??
+    null
   const messages = detail.data?.messages ?? []
   const awaitingFirstText = live.streaming && live.text === ''
 
@@ -177,8 +208,15 @@ export default function ChatPage() {
       <SessionSidebar
         sessions={allSessions}
         activeId={sessionId}
+        search={sessionSearch}
+        showArchived={showArchived}
+        isPending={sessions.isPending}
+        isError={sessions.isError}
         hasMore={Boolean(sessions.hasNextPage)}
         loadingMore={sessions.isFetchingNextPage}
+        busyId={busyId}
+        onSearchChange={setSessionSearch}
+        onShowArchivedChange={setShowArchived}
         onNew={() => {
           dispatch({ kind: 'reset' })
           navigate('/chat')
@@ -188,25 +226,38 @@ export default function ChatPage() {
           navigate(`/chat/${id}`)
         }}
         onRename={(id, title) => rename.mutate({ id, title })}
+        onArchive={(id, archived) => archive.mutate({ id, archived })}
         onDelete={(id) => remove.mutate(id)}
         onLoadMore={() => void sessions.fetchNextPage()}
       />
 
       <section className="flex min-w-0 flex-1 flex-col">
-        <header className="border-b border-slate-200 px-6 py-3">
-          <h1 className="truncate text-sm font-semibold text-slate-900">
-            {detail.data?.session.title || 'New chat'}
-          </h1>
-          {detail.data ? (
-            <p className="text-xs text-slate-500">
-              {detail.data.session.model} · {detail.data.session.total_input_tokens} in /{' '}
-              {detail.data.session.total_output_tokens} out
-            </p>
-          ) : (
-            <p className="text-xs text-slate-500">
-              Ask about the inbox, an advisory, or a URL you paste.
-            </p>
-          )}
+        <header className="flex items-start justify-between gap-3 border-b border-slate-200 px-6 py-3">
+          <div className="min-w-0">
+            <h1 className="truncate text-sm font-semibold text-slate-900">
+              {detail.data?.session.title || 'New chat'}
+            </h1>
+            {detail.data ? (
+              <p className="text-xs text-slate-500">
+                {detail.data.session.model} · {detail.data.session.total_input_tokens} in /{' '}
+                {detail.data.session.total_output_tokens} out
+              </p>
+            ) : (
+              <p className="text-xs text-slate-500">
+                Ask about the inbox, an advisory, or a URL you paste.
+              </p>
+            )}
+          </div>
+          {sessionId !== null ? (
+            <button
+              type="button"
+              disabled={live.streaming}
+              onClick={() => setNotesOpen(true)}
+              className="shrink-0 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:border-slate-400 disabled:opacity-40"
+            >
+              Generate notes from this session
+            </button>
+          ) : null}
         </header>
 
         <div className="flex-1 overflow-y-auto px-6 py-4">
@@ -239,6 +290,13 @@ export default function ChatPage() {
 
           <div ref={bottom} />
         </div>
+
+        {notesOpen && sessionId !== null ? (
+          <GenerateNotesDialog
+            initialSessionId={sessionId}
+            onClose={() => setNotesOpen(false)}
+          />
+        ) : null}
 
         <Composer
           streaming={live.streaming}

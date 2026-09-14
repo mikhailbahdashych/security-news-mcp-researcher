@@ -16,11 +16,13 @@ import {
 } from '../api/settings'
 import ApiKeySection from '../components/settings/ApiKeySection'
 import Field, { controlClass } from '../components/settings/Field'
+import McpSection from '../components/settings/McpSection'
 import SettingsSection from '../components/settings/SettingsSection'
 import Toggle from '../components/settings/Toggle'
 
-/** Everything on this page except the write-only API key. */
-type Draft = Omit<AppSettings, 'has_api_key' | 'api_key_masked'>
+/** Everything this form edits: not the write-only API key, and not the read-only
+ *  `key_source` that describes where it came from. */
+type Draft = Omit<AppSettings, 'has_api_key' | 'api_key_masked' | 'key_source'>
 
 /** Listed field by field so that adding a setting to the API is a type error here
  *  until the form handles it. */
@@ -208,6 +210,8 @@ function SettingsForm({ settings }: { settings: AppSettings }) {
           </Field>
         </SettingsSection>
 
+        <McpSection />
+
         <SettingsSection title="Feeds">
           <Field
             label="Feed timeout (seconds)"
@@ -228,7 +232,17 @@ function SettingsForm({ settings }: { settings: AppSettings }) {
           title="Prompts"
           description="Reused every time notes are generated or a research chat starts."
         >
-          <Field label="Note template" htmlFor="note-template">
+          <Field
+            label="Note template"
+            htmlFor="note-template"
+            hint={
+              <>
+                One section per news item. <code>{'{Item title}'}</code> is replaced with the
+                item&rsquo;s real headline; keep <code>##</code> as the per-item heading level so
+                notes render consistently.
+              </>
+            }
+          >
             <textarea
               id="note-template"
               rows={9}

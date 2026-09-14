@@ -4,8 +4,10 @@ import anthropic
 import httpx2
 import pytest
 from fakes.anthropic import FakeAnthropicClient, api_error
+from httpx2 import ASGITransport
 
 from app.api.deps import get_anthropic_client
+from app.config import Settings
 from app.services import settings as settings_service
 
 RAW_KEY = "sk-ant-api03-supersecretvalue-a1b2"
@@ -31,6 +33,7 @@ async def test_get_settings_returns_seeded_defaults(client: httpx2.AsyncClient) 
         "thinking_display": "summarized",
         "has_api_key": False,
         "api_key_masked": "",
+        "key_source": "none",
         "web_search_enabled": True,
         "web_search_max_uses": 8,
         "web_fetch_enabled": True,
@@ -160,7 +163,7 @@ async def test_anthropic_client_is_closed_when_the_request_ends(db_session) -> N
     """The client owns an httpx2 pool; leaking one per request would leak sockets."""
     await settings_service.set_value(db_session, "anthropic_api_key", RAW_KEY)
 
-    dependency = get_anthropic_client(db_session)
+    dependency = get_anthropic_client(db_session, Settings(anthropic_api_key=""))
     client = await anext(dependency)
 
     assert client is not None
@@ -173,9 +176,102 @@ async def test_anthropic_client_is_closed_when_the_request_ends(db_session) -> N
 
 
 async def test_anthropic_client_is_none_without_a_key(db_session) -> None:
-    dependency = get_anthropic_client(db_session)
+    dependency = get_anthropic_client(db_session, Settings(anthropic_api_key=""))
 
     assert await anext(dependency) is None
 
     with pytest.raises(StopAsyncIteration):
         await anext(dependency)
+
+
+# ---------------------------------- the key that lives in .env, not the database
+
+
+#: Stands in for an ``ANTHROPIC_API_KEY=`` line in ``.env``: pydantic-settings puts
+#: it on ``Settings``, and never into ``os.environ``.
+DOTENV_KEY = "sk-ant-api03-from-the-dotenv-file-z9y8"
+
+
+class ClosableFakeClient(FakeAnthropicClient):
+    """``FakeAnthropicClient`` plus the ``close()`` the dependency awaits."""
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+@pytest.fixture
+def dotenv_app(app_factory, tmp_path, monkeypatch):
+    """An app whose ``Settings`` carry the key — and nothing else does.
+
+    The stub records the key ``get_anthropic_client`` built it with, so a test can
+    assert the whole path (``.env`` -> ``Settings`` -> effective key -> client)
+    rather than only the endpoint's answer.
+    """
+    built: list[str] = []
+
+    def fake_build(api_key: str) -> ClosableFakeClient:
+        built.append(api_key)
+        return ClosableFakeClient()
+
+    monkeypatch.setattr("app.api.deps.build_anthropic_client", fake_build)
+    application = app_factory(
+        Settings(
+            db_path=tmp_path / "app.db",
+            static_dir=tmp_path / "absent",
+            anthropic_api_key=DOTENV_KEY,
+        )
+    )
+    return application, built
+
+
+@pytest.fixture
+async def dotenv_client(dotenv_app):
+    application, built = dotenv_app
+    async with httpx2.AsyncClient(
+        transport=ASGITransport(app=application), base_url="http://test"
+    ) as http:
+        yield http, built
+
+
+async def test_a_key_only_in_dotenv_is_used_for_the_live_check(dotenv_client) -> None:
+    """The bug this guards: ``.env.example`` advertised ``ANTHROPIC_API_KEY``, the
+    service read ``os.environ``, and a user who followed the README got "no API key
+    configured" with a perfectly good key on disk."""
+    http, built = dotenv_client
+
+    response = await http.post("/api/settings/test-key")
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "error": None}
+    assert built == [DOTENV_KEY]
+
+
+async def test_a_key_only_in_dotenv_leaves_has_api_key_false_but_names_the_source(
+    dotenv_client,
+) -> None:
+    """``has_api_key`` keeps meaning "stored here"; ``key_source`` explains the rest."""
+    http, _ = dotenv_client
+
+    body = (await http.get("/api/settings")).json()
+
+    assert body["has_api_key"] is False
+    assert body["api_key_masked"] == ""
+    assert body["key_source"] == "env"
+    # Still write-only: the raw key never travels, whichever source it came from.
+    assert DOTENV_KEY not in str(body)
+
+
+async def test_the_dotenv_key_is_never_written_to_the_database(dotenv_client) -> None:
+    http, _ = dotenv_client
+
+    await http.post("/api/settings/test-key")
+
+    assert (await http.get("/api/settings")).json()["has_api_key"] is False
+
+
+async def test_key_source_is_stored_once_a_key_is_saved(client: httpx2.AsyncClient) -> None:
+    assert (await client.get("/api/settings")).json()["key_source"] == "none"
+
+    await client.put("/api/settings", json={"anthropic_api_key": RAW_KEY})
+
+    assert (await client.get("/api/settings")).json()["key_source"] == "stored"

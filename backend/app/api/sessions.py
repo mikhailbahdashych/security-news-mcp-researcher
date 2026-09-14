@@ -1,22 +1,14 @@
 """Research-session CRUD and the streaming chat turn.
 
-The streaming endpoint is the interesting one. Three things it has to get right:
-
-* **The turn must outlive the client.** An SSE disconnect does not stop billing —
-  the LLM call keeps running server-side — so the runner is consumed inside a task
-  registered in :mod:`app.api.tasks`, and a disconnect cancels that task rather
-  than merely stopping the writes.
-* **No buffering.** ``EventSourceResponse`` with ``ping=15`` keeps the connection
-  alive through a long thinking pause, and ``X-Accel-Buffering: no`` stops a proxy
-  from holding the stream back.
-* **One turn per session.** A second POST while a turn is running is a 409, not a
-  second billed turn.
+The streaming endpoint is the interesting one, and the parts it shares with note
+generation — the cancellable pump, the disconnect watcher, the headers and the
+frame encoder — live in :mod:`app.api.streaming`. What stays here is what is
+specific to a chat turn: the attachments, the per-session conflict check, and the
+fact that a chat turn ends on the runner's own ``done`` event.
 """
 
 from __future__ import annotations
 
-import asyncio
-import json
 import logging
 from typing import Annotated, Any
 
@@ -27,15 +19,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
 
 from app.agent import events as ev
+from app.agent import persistence
 from app.agent import runner as agent_runner
-from app.agent.builtin import BuiltinToolProvider, ServerToolProvider
+from app.agent.providers import build_tool_providers, turn_settings
 from app.agent.registry import ToolRegistry
 from app.api import tasks as task_registry
-from app.api.deps import ChatClientFactory, DbSession, SessionFactory
-from app.db.models import FeedItem, Message, ResearchSession, ToolCall
-from app.db.util import LIKE_ESCAPE_CHAR, escape_like
+from app.api.deps import AppSettings, ChatClientFactory, DbSession, SessionFactory
+from app.api.streaming import SSE_HEADERS, SSE_PING_S, frames, pump_agent_events, sse_frame
+from app.db.models import FeedItem, Message, ResearchSession, ToolCall, utcnow
+from app.schemas.common import CancelResponse
 from app.schemas.sessions import (
-    CancelResponse,
+    ArchivedFilter,
     MessageCreate,
     MessageRead,
     SessionCreate,
@@ -46,6 +40,7 @@ from app.schemas.sessions import (
     ToolCallRead,
 )
 from app.services import items as items_service
+from app.services import search as search_service
 from app.services import settings as settings_service
 
 logger = logging.getLogger(__name__)
@@ -54,9 +49,6 @@ router = APIRouter(tags=["sessions"])
 
 DEFAULT_LIMIT = 50
 MAX_LIMIT = 200
-
-#: How long the disconnect watcher waits between polls of ``is_disconnected``.
-DISCONNECT_POLL_S = 1.0
 
 
 # ---------------------------------------------------------------- session CRUD
@@ -72,20 +64,27 @@ async def _load_session(session: AsyncSession, session_id: int) -> ResearchSessi
 @router.get("/sessions", response_model=SessionPageRead)
 async def list_sessions(
     session: DbSession,
-    archived: Annotated[bool | None, Query()] = False,
+    archived: Annotated[ArchivedFilter, Query()] = "false",
     q: Annotated[str | None, Query(max_length=200)] = None,
     limit: Annotated[int, Query(ge=1, le=MAX_LIMIT)] = DEFAULT_LIMIT,
     cursor: Annotated[str | None, Query(max_length=200)] = None,
 ) -> SessionPageRead:
-    """Newest-updated-first page of sessions."""
+    """Newest-updated-first page of sessions.
+
+    ``archived`` defaults to hiding archived threads — that is the entire point
+    of archiving one — and ``"all"`` is the only way to see both sets at once.
+
+    ``q`` matches the title *or* anything said inside the session, through the
+    same predicate the global search uses, so the sidebar filter and the search
+    panel never disagree about which chats mention a CVE.
+    """
     statement = select(ResearchSession).order_by(
         ResearchSession.updated_at.desc(), ResearchSession.id.desc()
     )
-    if archived is not None:
-        statement = statement.where(ResearchSession.archived == archived)
+    if archived != "all":
+        statement = statement.where(ResearchSession.archived.is_(archived == "true"))
     if q and q.strip():
-        pattern = f"%{escape_like(q.strip())}%"
-        statement = statement.where(ResearchSession.title.ilike(pattern, escape=LIKE_ESCAPE_CHAR))
+        statement = statement.where(search_service.session_match(q.strip()))
     if cursor:
         try:
             sort_value, last_id = items_service.decode_cursor(cursor)
@@ -165,11 +164,23 @@ async def get_session(session_id: int, session: DbSession) -> SessionDetail:
 async def update_session(
     session_id: int, payload: SessionUpdate, session: DbSession
 ) -> SessionRead:
+    """Rename, archive or unarchive one session.
+
+    An empty (or null) title clears it back to NULL rather than storing a blank:
+    the auto-title only ever fills a session that has none, so clearing is how a
+    user asks for the machine-written title back on the next message. Nothing is
+    retroactively re-titled from the existing transcript.
+    """
     research = await _load_session(session, session_id)
     changes = payload.model_dump(exclude_unset=True)
-    for field, value in changes.items():
-        if value is not None:
-            setattr(research, field, value)
+    if "title" in changes:
+        research.title = (changes["title"] or "").strip() or None
+    if changes.get("archived") is not None:
+        research.archived = changes["archived"]
+    # Set explicitly rather than leaning on ``onupdate``: the sidebar is ordered
+    # by this column, so a rename should float the thread back to the top even
+    # when the new title happens to equal the old one.
+    research.updated_at = utcnow()
     await session.commit()
     await session.refresh(research)
     return SessionRead.model_validate(research)
@@ -230,33 +241,6 @@ async def _resolve_attachments(session: AsyncSession, item_ids: list[int]) -> li
     return [{"type": "text", "text": "\n".join(lines)}]
 
 
-async def _turn_settings(session: AsyncSession) -> dict[str, Any]:
-    """Every setting the turn needs, read once.
-
-    Never per-event: a byte change mid-conversation would invalidate the prompt
-    cache for the rest of the thread.
-    """
-    return {
-        "api_key": await settings_service.get_effective_api_key(session),
-        "model": await settings_service.get_str(session, "model"),
-        "effort": await settings_service.get_str(session, "effort"),
-        "thinking_display": await settings_service.get_str(session, "thinking_display"),
-        "max_tool_turns": await settings_service.get_int(session, "max_tool_turns"),
-        "system_prompt_extra": await settings_service.get_str(session, "system_prompt_extra"),
-    }
-
-
-def _sse(event: ev.AgentEvent) -> dict[str, str]:
-    name, payload = event.to_sse()
-    return {"event": name, "data": json.dumps(payload, default=str)}
-
-
-async def _error_stream(error: ev.Error, session_id: int) -> Any:
-    """A two-frame stream for a failure we can see before the runner starts."""
-    yield _sse(error)
-    yield _sse(ev.Done(session_id=session_id, message_ids=[]))
-
-
 @router.post("/sessions/{session_id}/messages")
 async def post_message(
     session_id: int,
@@ -265,6 +249,7 @@ async def post_message(
     session: DbSession,
     session_factory: SessionFactory,
     client_factory: ChatClientFactory,
+    app_settings: AppSettings,
 ) -> Response:
     """Run one agent turn, streamed as SSE."""
     await _load_session(session, session_id)
@@ -275,30 +260,31 @@ async def post_message(
             status.HTTP_409_CONFLICT, detail="A turn is already running for this session."
         )
 
-    resolved = await _turn_settings(session)
+    resolved = await turn_settings(session, app_settings)
     user_content: list[dict[str, Any]] = [{"type": "text", "text": payload.content}]
     user_content.extend(await _resolve_attachments(session, payload.attached_item_ids))
 
-    headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
-
     if not resolved["api_key"]:
+        # Persist the question before answering the error. Without this the user
+        # types a question, gets "no API key configured", and watches their own
+        # message vanish — the turn wrote nothing, so the refetched transcript has
+        # nothing in it. The message costs nothing and is exactly what they will
+        # want to re-send once the key is set.
+        message_id = await persistence.append_user_message(
+            session_factory, session_id, user_content
+        )
         return EventSourceResponse(
-            _error_stream(
-                ev.Error(error_type="api_error", message="no API key configured"), session_id
+            frames(
+                ev.Error(error_type="api_error", message="no API key configured"),
+                ev.Done(session_id=session_id, message_ids=[message_id]),
             ),
-            ping=15,
-            headers=headers,
+            ping=SSE_PING_S,
+            headers=SSE_HEADERS,
         )
 
-    server_tools = await ServerToolProvider.from_settings(session)
-    registry = ToolRegistry(
-        [
-            BuiltinToolProvider(session_factory),
-            server_tools,
-            # Task 5 appends its McpToolProvider here — the registry takes a
-            # sequence precisely so that is the only change needed.
-        ]
-    )
+    # Built-ins, Anthropic's server tools and every reachable MCP server, in that
+    # order. Shared with note generation so the two cannot offer different tools.
+    registry = ToolRegistry(await build_tool_providers(request, session, session_factory))
 
     client = client_factory(resolved["api_key"])
     generator = agent_runner.run(
@@ -315,7 +301,9 @@ async def post_message(
     )
 
     return EventSourceResponse(
-        _stream_turn(request, generator, client, key, session_id), ping=15, headers=headers
+        _stream_turn(request, generator, client, key, session_id),
+        ping=SSE_PING_S,
+        headers=SSE_HEADERS,
     )
 
 
@@ -326,69 +314,20 @@ async def _stream_turn(
     key: str,
     session_id: int,
 ) -> Any:
-    """Pump the runner's events out as SSE frames.
+    """Encode the runner's events as SSE frames.
 
-    The runner is consumed inside a task so that a client disconnect or a POST to
-    ``/cancel`` can cancel the LLM call itself. Whatever the runner already
-    committed stays committed; only the un-run remainder of the turn is dropped.
+    A chat turn's terminal event is the runner's own ``done``; the two paths that
+    end without one — a duplicate POST and a cancellation, both of which
+    :func:`pump_agent_events` reports as a terminal ``error`` — get one appended
+    here, because the browser waits for ``done`` before it stops streaming.
     """
-    queue: asyncio.Queue[ev.AgentEvent | None] = asyncio.Queue()
+    saw_done = False
+    async for event in pump_agent_events(request, generator, key=key, client=client):
+        saw_done = saw_done or isinstance(event, ev.Done)
+        yield sse_frame(event)
 
-    async def pump() -> None:
-        try:
-            async for event in generator:
-                await queue.put(event)
-        finally:
-            await queue.put(None)
-
-    task = asyncio.create_task(pump())
-    try:
-        await task_registry.register(key, task)
-    except KeyError:
-        task.cancel()
-        yield _sse(ev.Error(error_type="api_error", message="A turn is already running."))
-        yield _sse(ev.Done(session_id=session_id, message_ids=[]))
-        await client.close()
-        return
-
-    cancelled = False
-    try:
-        while True:
-            try:
-                event = await asyncio.wait_for(queue.get(), timeout=DISCONNECT_POLL_S)
-            except TimeoutError:
-                # SSE disconnect alone does not stop billing, so a gone client
-                # must actually cancel the in-flight stream.
-                if await request.is_disconnected():
-                    task.cancel()
-                    cancelled = True
-                    break
-                continue
-
-            if event is None:
-                break
-            yield _sse(event)
-    except asyncio.CancelledError:
-        task.cancel()
-        raise
-    finally:
-        if not task.done():
-            task.cancel()
-            cancelled = True
-        await asyncio.gather(task, return_exceptions=True)
-        # A POST to /cancel kills the pump task directly, which still drains the
-        # queue cleanly — so the cancellation shows up here, not in the loop.
-        cancelled = cancelled or task.cancelled()
-        await task_registry.unregister(key)
-        await client.close()
-        if cancelled:
-            logger.info("Turn for session %s ended early", session_id)
-
-    if cancelled:
-        yield _sse(
-            ev.Error(error_type="cancelled", message="The turn was stopped before it finished.")
-        )
-        yield _sse(ev.Done(session_id=session_id, message_ids=[]))
+    if not saw_done:
+        yield sse_frame(ev.Done(session_id=session_id, message_ids=[]))
 
 
 __all__ = ["router"]

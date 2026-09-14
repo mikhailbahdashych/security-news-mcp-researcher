@@ -161,22 +161,66 @@ async def _read_capped(response: httpx2.Response, max_bytes: int) -> bytes:
     return b"".join(chunks)
 
 
+def _client_budget(client: httpx2.AsyncClient) -> float | None:
+    """The whole-fetch budget implied by the client's own timeout policy.
+
+    Taken off the client rather than asked for separately so that no call site can
+    forget it: every client in this app is built by ``app.services.http`` with a
+    single configured timeout, and that number is what the user set as "how long a
+    fetch may take".
+    """
+    timeout = getattr(client, "timeout", None)
+    values = [
+        getattr(timeout, field, None) for field in ("connect", "read", "write", "pool")
+    ]
+    numbers = [value for value in values if isinstance(value, int | float)]
+    return max(numbers) if numbers else None
+
+
 async def fetch_guarded(
     client: httpx2.AsyncClient,
     url: str,
     *,
     max_bytes: int = MAX_FETCH_BYTES,
     validate_first_hop: bool = True,
+    timeout_s: float | None = None,
 ) -> httpx2.Response:
     """GET ``url``, following redirects by hand and checking every hop.
 
     ``client`` must have ``follow_redirects`` off — :func:`build_client` does — or
     httpx would follow a redirect for us and skip the check on its target.
 
+    **The timeout bounds the whole fetch, not one hop.** httpx's timeout applies
+    per operation, so a chain of ``MAX_REDIRECTS`` hops that each stall just under
+    it — or a body that dribbles a byte at a time — could hold the caller for
+    several multiples of the configured timeout. A note over 25 items paid that
+    serially. ``timeout_s`` defaults to the client's own timeout; pass it only to
+    override.
+
     Returns a fully-read response whose body is capped at ``max_bytes``. Raises
-    :class:`UnsafeUrlError`, :class:`ResponseTooLarge` or :class:`TooManyRedirects`;
-    ordinary transport failures surface as their httpx exceptions.
+    :class:`UnsafeUrlError`, :class:`ResponseTooLarge`, :class:`TooManyRedirects`
+    or ``TimeoutError``; ordinary transport failures surface as their httpx
+    exceptions.
     """
+    budget = _client_budget(client) if timeout_s is None else timeout_s
+    if budget is None:
+        return await _fetch_hops(
+            client, url, max_bytes=max_bytes, validate_first_hop=validate_first_hop
+        )
+    with anyio.fail_after(budget):
+        return await _fetch_hops(
+            client, url, max_bytes=max_bytes, validate_first_hop=validate_first_hop
+        )
+
+
+async def _fetch_hops(
+    client: httpx2.AsyncClient,
+    url: str,
+    *,
+    max_bytes: int,
+    validate_first_hop: bool,
+) -> httpx2.Response:
+    """The redirect-hop loop itself; :func:`fetch_guarded` owns the time budget."""
     current = url
     for hop in range(MAX_REDIRECTS + 1):
         if hop > 0 or validate_first_hop:
