@@ -153,9 +153,15 @@ def result_text(blocks: Sequence[Any]) -> str:
     return "\n".join(parts) if parts else "[non-text content omitted]"
 
 
-@dataclass
+@dataclass(eq=False)
 class _Connection:
-    """One owner task and the client it owns."""
+    """One owner task and the client it owns.
+
+    ``eq=False`` keeps identity equality and hashing: connections are compared with
+    ``is`` (is this still the current one?) and kept in a set of live owner tasks,
+    and the default dataclass ``__eq__`` would both break that and set
+    ``__hash__`` to ``None``.
+    """
 
     task: asyncio.Task[None]
     ready: asyncio.Future[Client]
@@ -191,6 +197,11 @@ class McpManager:
         self._states: dict[str, _ServerState] = {}
         self._reload_lock = asyncio.Lock()
         self._closed = False
+        # Every owner task that has not finished yet, INCLUDING connections already
+        # detached from their state because they died or were replaced. Shutdown
+        # walks this rather than the states, so a connection that is mid-teardown
+        # (or that was retired without anyone awaiting it) is still terminated.
+        self._live: set[_Connection] = set()
         for config in server_configs or ():
             self._states[config.name] = _ServerState(config=config)
 
@@ -255,8 +266,17 @@ class McpManager:
                 if name not in wanted or state.config != wanted[name]
             ]
             for name in stale:
-                state = self._states.pop(name)
-                await self._close_state(state)
+                state = self._states.get(name)
+                if state is None:
+                    continue
+                # Under the server's own lock: cancelling an owner task that a
+                # request is still awaiting would cancel the ready future out from
+                # under it, and a chat turn would die mid-stream. Waiting here is
+                # bounded by the connect timeout.
+                async with state.lock:
+                    if self._states.get(name) is state:
+                        del self._states[name]
+                    await self._close_state(state)
             for name, config in wanted.items():
                 if name not in self._states:
                     self._states[name] = _ServerState(config=config)
@@ -275,7 +295,7 @@ class McpManager:
             state.tools = None
             state.error = None
             state.retry_after = 0.0
-        await self._connect(name, force=True)
+        await self._acquire(name, force=True)
         if self.status(name) == "connected":
             await self.list_tools(name)
         return self.snapshot(name)
@@ -287,16 +307,17 @@ class McpManager:
         and must not be skipped.
         """
         self._closed = True
-        states = list(self._states.values())
-        connections = [state.connection for state in states if state.connection is not None]
-        for state in states:
+        for state in self._states.values():
             state.connection = None
             state.tools = None
+        connections = list(self._live)
         for connection in connections:
             connection.close_event.set()
         if not connections:
             return
-        tasks = [connection.task for connection in connections]
+        tasks = [connection.task for connection in connections if not connection.task.done()]
+        if not tasks:
+            return
         _, pending = await asyncio.wait(tasks, timeout=CLOSE_TIMEOUT_S)
         for task in pending:
             logger.warning("MCP connection did not close in %.0fs; cancelling", CLOSE_TIMEOUT_S)
@@ -306,18 +327,16 @@ class McpManager:
 
     # ---------------------------------------------------------------- connecting
 
-    async def _close_state(self, state: _ServerState) -> None:
-        """Stop this server's owner task, waiting for it to unwind its own stack.
+    async def _shutdown_connection(self, connection: _Connection) -> None:
+        """Stop one owner task, letting it unwind its own stack.
 
-        A task that never published a client is still inside ``__aenter__`` and will
-        never see the close event — a wedged server would otherwise cost the full
-        close timeout on top of the connect timeout — so that one is cancelled
-        outright.
+        Signalling the close event is what matters: the stack was entered in that
+        task and has to be exited there, and that exit is what terminates a stdio
+        subprocess. A task that never published a client is still inside
+        ``__aenter__`` and will never observe the event — a wedged server would
+        otherwise cost the full close timeout on top of the connect timeout — so
+        that one is cancelled outright.
         """
-        connection, state.connection = state.connection, None
-        state.tools = None
-        if connection is None:
-            return
         connection.close_event.set()
         if connection.task.done():
             return
@@ -327,8 +346,16 @@ class McpManager:
             return
         _, pending = await asyncio.wait({connection.task}, timeout=CLOSE_TIMEOUT_S)
         if pending:
+            logger.warning("MCP connection did not close in %.0fs; cancelling", CLOSE_TIMEOUT_S)
             connection.task.cancel()
             await asyncio.gather(connection.task, return_exceptions=True)
+
+    async def _close_state(self, state: _ServerState) -> None:
+        """Detach this server's connection and terminate it."""
+        connection, state.connection = state.connection, None
+        state.tools = None
+        if connection is not None:
+            await self._shutdown_connection(connection)
 
     async def _run_connection(self, config: McpServerConfig, connection: _Connection) -> None:
         """The owner task. Enters and exits the client in one task, as required."""
@@ -355,11 +382,19 @@ class McpManager:
             # Nobody is waiting any more: the connection died mid-session. Record
             # it so the next use rebuilds rather than reusing a corpse.
             logger.warning("MCP server %s connection ended: %s", config.name, describe_error(exc))
-            self._mark_dead(config.name, exc)
+            self._mark_dead(config.name, connection, exc)
 
-    def _mark_dead(self, name: str, exc: BaseException) -> None:
+    def _mark_dead(self, name: str, connection: _Connection, exc: BaseException) -> None:
+        """Record a connection that ended on its own.
+
+        Called from inside the owner task as it unwinds, so there is nothing left to
+        tear down — and awaiting our own task here would deadlock. Retiring a
+        connection that is still *parked* is :meth:`_retire`'s job, not this one.
+        """
         state = self._states.get(name)
-        if state is None:
+        if state is None or state.connection is not connection:
+            # Already replaced by a reconnect or a reload; that connection's status
+            # is not ours to overwrite.
             return
         state.error = describe_error(exc)
         state.connection = None
@@ -367,24 +402,56 @@ class McpManager:
         # This server was working, so let the next use retry immediately.
         state.retry_after = 0.0
 
-    async def _connect(self, name: str, *, force: bool = False) -> Client | None:
-        """Borrow this server's live client, connecting on first use.
+    async def _retire(self, name: str, connection: _Connection, exc: BaseException) -> None:
+        """A connection we were *using* just failed at the transport level.
 
-        Returns ``None`` for a disabled, cooling-down or failed server — never
-        raises, so a broken server is invisible to the caller beyond having no tools.
+        Its owner task is still parked on the close event with the client entered, so
+        dropping the reference alone would strand the task — and, for stdio, leak the
+        subprocess past ``aclose()``. Signal it and wait for it to unwind, under the
+        server's lock so a concurrent first-use cannot race in and spawn a second
+        connection against the corpse.
+        """
+        state = self._states.get(name)
+        if state is None or state.connection is not connection:
+            # Someone already replaced it; still make sure this one actually dies.
+            await self._shutdown_connection(connection)
+            return
+        async with state.lock:
+            if state.connection is connection:
+                await self._close_state(state)
+                state.error = describe_error(exc)
+                # It was working a moment ago, so the next use retries at once.
+                state.retry_after = 0.0
+            else:
+                await self._shutdown_connection(connection)
+
+    async def _acquire(self, name: str, *, force: bool = False) -> _Connection | None:
+        """Borrow this server's live connection, connecting on first use.
+
+        Returns ``None`` for a disabled, cooling-down or failed server. The caller
+        gets the ``_Connection``, not just its client, so that if the call it is
+        about to make blows up it can retire *that* connection rather than whatever
+        happens to be current by then.
+
+        The only exception this raises is a cancellation of the *caller's own* task.
         """
         state = self._states.get(name)
         if state is None or self._closed or not state.config.enabled:
             return None
 
         async with state.lock:
-            # Re-read: a reload may have replaced the state while we waited.
-            state = self._states.get(name)
-            if state is None or self._closed or not state.config.enabled:
+            # A reload may have swapped this server's state — and with it, its lock —
+            # while we queued. Carrying on would mean mutating the new state while
+            # holding only the old one's lock, so bail out instead: the caller sees
+            # "no connection", and the next use connects the new config under the
+            # new lock.
+            if self._states.get(name) is not state:
+                return None
+            if self._closed or not state.config.enabled:
                 return None
             connection = state.connection
             if connection is not None and connection.client is not None:
-                return connection.client
+                return connection
             if state.error is not None:
                 if not force and asyncio.get_running_loop().time() < state.retry_after:
                     return None
@@ -404,6 +471,8 @@ class McpManager:
             connection.task = asyncio.create_task(
                 self._run_connection(config, connection), name=f"mcp:{name}"
             )
+            self._live.add(connection)
+            connection.task.add_done_callback(lambda _task: self._live.discard(connection))
             state.connection = connection
             try:
                 client = await asyncio.wait_for(
@@ -415,6 +484,16 @@ class McpManager:
                 )
                 return None
             except asyncio.CancelledError:
+                # Two very different things arrive here. If the *ready future* was
+                # cancelled, the owner task was torn down under us — a concurrent
+                # reconnect or reload — and this task is perfectly healthy: that is a
+                # connection failure, not a cancellation, and raising it would kill
+                # the caller (a chat turn) with no error and no done event. Only a
+                # cancellation aimed at *this* task is re-raised.
+                current = asyncio.current_task()
+                if connection.ready.cancelled() and (current is None or not current.cancelling()):
+                    await self._fail(state, name, "connection was replaced while connecting")
+                    return None
                 await self._close_state(state)
                 raise
             except BaseException as exc:  # noqa: BLE001 - OSError, ValueError, MCPError, ...
@@ -423,7 +502,7 @@ class McpManager:
 
             connection.client = client
             state.error = None
-            return client
+            return connection
 
     async def _fail(self, state: _ServerState, name: str, message: str) -> None:
         logger.warning("MCP server %s failed to connect: %s", name, message)
@@ -446,13 +525,12 @@ class McpManager:
         if state.tools is not None and self.status(name) == "connected":
             return state.tools
 
-        client = await self._connect(name)
-        if client is None:
-            return []
-
         try:
+            connection = await self._acquire(name)
+            if connection is None or connection.client is None:
+                return []
             async with asyncio.timeout(self._connect_timeout_s):
-                tools = await self._enumerate(client)
+                tools = await self._enumerate(connection.client)
         except asyncio.CancelledError:
             raise
         except BaseException as exc:  # noqa: BLE001 - listing failure must not raise
@@ -492,14 +570,20 @@ class McpManager:
         if not state.config.enabled:
             return (f"MCP error calling {server}/{tool_name}: server is disabled.", True)
 
-        client = await self._connect(server)
-        if client is None:
+        try:
+            connection = await self._acquire(server)
+        except asyncio.CancelledError:
+            raise
+        except BaseException as exc:  # noqa: BLE001 - a connect failure is a tool error
+            return (f"MCP error calling {server}/{tool_name}: {describe_error(exc)}.", True)
+
+        if connection is None or connection.client is None:
             reason = state.error or "not connected"
             return (f"MCP error calling {server}/{tool_name}: {reason}.", True)
 
         try:
             async with asyncio.timeout(self._call_timeout_s):
-                result = await client.call_tool(
+                result = await connection.client.call_tool(
                     tool_name, arguments or {}, read_timeout_seconds=self._call_timeout_s
                 )
         except asyncio.CancelledError:
@@ -515,9 +599,11 @@ class McpManager:
             if _is_timeout(message):
                 message = f"timed out after {self._call_timeout_s:g}s"
             else:
-                # A raise here is connection-level, not a tool saying "no": drop the
-                # client so the next use rebuilds it.
-                self._mark_dead(server, exc)
+                # A raise here is connection-level, not a tool saying "no". The owner
+                # task is still parked with the client entered, so this has to tear
+                # the connection down — dropping the reference alone would strand the
+                # task and, for stdio, leak the subprocess past aclose().
+                await self._retire(server, connection, exc)
             return (f"MCP error calling {server}/{tool_name}: {message}.", True)
 
         return (result_text(result.content), bool(result.is_error))

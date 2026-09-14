@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+from collections.abc import Callable
 from typing import Any
 
 from mcp.server import MCPServer
@@ -64,13 +65,22 @@ def build_other_server() -> MCPServer:
 
 
 class ExitTracker:
-    """A closer that records that the owner task really unwound it."""
+    """A closer that records that the owner task really unwound it.
 
-    def __init__(self) -> None:
+    ``enter_delay_s`` stalls the owner task *before* the client is entered, which is
+    the in-process stand-in for a server that is slow to start: the ready future is
+    unresolved and the connection is half-built, exactly the window in which a
+    concurrent reload used to cancel the connecting caller.
+    """
+
+    def __init__(self, enter_delay_s: float = 0.0) -> None:
         self.entered = False
         self.exited = False
+        self.enter_delay_s = enter_delay_s
 
     async def __aenter__(self) -> ExitTracker:
+        if self.enter_delay_s:
+            await asyncio.sleep(self.enter_delay_s)
         self.entered = True
         return self
 
@@ -122,11 +132,46 @@ def spec_with_tracker(server: MCPServer, tracker: ExitTracker) -> TargetSpec:
     return TargetSpec(server=server, closers=(tracker,))
 
 
+class TrackedFactory:
+    """A target factory that builds a fresh target per connect and tracks each one.
+
+    ``len(trackers)`` is how many connections were ever opened, and each tracker says
+    whether that connection's owner task actually unwound its stack — which is what
+    "no leaked connection / no orphaned subprocess" reduces to in-process.
+    """
+
+    def __init__(
+        self,
+        build: Callable[[], MCPServer] = build_server,
+        *,
+        enter_delay_s: float = 0.0,
+    ) -> None:
+        self.build = build
+        self.enter_delay_s = enter_delay_s
+        self.trackers: list[ExitTracker] = []
+        self.calls: list[str] = []
+
+    def __call__(self, config: Any) -> TargetSpec:
+        self.calls.append(config.name)
+        tracker = ExitTracker(enter_delay_s=self.enter_delay_s)
+        self.trackers.append(tracker)
+        return TargetSpec(server=self.build(), closers=(tracker,))
+
+    @property
+    def connects(self) -> int:
+        return len(self.trackers)
+
+    @property
+    def open_connections(self) -> int:
+        return sum(1 for tracker in self.trackers if tracker.entered and not tracker.exited)
+
+
 __all__ = [
     "BrokenTarget",
     "ExitTracker",
     "HangingTarget",
     "SpyFactory",
+    "TrackedFactory",
     "build_other_server",
     "build_server",
     "spec_with_tracker",
