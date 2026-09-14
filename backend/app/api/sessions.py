@@ -25,9 +25,9 @@ from app.agent.registry import ToolRegistry
 from app.api import tasks as task_registry
 from app.api.deps import ChatClientFactory, DbSession, SessionFactory
 from app.api.streaming import SSE_HEADERS, SSE_PING_S, frames, pump_agent_events, sse_frame
-from app.db.models import FeedItem, Message, ResearchSession, ToolCall
-from app.db.util import LIKE_ESCAPE_CHAR, escape_like
+from app.db.models import FeedItem, Message, ResearchSession, ToolCall, utcnow
 from app.schemas.sessions import (
+    ArchivedFilter,
     CancelResponse,
     MessageCreate,
     MessageRead,
@@ -39,6 +39,7 @@ from app.schemas.sessions import (
     ToolCallRead,
 )
 from app.services import items as items_service
+from app.services import search as search_service
 from app.services import settings as settings_service
 
 logger = logging.getLogger(__name__)
@@ -62,20 +63,27 @@ async def _load_session(session: AsyncSession, session_id: int) -> ResearchSessi
 @router.get("/sessions", response_model=SessionPageRead)
 async def list_sessions(
     session: DbSession,
-    archived: Annotated[bool | None, Query()] = False,
+    archived: Annotated[ArchivedFilter, Query()] = "false",
     q: Annotated[str | None, Query(max_length=200)] = None,
     limit: Annotated[int, Query(ge=1, le=MAX_LIMIT)] = DEFAULT_LIMIT,
     cursor: Annotated[str | None, Query(max_length=200)] = None,
 ) -> SessionPageRead:
-    """Newest-updated-first page of sessions."""
+    """Newest-updated-first page of sessions.
+
+    ``archived`` defaults to hiding archived threads — that is the entire point
+    of archiving one — and ``"all"`` is the only way to see both sets at once.
+
+    ``q`` matches the title *or* anything said inside the session, through the
+    same predicate the global search uses, so the sidebar filter and the search
+    panel never disagree about which chats mention a CVE.
+    """
     statement = select(ResearchSession).order_by(
         ResearchSession.updated_at.desc(), ResearchSession.id.desc()
     )
-    if archived is not None:
-        statement = statement.where(ResearchSession.archived == archived)
+    if archived != "all":
+        statement = statement.where(ResearchSession.archived.is_(archived == "true"))
     if q and q.strip():
-        pattern = f"%{escape_like(q.strip())}%"
-        statement = statement.where(ResearchSession.title.ilike(pattern, escape=LIKE_ESCAPE_CHAR))
+        statement = statement.where(search_service.session_match(q.strip()))
     if cursor:
         try:
             sort_value, last_id = items_service.decode_cursor(cursor)
@@ -155,11 +163,23 @@ async def get_session(session_id: int, session: DbSession) -> SessionDetail:
 async def update_session(
     session_id: int, payload: SessionUpdate, session: DbSession
 ) -> SessionRead:
+    """Rename, archive or unarchive one session.
+
+    An empty (or null) title clears it back to NULL rather than storing a blank:
+    the auto-title only ever fills a session that has none, so clearing is how a
+    user asks for the machine-written title back on the next message. Nothing is
+    retroactively re-titled from the existing transcript.
+    """
     research = await _load_session(session, session_id)
     changes = payload.model_dump(exclude_unset=True)
-    for field, value in changes.items():
-        if value is not None:
-            setattr(research, field, value)
+    if "title" in changes:
+        research.title = (changes["title"] or "").strip() or None
+    if changes.get("archived") is not None:
+        research.archived = changes["archived"]
+    # Set explicitly rather than leaning on ``onupdate``: the sidebar is ordered
+    # by this column, so a rename should float the thread back to the top even
+    # when the new title happens to equal the old one.
+    research.updated_at = utcnow()
     await session.commit()
     await session.refresh(research)
     return SessionRead.model_validate(research)
