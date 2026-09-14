@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 Effort = Literal["low", "medium", "high", "xhigh", "max"]
 ThinkingDisplay = Literal["summarized", "omitted"]
+KeySource = Literal["env", "stored", "none"]
 
 
 class SettingsRead(BaseModel):
@@ -16,8 +17,13 @@ class SettingsRead(BaseModel):
     model: str
     effort: str
     thinking_display: str
+    #: Whether a key is stored **in this database** — not whether one is usable.
     has_api_key: bool
     api_key_masked: str
+    #: Which source the effective key comes from: ``"env"`` (the process
+    #: environment or ``.env``, which overrides the stored one), ``"stored"``, or
+    #: ``"none"``. Lets the Settings page explain a working app with no stored key.
+    key_source: KeySource
     web_search_enabled: bool
     web_search_max_uses: int
     web_fetch_enabled: bool
@@ -65,6 +71,7 @@ class ModelOption(BaseModel):
 
 __all__ = [
     "Effort",
+    "KeySource",
     "ModelOption",
     "SettingsRead",
     "SettingsUpdate",

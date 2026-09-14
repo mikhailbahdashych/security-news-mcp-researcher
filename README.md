@@ -27,6 +27,21 @@ Then open <http://localhost:5173>.
 Prerequisites: [uv](https://docs.astral.sh/uv/) and Node 22+.
 Copy `.env.example` to `.env` if you want to override defaults.
 
+## The Anthropic API key
+
+Set it either way — both work, neither is written to the other:
+
+- **Settings → Anthropic API key** in the app. Stored in the SQLite database and
+  only ever read back masked (`sk-ant-…a1b2`).
+- **`ANTHROPIC_API_KEY`** in `.env` (copied from `.env.example`) or in the real
+  process environment (`ANTHROPIC_API_KEY=... make dev-api`).
+
+Precedence is process environment, then `.env`, then the stored key; an externally
+supplied key overrides the stored one and is never saved to the database. `GET
+/api/settings` reports which one is in force as `key_source`
+(`env` / `stored` / `none`), while `has_api_key` means only "a key is stored in
+this database".
+
 ## The inbox
 
 Feeds are pulled on demand — press **Refresh feeds** — and each entry is deduplicated
@@ -83,6 +98,11 @@ producing a server with no transport. Server names must match `^[A-Za-z0-9_-]{1,
 because the name becomes part of every tool name. `"enabled": false` parks a server
 without deleting it.
 
+Unlike the Anthropic API key, `env` and `headers` values come back from `GET
+/api/mcp/servers` exactly as they were stored: the whole blob is edited in place, and a
+config whose credentials had been replaced by `***` could not be saved again without
+retyping them. They are still kept out of logs and error messages.
+
 Nothing connects when you save. The first connect happens when you open the tool list,
 press **Reconnect**, or start a chat turn — a server that is slow or broken can never
 hold up boot, the health check, or a turn that does not use it. A server gets 10 s to
@@ -114,7 +134,22 @@ In Docker, a `command` server is spawned **inside the container's namespace**:
 local database, an SSH agent — run the backend on the host instead:
 
 ```sh
-make dev-api     # same SQLite file, same UI, no container namespace
+make dev-api     # stdio servers now spawn on your machine, not in a container
+make dev-web     # and the UI, on :5173 — dev-api serves the API only
+```
+
+Two things are **not** shared with the Docker app. It is a **separate database**:
+`make dev-api` uses `backend/data/app.db`, while the container's data lives in the
+named `appdata` volume — your feeds, chats and notes are not there. And `make dev-api`
+serves no UI: without `make dev-web` there is nothing at `:5173` to open.
+
+To work against the container's data instead, copy it out of the volume and point
+`DB_PATH` at the copy (a copy, not the live file — two processes writing one SQLite
+database across a Docker mount is how it gets corrupted):
+
+```sh
+docker compose cp app:/data/app.db backend/data/from-docker.db
+DB_PATH=./data/from-docker.db make dev-api
 ```
 
 `url`-transport servers behave identically in both modes and are the better choice for
@@ -123,8 +158,8 @@ anything remote.
 ## Tests and linting
 
 ```sh
-make test        # cd backend && uv run pytest
-make lint        # cd backend && uv run ruff check .
+make test        # backend: uv run pytest, then frontend: npx vitest run
+make lint        # backend: uv run ruff check ., then frontend: npm run lint (oxlint)
 ```
 
 ## Layout

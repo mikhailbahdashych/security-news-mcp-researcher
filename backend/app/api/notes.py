@@ -27,7 +27,7 @@ from app.agent import runner as agent_runner
 from app.agent.providers import build_tool_providers
 from app.agent.registry import ToolRegistry
 from app.api import tasks as task_registry
-from app.api.deps import ChatClientFactory, DbSession, SessionFactory
+from app.api.deps import AppSettings, ChatClientFactory, DbSession, SessionFactory
 from app.api.streaming import (
     SSE_HEADERS,
     SSE_PING_S,
@@ -36,6 +36,7 @@ from app.api.streaming import (
     sse_data,
     sse_frame,
 )
+from app.config import Settings
 from app.db.models import Note, NoteSource, utcnow
 from app.db.util import matches
 from app.schemas.notes import (
@@ -74,11 +75,11 @@ def generation_key(generation_id: str) -> str:
 # --------------------------------------------------------------- generation
 
 
-async def _generation_settings(session: AsyncSession) -> dict[str, Any]:
+async def _generation_settings(session: AsyncSession, settings: Settings) -> dict[str, Any]:
     """Every setting the generation needs, read once in the request's own
     transaction — never per-event, and never after the stream has opened."""
     return {
-        "api_key": await settings_service.get_effective_api_key(session),
+        "api_key": await settings_service.get_effective_api_key(session, settings),
         "model": await settings_service.get_str(session, "model"),
         "effort": await settings_service.get_str(session, "effort"),
         "thinking_display": await settings_service.get_str(session, "thinking_display"),
@@ -94,6 +95,7 @@ async def generate_note(
     session: DbSession,
     session_factory: SessionFactory,
     client_factory: ChatClientFactory,
+    app_settings: AppSettings,
 ) -> Response:
     """Generate a note from starred items and/or a research session, streamed."""
     generation_id = payload.generation_id or uuid4().hex
@@ -103,7 +105,21 @@ async def generate_note(
             status.HTTP_409_CONFLICT, detail="That generation is already running."
         )
 
-    resolved = await _generation_settings(session)
+    resolved = await _generation_settings(session, app_settings)
+    if not resolved["api_key"]:
+        # Checked *before* the context is built: assembly fetches and extracts the
+        # article behind every item that has no stored text, so running it first
+        # would make a keyless user pay for up to 25 outbound fetches to reach an
+        # error that was knowable immediately.
+        #
+        # One frame and out: a `done` here would mean "note saved", which is the
+        # one thing that did not happen.
+        return EventSourceResponse(
+            frames(ev.Error(error_type="api_error", message="no API key configured")),
+            ping=SSE_PING_S,
+            headers=SSE_HEADERS,
+        )
+
     try:
         context = await notes_service.build_generation_context(
             session,
@@ -120,15 +136,6 @@ async def generate_note(
     # Context assembly may have extracted an article into ``content_text``; that
     # is the only write this endpoint makes before the model has answered.
     await session.commit()
-
-    if not resolved["api_key"]:
-        # One frame and out: a `done` here would mean "note saved", which is the
-        # one thing that did not happen.
-        return EventSourceResponse(
-            frames(ev.Error(error_type="api_error", message="no API key configured")),
-            ping=SSE_PING_S,
-            headers=SSE_HEADERS,
-        )
 
     # The same provider list the chat turn builds, then narrowed by the runner's
     # tool-subset selector — one dispatch path, two tool sets.

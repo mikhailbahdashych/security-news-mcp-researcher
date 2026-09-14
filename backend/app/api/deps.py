@@ -9,6 +9,7 @@ from anthropic import AsyncAnthropic
 from fastapi import Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.config import Settings
 from app.mcp.manager import McpManager
 from app.services import settings as settings_service
 
@@ -73,7 +74,32 @@ def get_mcp_manager(request: Request) -> McpManager:
 McpManagerDep = Annotated[McpManager, Depends(get_mcp_manager)]
 
 
-async def get_anthropic_client(session: DbSession) -> AsyncIterator[AsyncAnthropic | None]:
+def get_app_settings(request: Request) -> Settings:
+    """This app's :class:`Settings`, put on ``app.state`` by ``create_app``.
+
+    Reached through a dependency rather than the module-level ``app.config.settings``
+    so that an app built with ``create_app(Settings(...))`` — every test, and any
+    second app in one process — really does get its own values. The only field
+    routes read from it today is ``anthropic_api_key`` (``.env``'s key).
+    """
+    settings = getattr(request.app.state, "settings", None)
+    if settings is None:  # pragma: no cover - create_app always sets it
+        raise RuntimeError("Settings are missing from app.state.")
+    return settings
+
+
+AppSettings = Annotated[Settings, Depends(get_app_settings)]
+
+
+def build_anthropic_client(api_key: str) -> AsyncAnthropic:
+    """The one place a real ``AsyncAnthropic`` is constructed — and the one seam a
+    test monkeypatches to keep a request off the network."""
+    return AsyncAnthropic(api_key=api_key)
+
+
+async def get_anthropic_client(
+    session: DbSession, settings: AppSettings
+) -> AsyncIterator[AsyncAnthropic | None]:
     """A client built from the effective API key, or ``None`` when none is configured.
 
     The client owns an httpx2 connection pool, so it is closed when the request ends;
@@ -84,12 +110,14 @@ async def get_anthropic_client(session: DbSession) -> AsyncIterator[AsyncAnthrop
     Returning ``None`` rather than raising keeps "no key yet" an ordinary state for
     the settings page. Tests override this dependency with a stub client.
     """
-    api_key = await settings_service.get_effective_api_key(session)
+    api_key = await settings_service.get_effective_api_key(session, settings)
     if not api_key:
         yield None
         return
 
-    client = AsyncAnthropic(api_key=api_key)
+    # Through the same factory the streaming routes use, so there is exactly one
+    # place in the app that constructs a real client — and one seam for tests.
+    client = build_anthropic_client(api_key)
     try:
         yield client
     finally:
@@ -97,10 +125,6 @@ async def get_anthropic_client(session: DbSession) -> AsyncIterator[AsyncAnthrop
 
 
 AnthropicClient = Annotated[AsyncAnthropic | None, Depends(get_anthropic_client)]
-
-
-def build_anthropic_client(api_key: str) -> AsyncAnthropic:
-    return AsyncAnthropic(api_key=api_key)
 
 
 def get_chat_client_factory() -> Callable[[str], AsyncAnthropic]:
@@ -121,12 +145,14 @@ ChatClientFactory = Annotated[Callable[[str], AsyncAnthropic], Depends(get_chat_
 
 __all__ = [
     "AnthropicClient",
+    "AppSettings",
     "ChatClientFactory",
     "DbSession",
     "McpManagerDep",
     "SessionFactory",
     "build_anthropic_client",
     "get_anthropic_client",
+    "get_app_settings",
     "get_chat_client_factory",
     "get_db",
     "get_mcp_manager",

@@ -6,6 +6,7 @@ import asyncio
 from dataclasses import dataclass
 
 import pytest
+from sqlalchemy import select
 
 from app.agent.builtin import BuiltinToolProvider, ServerToolProvider
 from app.agent.registry import (
@@ -250,6 +251,26 @@ async def test_search_feed_items_renders_a_compact_list(session_factory, seeded)
     assert "CVE-2026-1234 in AcmeVPN" in result.content
     assert "Example Security" in result.content
     assert "Unrelated phishing" not in result.content
+
+
+async def test_search_feed_items_finds_text_only_in_the_article_body(
+    session_factory, seeded, db_session
+):
+    """The agent has to be able to find a CVE that only the extracted article names.
+
+    ``get_feed_item`` needs an id, and the only way to get one is this tool — so a
+    search that ignores ``content_text`` makes an extracted article unreachable.
+    """
+    item = (
+        await db_session.execute(select(FeedItem).where(FeedItem.guid == "g2"))
+    ).scalar_one()
+    item.content_text = "Buried in paragraph nine: CVE-2026-99999 affects the console."
+    await db_session.commit()
+
+    result = await BuiltinToolProvider(session_factory).search_feed_items(q="CVE-2026-99999")
+
+    assert result.is_error is False
+    assert "Unrelated phishing wave" in result.content
 
 
 async def test_search_feed_items_maps_any_to_all(session_factory, seeded):

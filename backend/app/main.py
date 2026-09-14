@@ -10,6 +10,7 @@ from app.config import Settings
 from app.config import settings as default_settings
 from app.db.engine import create_db_engine, create_session_factory
 from app.db.init import init_db
+from app.logging_config import configure_logging
 from app.mcp.manager import McpManager
 from app.static import mount_spa
 
@@ -51,6 +52,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or default_settings
+    # Before anything else, so that whatever the rest of start-up logs is actually
+    # seen and formatted. Idempotent, so the test suite's many apps share one
+    # handler instead of multiplying every record. See app/logging_config.py.
+    configure_logging(settings.log_level)
     app = FastAPI(
         title="Security News MCP Researcher",
         version=__version__,

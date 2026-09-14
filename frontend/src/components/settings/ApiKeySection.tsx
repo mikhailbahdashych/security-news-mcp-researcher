@@ -11,6 +11,24 @@ import {
 import Field, { controlClass } from './Field'
 import SettingsSection from './SettingsSection'
 
+/**
+ * What to say about the key that is in force.
+ *
+ * `key_source: 'env'` means ANTHROPIC_API_KEY (environment or `.env`) is winning,
+ * which it does whether or not one is stored — so saying "no key configured" on
+ * the strength of `has_api_key` alone would be a lie about a working app.
+ */
+function keyHint(settings: AppSettings): string {
+  if (settings.key_source === 'env') {
+    return settings.has_api_key
+      ? `ANTHROPIC_API_KEY from the environment is in use; it overrides the stored key (${settings.api_key_masked}).`
+      : 'ANTHROPIC_API_KEY from the environment is in use. Saving a key here stores one for when it is unset.'
+  }
+  return settings.has_api_key
+    ? `Currently set: ${settings.api_key_masked}. Enter a new key to replace it.`
+    : 'No key configured yet — the research chat and the model list need one.'
+}
+
 /** The Anthropic credential: set it, clear it, or check it against the live API. */
 export default function ApiKeySection({ settings }: { settings: AppSettings }) {
   const queryClient = useQueryClient()
@@ -45,11 +63,7 @@ export default function ApiKeySection({ settings }: { settings: AppSettings }) {
       <Field
         label="API key"
         htmlFor="anthropic-api-key"
-        hint={
-          settings.has_api_key
-            ? `Currently set: ${settings.api_key_masked}. Enter a new key to replace it.`
-            : 'No key configured yet — the research chat and the model list need one.'
-        }
+        hint={keyHint(settings)}
       >
         <input
           id="anthropic-api-key"

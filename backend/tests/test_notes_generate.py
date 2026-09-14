@@ -464,6 +464,41 @@ async def test_a_raising_extractor_does_not_fail_the_generation(
     assert len(await note_rows(session_factory)) == 1
 
 
+async def test_no_api_key_errors_before_anything_is_extracted(
+    app, client, session_factory, monkeypatch
+):
+    """The key check runs before context assembly, not after.
+
+    Assembly fetches and extracts the article behind every item with no stored
+    text — up to 25 outbound requests — so checking afterwards charged a keyless
+    user the full cost of an error that was knowable immediately.
+    """
+    item_ids = await seed_items(session_factory, 3, content=None)
+    calls: list[int] = []
+
+    async def fake_extract(session, item_id, **_kwargs):
+        calls.append(item_id)
+        item = await session.get(FeedItem, item_id)
+        return extract_service.ItemExtractResult(
+            item=item, extracted=False, fallback=True, reason="never mind"
+        )
+
+    monkeypatch.setattr(extract_service, "extract_item", fake_extract)
+
+    response = await generate(client, item_ids=item_ids)
+
+    assert response.status_code == 200
+    assert calls == []
+    events = parse_sse(response.text)
+    assert [name for name, _ in events] == ["error"]
+    assert events[0][1] == {
+        "type": "api_error",
+        "message": "no API key configured",
+        "category": None,
+    }
+    assert await note_rows(session_factory) == []
+
+
 # --------------------------------------------------------------- tool set
 
 

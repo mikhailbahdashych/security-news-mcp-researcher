@@ -20,8 +20,9 @@ import McpSection from '../components/settings/McpSection'
 import SettingsSection from '../components/settings/SettingsSection'
 import Toggle from '../components/settings/Toggle'
 
-/** Everything on this page except the write-only API key. */
-type Draft = Omit<AppSettings, 'has_api_key' | 'api_key_masked'>
+/** Everything this form edits: not the write-only API key, and not the read-only
+ *  `key_source` that describes where it came from. */
+type Draft = Omit<AppSettings, 'has_api_key' | 'api_key_masked' | 'key_source'>
 
 /** Listed field by field so that adding a setting to the API is a type error here
  *  until the form handles it. */

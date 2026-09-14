@@ -85,8 +85,18 @@ def _apply_filters(
     if q and q.strip():
         # One matching rule for the whole app (app.db.util), so a query containing
         # % or _ searches for those characters instead of turning into a wildcard.
+        #
+        # The extracted article counts too, and has to: the global search matches
+        # it, so without it a search hit would deep-link to an inbox filtered by
+        # the same query and showing no rows — and the model's `search_feed_items`
+        # could not find a CVE that only ever appears in an article body.
+        needle = q.strip()
         statement = statement.where(
-            or_(matches(FeedItem.title, q.strip()), matches(FeedItem.summary, q.strip()))
+            or_(
+                matches(FeedItem.title, needle),
+                matches(FeedItem.summary, needle),
+                matches(FeedItem.content_text, needle),
+            )
         )
     return statement
 
@@ -103,8 +113,9 @@ async def list_items(
     """One newest-first page of feed items.
 
     ``status`` is one of :data:`STATUS_FILTERS` (``"all"`` means no status filter);
-    ``q`` is a case-insensitive substring of the title or summary. Raises
-    ``ValueError`` for an unknown status or a malformed cursor.
+    ``q`` is a case-insensitive substring of the title, the summary or the
+    extracted article text. Raises ``ValueError`` for an unknown status or a
+    malformed cursor.
     """
     if status not in STATUS_FILTERS:
         raise ValueError(f"Unknown status filter: {status!r}")

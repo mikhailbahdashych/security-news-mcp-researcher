@@ -19,12 +19,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
 
 from app.agent import events as ev
+from app.agent import persistence
 from app.agent import runner as agent_runner
 from app.agent.providers import build_tool_providers
 from app.agent.registry import ToolRegistry
 from app.api import tasks as task_registry
-from app.api.deps import ChatClientFactory, DbSession, SessionFactory
+from app.api.deps import AppSettings, ChatClientFactory, DbSession, SessionFactory
 from app.api.streaming import SSE_HEADERS, SSE_PING_S, frames, pump_agent_events, sse_frame
+from app.config import Settings
 from app.db.models import FeedItem, Message, ResearchSession, ToolCall, utcnow
 from app.schemas.sessions import (
     ArchivedFilter,
@@ -240,14 +242,14 @@ async def _resolve_attachments(session: AsyncSession, item_ids: list[int]) -> li
     return [{"type": "text", "text": "\n".join(lines)}]
 
 
-async def _turn_settings(session: AsyncSession) -> dict[str, Any]:
+async def _turn_settings(session: AsyncSession, settings: Settings) -> dict[str, Any]:
     """Every setting the turn needs, read once.
 
     Never per-event: a byte change mid-conversation would invalidate the prompt
     cache for the rest of the thread.
     """
     return {
-        "api_key": await settings_service.get_effective_api_key(session),
+        "api_key": await settings_service.get_effective_api_key(session, settings),
         "model": await settings_service.get_str(session, "model"),
         "effort": await settings_service.get_str(session, "effort"),
         "thinking_display": await settings_service.get_str(session, "thinking_display"),
@@ -264,6 +266,7 @@ async def post_message(
     session: DbSession,
     session_factory: SessionFactory,
     client_factory: ChatClientFactory,
+    app_settings: AppSettings,
 ) -> Response:
     """Run one agent turn, streamed as SSE."""
     await _load_session(session, session_id)
@@ -274,15 +277,23 @@ async def post_message(
             status.HTTP_409_CONFLICT, detail="A turn is already running for this session."
         )
 
-    resolved = await _turn_settings(session)
+    resolved = await _turn_settings(session, app_settings)
     user_content: list[dict[str, Any]] = [{"type": "text", "text": payload.content}]
     user_content.extend(await _resolve_attachments(session, payload.attached_item_ids))
 
     if not resolved["api_key"]:
+        # Persist the question before answering the error. Without this the user
+        # types a question, gets "no API key configured", and watches their own
+        # message vanish — the turn wrote nothing, so the refetched transcript has
+        # nothing in it. The message costs nothing and is exactly what they will
+        # want to re-send once the key is set.
+        message_id = await persistence.append_user_message(
+            session_factory, session_id, user_content
+        )
         return EventSourceResponse(
             frames(
                 ev.Error(error_type="api_error", message="no API key configured"),
-                ev.Done(session_id=session_id, message_ids=[]),
+                ev.Done(session_id=session_id, message_ids=[message_id]),
             ),
             ping=SSE_PING_S,
             headers=SSE_HEADERS,

@@ -447,6 +447,31 @@ async def test_no_api_key_yields_an_error_event(app, client):
     assert events[0][1]["message"] == "no API key configured"
 
 
+async def test_no_api_key_still_keeps_the_question(app, client):
+    """The question survives the error, in the transcript.
+
+    Nothing else was persisted on this path, so the user typed a question, saw
+    "no API key configured", and watched their own message disappear on the next
+    refetch — with nothing to copy out and re-send once the key was set.
+    """
+    session_id = await create_session(client)
+
+    response = await client.post(
+        f"/api/sessions/{session_id}/messages", json={"content": "what is CVE-2026-1234?"}
+    )
+
+    done = parse_sse(response.text)[-1]
+    detail = (await client.get(f"/api/sessions/{session_id}")).json()
+    assert [message["kind"] for message in detail["messages"]] == ["user"]
+    assert detail["messages"][0]["content_json"] == [
+        {"type": "text", "text": "what is CVE-2026-1234?"}
+    ]
+    # The id is announced, so the live view can reconcile instead of duplicating.
+    assert done[1]["message_ids"] == [detail["messages"][0]["id"]]
+    # And the session is titled from it, exactly as a successful turn would.
+    assert detail["session"]["title"] == "what is CVE-2026-1234?"
+
+
 async def test_attached_item_ids_are_resolved_into_the_persisted_content(
     app, client, with_key, db_session
 ):
