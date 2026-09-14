@@ -3,7 +3,7 @@ import { useCallback, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 
 import type { ErrorPayload } from '../../api/chat'
-import { fetchSessions, sessionsQueryKey } from '../../api/chat'
+import { fetchSessions } from '../../api/chat'
 import { fetchItems, type FeedItem } from '../../api/inbox'
 import {
   cancelGeneration,
@@ -85,7 +85,11 @@ export default function GenerateNotesDialog({
       }),
   })
 
-  const sessions = useQuery({ queryKey: sessionsQueryKey, queryFn: () => fetchSessions() })
+  // Its own key on purpose: the Chat sidebar caches `sessionsQueryKey` as an
+  // *infinite* query, and a plain useQuery sharing that key reads back
+  // `{pages: [...]}` — the dropdown would silently come up empty, and whichever
+  // of the two loaded second would find the wrong shape in the cache.
+  const sessions = useQuery({ queryKey: ['notes-picker-sessions'], queryFn: () => fetchSessions() })
   const settings = useQuery({ queryKey: settingsQueryKey, queryFn: fetchSettings })
 
   // Selected items always render, even when the current filter excludes them —
@@ -356,7 +360,15 @@ export default function GenerateNotesDialog({
               ) : streaming ? (
                 <p className="text-xs text-slate-500">Thinking…</p>
               ) : null}
-              {error ? <TurnError error={error} /> : null}
+              {error?.type === 'cancelled' ? (
+                // Not TurnError's chat copy: a stopped chat turn keeps what it
+                // wrote, and a stopped generation keeps nothing at all.
+                <p className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+                  Stopped. Nothing was saved — the preview above is all there was.
+                </p>
+              ) : error ? (
+                <TurnError error={error} />
+              ) : null}
             </section>
           ) : null}
         </div>
