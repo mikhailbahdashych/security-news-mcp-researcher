@@ -19,6 +19,15 @@ import type { ToolCardState } from './ToolCallCard'
  * refetches the session and the Query cache becomes the source of truth again.
  */
 export interface LiveTurn {
+  /**
+   * Which session this state belongs to.
+   *
+   * `send` navigates to `/chat/:id` the moment it creates a session, so "the
+   * route changed" is not on its own a reason to drop the turn. Comparing this
+   * against the route id is: it only differs once the user has actually moved
+   * to a different conversation — or deleted this one.
+   */
+  sessionId: number | null
   /** The text of the user message being answered, echoed straight back. */
   prompt: string | null
   streaming: boolean
@@ -31,6 +40,7 @@ export interface LiveTurn {
 }
 
 export const emptyTurn: LiveTurn = {
+  sessionId: null,
   prompt: null,
   streaming: false,
   thinking: '',
@@ -42,10 +52,22 @@ export const emptyTurn: LiveTurn = {
 }
 
 export type LiveAction =
-  | { kind: 'start'; prompt: string }
+  | { kind: 'start'; prompt: string; sessionId: number }
   | { kind: 'sse'; event: string; payload: unknown }
   | { kind: 'failed'; error: ErrorPayload }
+  | { kind: 'settle' }
   | { kind: 'reset' }
+
+/**
+ * Error types the refetched transcript renders on its own.
+ *
+ * `settle` keeps a terminal error visible after the stream closes — otherwise a
+ * refusal or a stop flashes and disappears, leaving the user's question with no
+ * response under it. These two are the exception: they are persisted on the
+ * assistant row and `Transcript` renders them from `stop_reason`, so keeping the
+ * live copy as well would show the same notice twice.
+ */
+const RENDERED_BY_TRANSCRIPT = new Set<ErrorPayload['type']>(['refusal', 'max_tokens'])
 
 function patchCard(
   cards: ToolCardState[],
@@ -60,9 +82,18 @@ export function liveTurnReducer(state: LiveTurn, action: LiveAction): LiveTurn {
     case 'reset':
       return emptyTurn
     case 'start':
-      return { ...emptyTurn, prompt: action.prompt, streaming: true }
+      return { ...emptyTurn, sessionId: action.sessionId, prompt: action.prompt, streaming: true }
     case 'failed':
       return { ...state, streaming: false, error: action.error }
+    case 'settle':
+      // The turn is over and the transcript has been refetched, so the streamed
+      // text, thinking and tool cards now come from the Query cache. Only a
+      // terminal error the transcript cannot show survives.
+      return {
+        ...emptyTurn,
+        sessionId: state.sessionId,
+        error: state.error && !RENDERED_BY_TRANSCRIPT.has(state.error.type) ? state.error : null,
+      }
     case 'sse':
       break
   }

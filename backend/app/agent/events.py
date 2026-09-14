@@ -145,10 +145,17 @@ class ServerToolUse:
 class ServerToolResult:
     """A server tool's result.
 
-    ``results`` is a list of ``{title, url}`` on success and the raw error object
-    (e.g. ``{"error_code": "max_uses_exceeded"}``) on failure — server-tool errors
-    arrive as HTTP 200 with an object where a list would otherwise be, so the
-    producer branches before indexing.
+    Server-tool errors arrive as HTTP 200 with an object where a list would
+    otherwise be, so the producer branches before indexing. ``results`` is:
+
+    * a list of ``{title, url}`` — web_search success;
+    * ``{"url", "retrieved_at"}`` — web_fetch success;
+    * ``{"stdout", "stderr", "return_code"}`` — code-execution success;
+    * ``{"type", ...small scalars}`` — text-editor success (never the file body);
+    * ``{"type", "error_code", "error_message"}`` — **any** failure.
+
+    An object is not itself a failure — a successful code-execution or
+    text-editor result is one too — so read ``is_error``, never the shape.
     """
 
     tool_use_id: str

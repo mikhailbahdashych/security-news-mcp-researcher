@@ -59,6 +59,17 @@ export default function ChatPage() {
     enabled: sessionId !== null,
   })
 
+  // Leaving the conversation the live state belongs to drops it — this is what
+  // catches browser back/forward, which no click handler sees. It cannot fire
+  // mid-turn: `send` stamps the new session id onto the state before navigating,
+  // so the two only diverge once the user has genuinely moved on.
+  const staleSession = live.sessionId !== null && live.sessionId !== sessionId
+  useEffect(() => {
+    if (staleSession) {
+      dispatch({ kind: 'reset' })
+    }
+  }, [staleSession])
+
   // Clear the handover off the history entry so a reload does not re-attach.
   useEffect(() => {
     if ((location.state as ChatNavigationState | null)?.attachedItems) {
@@ -80,6 +91,9 @@ export default function ChatPage() {
     onSuccess: (_data, id) => {
       queryClient.invalidateQueries({ queryKey: sessionsQueryKey })
       if (id === sessionId) {
+        // Without this the deleted session's terminal error would follow the
+        // user onto the blank /chat view.
+        dispatch({ kind: 'reset' })
         navigate('/chat')
       }
     },
@@ -97,7 +111,7 @@ export default function ChatPage() {
 
       const itemIds = attached.map((item) => item.id)
       setAttached([])
-      dispatch({ kind: 'start', prompt: text })
+      dispatch({ kind: 'start', prompt: text, sessionId: id })
 
       const controller = new AbortController()
       abort.current = controller
@@ -136,7 +150,10 @@ export default function ChatPage() {
         // The Query cache becomes the source of truth again once the turn ends.
         await queryClient.invalidateQueries({ queryKey: sessionQueryKey(id) })
         await queryClient.invalidateQueries({ queryKey: sessionsQueryKey })
-        dispatch({ kind: 'reset' })
+        // `settle`, not `reset`: a refusal, a stop or a connection failure has to
+        // stay on screen until the next send, or the user is left looking at
+        // their own question with nothing under it.
+        dispatch({ kind: 'settle' })
       }
     },
     [attached, navigate, queryClient, sessionId],
@@ -201,13 +218,15 @@ export default function ChatPage() {
 
           <Transcript messages={messages} />
 
-          {live.prompt !== null ? (
+          {live.prompt !== null || live.error !== null ? (
             <div className="mt-4 space-y-2">
-              <div className="flex justify-end">
-                <div className="max-w-2xl whitespace-pre-wrap rounded-lg bg-slate-900 px-3 py-2 text-sm text-white">
-                  {live.prompt}
+              {live.prompt !== null ? (
+                <div className="flex justify-end">
+                  <div className="max-w-2xl whitespace-pre-wrap rounded-lg bg-slate-900 px-3 py-2 text-sm text-white">
+                    {live.prompt}
+                  </div>
                 </div>
-              </div>
+              ) : null}
 
               <ThinkingPane text={live.thinking} streaming={awaitingFirstText} />
               {live.cards.map((card) => (
