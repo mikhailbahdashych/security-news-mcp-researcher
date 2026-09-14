@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 
 import httpx2
 import pytest
@@ -20,7 +21,7 @@ from fakes.anthropic import (
     turn_web_search,
 )
 from httpx2 import ASGITransport
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sse_util import event_names, parse_sse, payloads_for
 
 from app.api import tasks as task_registry
@@ -813,3 +814,238 @@ async def test_a_long_transcript_keeps_its_most_recent_end(
     assert "NEWEST-LINE" in text
     assert "OLDEST-LINE" not in text
     assert notes_service.TRANSCRIPT_TRUNCATION_PREFIX.strip() in text
+
+
+# ------------------------------------------- losing a reference mid-generation
+
+
+def delete_while_writing(monkeypatch, session_factory, statement) -> None:
+    """Delete a row at the instant between the context build and the save.
+
+    That window is minutes wide in practice — the model is writing — and the user
+    is free to delete a feed item or the chat the note was started from in it.
+    ``save_note`` is wrapped rather than replaced: the real one still runs, with
+    the deletion having happened just before it.
+    """
+    original = notes_service.save_note
+
+    async def save_after_delete(*args, **kwargs):
+        async with session_factory() as session:
+            await session.execute(statement)
+            await session.commit()
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(notes_service, "save_note", save_after_delete)
+
+
+async def test_an_item_deleted_mid_generation_does_not_lose_the_note(
+    app, client, with_key, session_factory, monkeypatch
+):
+    """The insert names a row that is gone, so it raises — and the finished,
+    paid-for note used to go with it, taking the SSE stream's terminal frame too."""
+    item_ids = await seed_items(session_factory, 2)
+    delete_while_writing(
+        monkeypatch, session_factory, delete(FeedItem).where(FeedItem.id == item_ids[0])
+    )
+    use_script(app, turn_text("## Story 1\nstill worth keeping"))
+
+    response = await generate(client, item_ids=item_ids, title="Weekly notes")
+
+    notes = await note_rows(session_factory)
+    assert len(notes) == 1
+    assert notes[0].body_md == "## Story 1\nstill worth keeping"
+
+    sources = await source_rows(session_factory)
+    assert [source.feed_item_id for source in sources] == [None, item_ids[1]]
+    # The link is gone; what it was going to cite is not.
+    assert sources[0].url == "https://example.test/story-0"
+    assert sources[0].title == "Story 0: AcmeVPN pre-auth RCE"
+
+    assert payloads_for(response.text, "done")[-1] == {"note_id": notes[0].id}
+
+
+async def test_a_session_deleted_mid_generation_does_not_lose_the_note(
+    app, client, with_key, session_factory, monkeypatch
+):
+    async with session_factory() as session:
+        research = ResearchSession(title="Log4Shell", model="claude-opus-5")
+        session.add(research)
+        await session.flush()
+        session.add(
+            Message(
+                session_id=research.id,
+                seq=1,
+                role="user",
+                kind="user",
+                content_json=[{"type": "text", "text": "what happened"}],
+            )
+        )
+        await session.commit()
+        session_id = research.id
+
+    delete_while_writing(
+        monkeypatch,
+        session_factory,
+        delete(ResearchSession).where(ResearchSession.id == session_id),
+    )
+    use_script(app, turn_text("## notes from the thread"))
+
+    response = await generate(client, session_id=session_id)
+
+    notes = await note_rows(session_factory)
+    assert len(notes) == 1
+    assert notes[0].session_id is None
+    assert notes[0].body_md == "## notes from the thread"
+    assert payloads_for(response.text, "done")[-1] == {"note_id": notes[0].id}
+
+
+async def test_a_save_failure_ends_the_stream_with_an_error(
+    app, client, with_key, session_factory, monkeypatch
+):
+    """Anything the retry cannot fix still has to reach the browser as a frame.
+
+    An exception here escapes into sse-starlette and closes the stream with
+    neither ``error`` nor ``done``, which the client renders as a turn that never
+    ends.
+    """
+
+    async def boom(*_args, **_kwargs):
+        raise RuntimeError("the disk went away")
+
+    monkeypatch.setattr(notes_service, "save_note", boom)
+    use_script(app, turn_text("## notes"))
+    item_ids = await seed_items(session_factory, 1)
+
+    response = await generate(client, item_ids=item_ids)
+
+    assert response.status_code == 200
+    names = event_names(response.text)
+    assert names[-1] == "error"
+    assert "done" not in names
+    assert payloads_for(response.text, "error")[-1]["type"] == "api_error"
+    assert await note_rows(session_factory) == []
+
+
+async def test_save_note_degrades_only_the_references_that_vanished(session_factory):
+    """The retry drops exactly what is gone, not every link on one bad id."""
+    item_ids = await seed_items(session_factory, 2)
+    async with session_factory() as session:
+        rows = (
+            (await session.execute(select(FeedItem).order_by(FeedItem.id))).scalars().all()
+        )
+        items = tuple(
+            notes_service.NoteItem(
+                item_id=row.id,
+                title=row.title,
+                url=row.url,
+                feed_title="Example Security",
+                published_at=row.published_at,
+                text="body",
+            )
+            for row in rows
+        )
+        await session.execute(delete(FeedItem).where(FeedItem.id == item_ids[1]))
+        await session.commit()
+
+    note_id = await notes_service.save_note(
+        session_factory,
+        title="Partial",
+        body_md="## body",
+        template_used="t",
+        session_id=None,
+        items=items,
+        extra_sources=[notes_service.ExtraSource(url="https://elsewhere.test/a", title="Read")],
+    )
+
+    sources = await source_rows(session_factory)
+    assert [source.note_id for source in sources] == [note_id] * 3
+    assert [source.feed_item_id for source in sources] == [item_ids[0], None, None]
+    assert sources[2].url == "https://elsewhere.test/a"
+
+
+# ---------------------------------------------- concurrent context assembly
+
+
+async def test_articles_are_extracted_concurrently(session_factory, monkeypatch, db_session):
+    """25 items x one timeout each was minutes inside the request, before the
+    SSE response even opened. The fan-out mirrors ``refresh_feeds``."""
+    count = 6
+    delay = 0.15
+    item_ids = await seed_items(session_factory, count, content=None)
+    concurrent = 0
+    peak = 0
+
+    async def slow_extract(session, item_id, **_kwargs):
+        nonlocal concurrent, peak
+        concurrent += 1
+        peak = max(peak, concurrent)
+        try:
+            await asyncio.sleep(delay)
+        finally:
+            concurrent -= 1
+        item = await session.get(FeedItem, item_id)
+        item.content_text = f"ARTICLE {item_id}"
+        return extract_service.ItemExtractResult(item=item, extracted=True, fallback=False)
+
+    monkeypatch.setattr(extract_service, "extract_item", slow_extract)
+
+    started = time.perf_counter()
+    items = await notes_service.load_items(db_session, session_factory, item_ids)
+    elapsed = time.perf_counter() - started
+
+    assert [item.text for item in items] == [f"ARTICLE {item_id}" for item_id in item_ids]
+    assert peak == count
+    # ~max, not ~sum: sequentially this was count * delay.
+    assert elapsed < delay * count / 2
+
+
+async def test_concurrent_extraction_is_capped_by_the_semaphore(
+    session_factory, monkeypatch, db_session
+):
+    """Enough at once that 25 items do not take 25 timeouts, few enough that the
+    app never looks like a scraper."""
+    over = notes_service.MAX_CONCURRENT_EXTRACTIONS + 3
+    item_ids = await seed_items(session_factory, over, content=None)
+    concurrent = 0
+    peak = 0
+
+    async def slow_extract(session, item_id, **_kwargs):
+        nonlocal concurrent, peak
+        concurrent += 1
+        peak = max(peak, concurrent)
+        try:
+            await asyncio.sleep(0.02)
+        finally:
+            concurrent -= 1
+        item = await session.get(FeedItem, item_id)
+        item.content_text = f"ARTICLE {item_id}"
+        return extract_service.ItemExtractResult(item=item, extracted=True, fallback=False)
+
+    monkeypatch.setattr(extract_service, "extract_item", slow_extract)
+
+    await notes_service.load_items(db_session, session_factory, item_ids)
+
+    assert peak == notes_service.MAX_CONCURRENT_EXTRACTIONS
+
+
+async def test_one_failing_extraction_does_not_take_the_others_down(
+    session_factory, monkeypatch, db_session
+):
+    item_ids = await seed_items(session_factory, 3, content=None)
+
+    async def flaky(session, item_id, **_kwargs):
+        if item_id == item_ids[1]:
+            raise RuntimeError("that one fell over")
+        item = await session.get(FeedItem, item_id)
+        item.content_text = f"ARTICLE {item_id}"
+        return extract_service.ItemExtractResult(item=item, extracted=True, fallback=False)
+
+    monkeypatch.setattr(extract_service, "extract_item", flaky)
+
+    items = await notes_service.load_items(db_session, session_factory, item_ids)
+
+    assert items[0].text == f"ARTICLE {item_ids[0]}"
+    assert items[2].text == f"ARTICLE {item_ids[2]}"
+    # The failure degrades to the RSS summary, with the reason shown to the model.
+    assert items[1].text == "Summary for story 1."
+    assert "the article could not be fetched" in (items[1].note or "")

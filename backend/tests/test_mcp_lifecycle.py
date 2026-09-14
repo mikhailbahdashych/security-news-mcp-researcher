@@ -17,6 +17,7 @@ with no ``error`` and no ``done`` event.
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Iterator
 from typing import Any
 
@@ -222,5 +223,29 @@ async def test_a_reload_that_removes_a_server_closes_it_without_cancelling_calle
         assert tools == [] or len(tools) == 4
         assert manager.server_names == []
         assert factory.open_connections == 0
+    finally:
+        await manager.aclose()
+
+
+async def test_a_reload_closes_stale_servers_concurrently() -> None:
+    """Sequentially, editing a config with three wedged servers in it cost three
+    shutdown timeouts in a row — on a request the user is watching."""
+    delay = 0.15
+    factory = TrackedFactory(exit_delay_s=delay)
+    names = ["alpha", "beta", "gamma"]
+    manager = McpManager([stdio(name) for name in names], target_factory=factory)
+    try:
+        for name in names:
+            await manager.list_tools(name)
+        assert factory.open_connections == len(names)
+
+        started = time.perf_counter()
+        await manager.reload([])
+        elapsed = time.perf_counter() - started
+
+        assert manager.server_names == []
+        assert factory.open_connections == 0
+        # ~max, not ~sum.
+        assert elapsed < delay * len(names)
     finally:
         await manager.aclose()

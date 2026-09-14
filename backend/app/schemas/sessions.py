@@ -108,13 +108,8 @@ class MessageCreate(BaseModel):
     attached_item_ids: list[int] = Field(default_factory=list, max_length=50)
 
 
-class CancelResponse(BaseModel):
-    cancelled: bool
-
-
 __all__ = [
     "ArchivedFilter",
-    "CancelResponse",
     "MessageCreate",
     "MessageRead",
     "SessionCreate",

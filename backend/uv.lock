@@ -1483,6 +1483,7 @@ dependencies = [
     { name = "fastapi" },
     { name = "feedparser" },
     { name = "greenlet" },
+    { name = "httpx2" },
     { name = "mcp" },
     { name = "pydantic-settings" },
     { name = "sqlalchemy", extra = ["asyncio"] },
@@ -1493,7 +1494,6 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
-    { name = "httpx2" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "ruff" },
@@ -1507,6 +1507,7 @@ requires-dist = [
     { name = "fastapi" },
     { name = "feedparser", specifier = ">=6.0.11" },
     { name = "greenlet", specifier = ">=3.5.5" },
+    { name = "httpx2" },
     { name = "mcp", specifier = ">=2.2.0,<3" },
     { name = "pydantic-settings" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.52" },
@@ -1517,7 +1518,6 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "httpx2" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "ruff" },

@@ -112,13 +112,8 @@ class NoteCancelRequest(BaseModel):
     generation_id: str = Field(min_length=1, max_length=100)
 
 
-class CancelResponse(BaseModel):
-    cancelled: bool
-
-
 __all__ = [
     "EXCERPT_CHARS",
-    "CancelResponse",
     "NoteCancelRequest",
     "NoteGenerateRequest",
     "NotePageRead",

@@ -20,6 +20,7 @@ that moves invalidates the cache for the whole conversation.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -98,11 +99,28 @@ class McpToolProvider:
     resolved: dict[str, tuple[str, str]] = field(default_factory=dict)
 
     async def list_tools(self) -> list[RegisteredTool]:
+        """Every enabled tool, listed from every server **at once**.
+
+        Sequentially, a cold or broken server cost ``CONNECT_TIMEOUT_S`` (10 s)
+        before the next one was even tried — and this runs before the first token
+        of every chat turn and every note generation, so three dead servers meant
+        half a minute of nothing happening. Each server has its own lock, so
+        concurrent listing is already safe, and ``list_tools`` never raises: a
+        server that cannot be reached contributes ``[]``.
+
+        The *output* order is unchanged, because it is the head of the
+        prompt-cache prefix: results are zipped back onto ``server_names``, which
+        is sorted, and the naming loop runs over them in that order.
+        """
+        servers = self.manager.server_names
+        per_server = await asyncio.gather(
+            *(self.manager.list_tools(server) for server in servers)
+        )
+
         registered: list[RegisteredTool] = []
         taken: set[str] = set()
         resolved: dict[str, tuple[str, str]] = {}
-        for server in self.manager.server_names:
-            tools = await self.manager.list_tools(server)
+        for server, tools in zip(servers, per_server, strict=True):
             for tool in sorted(tools, key=lambda item: item.name):
                 if not self.prefs.get((server, tool.name), True):
                     continue

@@ -267,7 +267,9 @@ async def _refresh_one(
         error = str(exc)
     except httpx2.HTTPStatusError as exc:
         error = f"HTTP {exc.response.status_code}"
-    except httpx2.TimeoutException:
+    except (httpx2.TimeoutException, TimeoutError):
+        # ``TimeoutError`` is ``fetch_guarded``'s whole-fetch budget; httpx's is
+        # per operation. Both mean the same thing on a feed row.
         error = "timed out"
     except httpx2.HTTPError as exc:
         error = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__

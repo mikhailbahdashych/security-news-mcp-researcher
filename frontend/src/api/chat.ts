@@ -215,6 +215,21 @@ export function blocksToThinking(blocks: ContentBlock[] | null | undefined): str
 }
 
 /**
+ * How a stored tool call is doing, for the transcript's card.
+ *
+ * A null `result_json` means the call had not come back when the row was
+ * written, which is exactly what a mid-turn reload reads. Deciding on `is_error`
+ * alone rendered that as a tick — a call still running shown as one that
+ * succeeded.
+ */
+export function toolCallStatus(row: ToolCallRow): 'running' | 'ok' | 'error' {
+  if (row.result_json == null) {
+    return 'running'
+  }
+  return row.is_error ? 'error' : 'ok'
+}
+
+/**
  * The terminal state a persisted assistant turn represents, if any.
  *
  * A refusal and a truncated answer are properties of the stored turn, not of the

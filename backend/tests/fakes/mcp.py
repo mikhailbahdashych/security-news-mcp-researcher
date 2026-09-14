@@ -70,13 +70,15 @@ class ExitTracker:
     ``enter_delay_s`` stalls the owner task *before* the client is entered, which is
     the in-process stand-in for a server that is slow to start: the ready future is
     unresolved and the connection is half-built, exactly the window in which a
-    concurrent reload used to cancel the connecting caller.
+    concurrent reload used to cancel the connecting caller. ``exit_delay_s`` is the
+    same idea for shutdown — a server that takes its time dying.
     """
 
-    def __init__(self, enter_delay_s: float = 0.0) -> None:
+    def __init__(self, enter_delay_s: float = 0.0, exit_delay_s: float = 0.0) -> None:
         self.entered = False
         self.exited = False
         self.enter_delay_s = enter_delay_s
+        self.exit_delay_s = exit_delay_s
 
     async def __aenter__(self) -> ExitTracker:
         if self.enter_delay_s:
@@ -85,6 +87,8 @@ class ExitTracker:
         return self
 
     async def __aexit__(self, *_: Any) -> None:
+        if self.exit_delay_s:
+            await asyncio.sleep(self.exit_delay_s)
         self.exited = True
 
 
@@ -145,15 +149,19 @@ class TrackedFactory:
         build: Callable[[], MCPServer] = build_server,
         *,
         enter_delay_s: float = 0.0,
+        exit_delay_s: float = 0.0,
     ) -> None:
         self.build = build
         self.enter_delay_s = enter_delay_s
+        self.exit_delay_s = exit_delay_s
         self.trackers: list[ExitTracker] = []
         self.calls: list[str] = []
 
     def __call__(self, config: Any) -> TargetSpec:
         self.calls.append(config.name)
-        tracker = ExitTracker(enter_delay_s=self.enter_delay_s)
+        tracker = ExitTracker(
+            enter_delay_s=self.enter_delay_s, exit_delay_s=self.exit_delay_s
+        )
         self.trackers.append(tracker)
         return TargetSpec(server=self.build(), closers=(tracker,))
 

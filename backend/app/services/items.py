@@ -45,8 +45,13 @@ class ItemPage:
     next_cursor: str | None = None
 
 
-def _sort_key():
-    """The newest-first sort expression — see the module docstring."""
+def sort_key():
+    """The newest-first sort expression — see the module docstring.
+
+    Public because global search orders the same rows and must not invent its own
+    definition of "newest": ordering by ``published_at`` alone put every undated
+    item at the bottom of the results while the inbox had it interleaved.
+    """
     return func.coalesce(FeedItem.published_at, FeedItem.fetched_at)
 
 
@@ -121,7 +126,7 @@ async def list_items(
         raise ValueError(f"Unknown status filter: {status!r}")
     limit = max(1, min(limit, MAX_LIMIT))
 
-    sort_key = _sort_key()
+    sorted_by = sort_key()
     statement = _apply_filters(select(FeedItem), status=status, feed_id=feed_id, q=q)
 
     if cursor:
@@ -129,11 +134,14 @@ async def list_items(
         # Expanded rather than a row-value comparison: identical semantics, and it
         # reads the same on any backend the app might grow into.
         statement = statement.where(
-            or_(sort_key < after_sort, (sort_key == after_sort) & (FeedItem.id < after_id))
+            or_(
+                sorted_by < after_sort,
+                (sorted_by == after_sort) & (FeedItem.id < after_id),
+            )
         )
 
     # One extra row is the cheapest way to know whether a next page exists.
-    statement = statement.order_by(sort_key.desc(), FeedItem.id.desc()).limit(limit + 1)
+    statement = statement.order_by(sorted_by.desc(), FeedItem.id.desc()).limit(limit + 1)
     rows = list((await session.execute(statement)).scalars())
 
     next_cursor: str | None = None
@@ -185,4 +193,5 @@ __all__ = [
     "feed_titles",
     "list_items",
     "set_status",
+    "sort_key",
 ]

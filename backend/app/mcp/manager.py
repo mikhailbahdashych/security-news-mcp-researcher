@@ -265,21 +265,28 @@ class McpManager:
                 for name, state in self._states.items()
                 if name not in wanted or state.config != wanted[name]
             ]
-            for name in stale:
-                state = self._states.get(name)
-                if state is None:
-                    continue
-                # Under the server's own lock: cancelling an owner task that a
-                # request is still awaiting would cancel the ready future out from
-                # under it, and a chat turn would die mid-stream. Waiting here is
-                # bounded by the connect timeout.
-                async with state.lock:
-                    if self._states.get(name) is state:
-                        del self._states[name]
-                    await self._close_state(state)
+            # Concurrently: each close waits on that server's own lock and then on
+            # its owner task unwinding, both bounded by a timeout. Sequentially,
+            # editing a config with three wedged servers in it meant three
+            # timeouts in a row on a request the user is watching.
+            await asyncio.gather(*(self._drop_server(name) for name in stale))
             for name, config in wanted.items():
                 if name not in self._states:
                     self._states[name] = _ServerState(config=config)
+
+    async def _drop_server(self, name: str) -> None:
+        """Drop one server from the set and terminate its connection."""
+        state = self._states.get(name)
+        if state is None:
+            return
+        # Under the server's own lock: cancelling an owner task that a request is
+        # still awaiting would cancel the ready future out from under it, and a
+        # chat turn would die mid-stream. Waiting here is bounded by the connect
+        # timeout.
+        async with state.lock:
+            if self._states.get(name) is state:
+                del self._states[name]
+            await self._close_state(state)
 
     async def reconnect(self, name: str) -> ServerSnapshot:
         """User-initiated: drop the connection, clear the error and connect now.

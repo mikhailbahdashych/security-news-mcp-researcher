@@ -21,16 +21,15 @@ from sse_starlette.sse import EventSourceResponse
 from app.agent import events as ev
 from app.agent import persistence
 from app.agent import runner as agent_runner
-from app.agent.providers import build_tool_providers
+from app.agent.providers import build_tool_providers, turn_settings
 from app.agent.registry import ToolRegistry
 from app.api import tasks as task_registry
 from app.api.deps import AppSettings, ChatClientFactory, DbSession, SessionFactory
 from app.api.streaming import SSE_HEADERS, SSE_PING_S, frames, pump_agent_events, sse_frame
-from app.config import Settings
 from app.db.models import FeedItem, Message, ResearchSession, ToolCall, utcnow
+from app.schemas.common import CancelResponse
 from app.schemas.sessions import (
     ArchivedFilter,
-    CancelResponse,
     MessageCreate,
     MessageRead,
     SessionCreate,
@@ -242,22 +241,6 @@ async def _resolve_attachments(session: AsyncSession, item_ids: list[int]) -> li
     return [{"type": "text", "text": "\n".join(lines)}]
 
 
-async def _turn_settings(session: AsyncSession, settings: Settings) -> dict[str, Any]:
-    """Every setting the turn needs, read once.
-
-    Never per-event: a byte change mid-conversation would invalidate the prompt
-    cache for the rest of the thread.
-    """
-    return {
-        "api_key": await settings_service.get_effective_api_key(session, settings),
-        "model": await settings_service.get_str(session, "model"),
-        "effort": await settings_service.get_str(session, "effort"),
-        "thinking_display": await settings_service.get_str(session, "thinking_display"),
-        "max_tool_turns": await settings_service.get_int(session, "max_tool_turns"),
-        "system_prompt_extra": await settings_service.get_str(session, "system_prompt_extra"),
-    }
-
-
 @router.post("/sessions/{session_id}/messages")
 async def post_message(
     session_id: int,
@@ -277,7 +260,7 @@ async def post_message(
             status.HTTP_409_CONFLICT, detail="A turn is already running for this session."
         )
 
-    resolved = await _turn_settings(session, app_settings)
+    resolved = await turn_settings(session, app_settings)
     user_content: list[dict[str, Any]] = [{"type": "text", "text": payload.content}]
     user_content.extend(await _resolve_attachments(session, payload.attached_item_ids))
 

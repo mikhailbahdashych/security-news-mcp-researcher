@@ -1,10 +1,11 @@
-"""The one place the registry's provider list is built.
+"""What the two streaming routes share before they start a run.
 
-Two routes need the same tool set: the chat turn
-(``POST /api/sessions/{id}/messages``) and Task 6's note generation. Building the
-list in both would let them drift — a note generated with a different tool set
-than the chat that produced its sources is a bug that nobody notices until it
-matters — so both call :func:`build_tool_providers`.
+The chat turn (``POST /api/sessions/{id}/messages``) and note generation
+(``POST /api/notes/generate``) need the same tool set and the same settings.
+Building either in both places would let them drift — a note generated with a
+different tool set than the chat that produced its sources is a bug that nobody
+notices until it matters — so both call :func:`build_tool_providers` and
+:func:`turn_settings`.
 
 Order is load-bearing. The ``tools`` array is the head of the prompt-cache prefix,
 so it is always built-ins, then Anthropic's server tools, then MCP.
@@ -12,12 +13,39 @@ so it is always built-ins, then Anthropic's server tools, then MCP.
 
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import Request
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agent.builtin import BuiltinToolProvider, ServerToolProvider
 from app.agent.registry import ToolProvider
+from app.config import Settings
 from app.mcp.provider import McpToolProvider, load_tool_prefs, sync_manager
+from app.services import settings as settings_service
+
+
+async def turn_settings(
+    session: AsyncSession, settings: Settings | None = None
+) -> dict[str, Any]:
+    """Every setting one run needs, read once, in the request's own transaction.
+
+    Never per-event and never after the stream has opened: the system prompt and
+    the tool array are the prompt-cache prefix, so a byte that changed mid-run
+    would invalidate the cache for the rest of it — and a settings edit must not
+    be able to shift the prompt under a model that is already answering.
+
+    ``settings`` is the app's :class:`Settings`; it contributes only the ``.env``
+    API key (see ``app.services.settings.get_effective_api_key``).
+    """
+    return {
+        "api_key": await settings_service.get_effective_api_key(session, settings),
+        "model": await settings_service.get_str(session, "model"),
+        "effort": await settings_service.get_str(session, "effort"),
+        "thinking_display": await settings_service.get_str(session, "thinking_display"),
+        "max_tool_turns": await settings_service.get_int(session, "max_tool_turns"),
+        "system_prompt_extra": await settings_service.get_str(session, "system_prompt_extra"),
+    }
 
 
 async def build_tool_providers(
@@ -48,4 +76,4 @@ async def build_tool_providers(
     return providers
 
 
-__all__ = ["build_tool_providers"]
+__all__ = ["build_tool_providers", "turn_settings"]

@@ -7,12 +7,19 @@ contract that matters is what the registry ends up offering the model.
 from __future__ import annotations
 
 import re
+import time
 
 from app.agent.registry import TOOL_NAME_PATTERN, ToolRegistry, ToolSource
 from app.mcp.config import McpServerConfig
 from app.mcp.manager import McpManager
 from app.mcp.provider import McpToolProvider, namespaced_name
-from tests.fakes.mcp import BrokenTarget, SpyFactory, build_other_server, build_server
+from tests.fakes.mcp import (
+    BrokenTarget,
+    SpyFactory,
+    TrackedFactory,
+    build_other_server,
+    build_server,
+)
 
 
 def stdio(name: str) -> McpServerConfig:
@@ -197,3 +204,57 @@ def test_namespaced_name_is_pure_and_bounded() -> None:
     long = namespaced_name("s", "x" * 400)
     assert len(long) == 128
     assert re.match(r"^[a-zA-Z0-9_-]{1,128}$", long)
+
+
+# ----------------------------------------------- listing servers concurrently
+
+
+async def test_slow_servers_are_listed_concurrently() -> None:
+    """Listing runs before the first token of every chat turn and generation.
+
+    Sequentially, each cold or wedged server cost the full connect budget before
+    the next was tried, so three of them was half a minute of nothing happening.
+    """
+    delay = 0.15
+    factory = TrackedFactory(enter_delay_s=delay)
+    manager = McpManager(
+        [stdio("alpha"), stdio("beta"), stdio("gamma")], target_factory=factory
+    )
+    try:
+        started = time.perf_counter()
+        tools = await McpToolProvider(manager).list_tools()
+        elapsed = time.perf_counter() - started
+    finally:
+        await manager.aclose()
+
+    assert tools
+    # ~max, not ~sum: sequentially this was three connect delays end to end.
+    assert elapsed < delay * 3
+
+
+async def test_concurrent_listing_keeps_the_tool_order_stable() -> None:
+    """The tools array is the head of the prompt-cache prefix, so a name that
+    moves invalidates the cache for the whole conversation."""
+    manager = make_manager(
+        gamma=build_server(), alpha=build_other_server(), beta=build_server()
+    )
+    try:
+        names = [tool.name for tool in await McpToolProvider(manager).list_tools()]
+    finally:
+        await manager.aclose()
+
+    servers = [name.split("__")[1] for name in names]
+    # Server-sorted, then tool-sorted within each server.
+    assert servers == sorted(servers)
+    assert names == sorted(names, key=lambda name: (name.split("__")[1], name))
+
+
+async def test_a_broken_server_does_not_hide_a_working_one() -> None:
+    manager = make_manager(broken=BrokenTarget(), working=build_server())
+    try:
+        names = [tool.name for tool in await McpToolProvider(manager).list_tools()]
+    finally:
+        await manager.aclose()
+
+    assert any(name.startswith("mcp__working__") for name in names)
+    assert not any(name.startswith("mcp__broken__") for name in names)

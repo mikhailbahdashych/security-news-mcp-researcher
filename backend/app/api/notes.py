@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 import re
 from collections.abc import AsyncIterator
-from typing import Annotated, Any
+from typing import Annotated
 from uuid import uuid4
 
 from anthropic import AsyncAnthropic
@@ -24,7 +24,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from app.agent import events as ev
 from app.agent import runner as agent_runner
-from app.agent.providers import build_tool_providers
+from app.agent.providers import build_tool_providers, turn_settings
 from app.agent.registry import ToolRegistry
 from app.api import tasks as task_registry
 from app.api.deps import AppSettings, ChatClientFactory, DbSession, SessionFactory
@@ -36,12 +36,11 @@ from app.api.streaming import (
     sse_data,
     sse_frame,
 )
-from app.config import Settings
 from app.db.models import Note, NoteSource, utcnow
 from app.db.util import matches
+from app.schemas.common import CancelResponse
 from app.schemas.notes import (
     EXCERPT_CHARS,
-    CancelResponse,
     NoteCancelRequest,
     NoteGenerateRequest,
     NotePageRead,
@@ -52,7 +51,6 @@ from app.schemas.notes import (
 )
 from app.services import items as items_service
 from app.services import notes as notes_service
-from app.services import settings as settings_service
 
 logger = logging.getLogger(__name__)
 
@@ -75,19 +73,6 @@ def generation_key(generation_id: str) -> str:
 # --------------------------------------------------------------- generation
 
 
-async def _generation_settings(session: AsyncSession, settings: Settings) -> dict[str, Any]:
-    """Every setting the generation needs, read once in the request's own
-    transaction — never per-event, and never after the stream has opened."""
-    return {
-        "api_key": await settings_service.get_effective_api_key(session, settings),
-        "model": await settings_service.get_str(session, "model"),
-        "effort": await settings_service.get_str(session, "effort"),
-        "thinking_display": await settings_service.get_str(session, "thinking_display"),
-        "max_tool_turns": await settings_service.get_int(session, "max_tool_turns"),
-        "system_prompt_extra": await settings_service.get_str(session, "system_prompt_extra"),
-    }
-
-
 @router.post("/notes/generate")
 async def generate_note(
     payload: NoteGenerateRequest,
@@ -105,7 +90,7 @@ async def generate_note(
             status.HTTP_409_CONFLICT, detail="That generation is already running."
         )
 
-    resolved = await _generation_settings(session, app_settings)
+    resolved = await turn_settings(session, app_settings)
     if not resolved["api_key"]:
         # Checked *before* the context is built: assembly fetches and extracts the
         # article behind every item that has no stored text, so running it first
@@ -133,8 +118,9 @@ async def generate_note(
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except notes_service.UnknownSession as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-    # Context assembly may have extracted an article into ``content_text``; that
-    # is the only write this endpoint makes before the model has answered.
+    # Assembly's own writes (an extracted ``content_text``) are committed inside
+    # the short transactions it opens per article; this releases the read
+    # transaction this request has been holding, before the stream opens.
     await session.commit()
 
     # The same provider list the chat turn builds, then narrowed by the runner's
@@ -184,6 +170,11 @@ async def _stream_generation(
     ids, neither of which exists here. Ours carries ``note_id`` and is emitted
     only after the row is committed, so a client that sees ``done`` can navigate
     straight to the note.
+
+    The save runs after the pump has finished, which puts it outside every
+    safety net the run had — hence the ``try`` around it: this generator's
+    exceptions reach sse-starlette, which closes the stream without a terminal
+    frame of any kind.
     """
     collector = notes_service.SourceCollector()
     chunks: list[str] = []
@@ -215,15 +206,31 @@ async def _stream_generation(
         )
         return
 
-    note_id = await notes_service.save_note(
-        session_factory,
-        title=context.title,
-        body_md=body,
-        template_used=context.template,
-        session_id=context.session_id,
-        items=context.items,
-        extra_sources=collector.sources(body_md=body),
-    )
+    # Outside the runner's safety net and outside ``pump_agent_events``: an
+    # exception raised here escapes into sse-starlette, which ends the response
+    # with neither ``error`` nor ``done``. The browser would sit on an open
+    # stream forever, and the note the user paid for would be gone with no
+    # explanation. Whatever happens, the client gets a terminal frame.
+    try:
+        note_id = await notes_service.save_note(
+            session_factory,
+            title=context.title,
+            body_md=body,
+            template_used=context.template,
+            session_id=context.session_id,
+            items=context.items,
+            extra_sources=collector.sources(body_md=body),
+        )
+    except Exception:  # noqa: BLE001 - a terminal frame beats a hung stream
+        logger.exception("Saving the note for generation %s failed", generation_id)
+        yield sse_frame(
+            ev.Error(
+                error_type="api_error",
+                message="The notes were written but could not be saved.",
+            )
+        )
+        return
+
     logger.info("Saved note %s from generation %s", note_id, generation_id)
     yield sse_data("done", {"note_id": note_id})
 

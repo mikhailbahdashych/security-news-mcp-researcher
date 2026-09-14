@@ -7,12 +7,15 @@ once the stream has finished.
 
 Three rules run through it:
 
-* **A generation writes nothing until it has succeeded.** The rows go in after
-  the stream completes, in one transaction — a refusal, a stopped stream or an
-  API error leaves the database exactly as it was.
-* **No transaction is held across the LLM call.** Context assembly runs in the
-  request's own session (and may extract an article on the way), and persistence
-  opens a fresh one from the factory long after that session has closed.
+* **A generation writes nothing until it has succeeded — and then it really does
+  write.** The rows go in after the stream completes, in one transaction, so a
+  refusal, a stopped stream or an API error leaves the database exactly as it
+  was; and a reference that disappeared while the model was writing degrades to
+  NULL rather than throwing away the finished note (see :func:`save_note`).
+* **No transaction is held across a network call.** Context assembly reads in the
+  request's own session but extracts articles concurrently, each in its own short
+  transaction from the session factory; persistence opens a fresh one long after
+  that session has closed.
 * **One item's problem is not the generation's problem.** An article that will
   not extract falls back to the RSS summary, and in the worst case to the title
   and URL alone; it never fails the whole run.
@@ -20,6 +23,7 @@ Three rules run through it:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
@@ -28,6 +32,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agent import events as ev
@@ -53,6 +58,11 @@ NOTE_TRANSCRIPT_MAX_CHARS = 40_000
 
 #: How many items one note may be generated from.
 MAX_NOTE_ITEMS = 25
+
+#: How many articles the context build fetches at once. Six matches the feed
+#: refresher's spirit — enough that 25 items do not take 25 timeouts, few enough
+#: that the app never looks like a scraper to any one host.
+MAX_CONCURRENT_EXTRACTIONS = 6
 
 #: ``notes.title`` is free text; this is what the UI can show without wrapping.
 TITLE_MAX_CHARS = 200
@@ -208,13 +218,21 @@ def render_item_block(position: int, item: NoteItem) -> str:
 # -------------------------------------------------------------- the context
 
 
-async def load_items(session: AsyncSession, item_ids: Sequence[int]) -> list[NoteItem]:
+async def load_items(
+    session: AsyncSession, factory: SessionFactory, item_ids: Sequence[int]
+) -> list[NoteItem]:
     """Resolve every id into a :class:`NoteItem`, in the order given.
 
-    Extraction happens here, in the caller's transaction, for any item with no
-    stored text — the caller must commit. An extraction that fails, raises, or
-    comes back thin degrades to the RSS summary rather than failing the run: a
-    note about four items should not be lost because one of them is paywalled.
+    Any item with no stored text has its article fetched here, **concurrently**
+    and in its own short transaction from *factory* — the same shape as
+    ``refresh_feeds``, and for the same reasons. One at a time in the request's
+    own transaction meant a 25-item note could sit in the endpoint for
+    ``25 x feed_timeout_s`` before the SSE response even opened, with the request
+    holding a SQLite write transaction for all of it.
+
+    An extraction that fails, raises, or comes back thin degrades to the RSS
+    summary rather than failing the run: a note about four items should not be
+    lost because one of them is paywalled.
     """
     if not item_ids:
         return []
@@ -230,10 +248,19 @@ async def load_items(session: AsyncSession, item_ids: Sequence[int]) -> list[Not
         raise UnknownFeedItem(missing[0])
 
     feed_titles = await items_service.feed_titles(session)
+    extracted = await _extract_missing(
+        factory,
+        [
+            item_id
+            for item_id in item_ids
+            if not (by_id[item_id].content_text or "").strip() and by_id[item_id].url
+        ],
+    )
+
     resolved: list[NoteItem] = []
     for item_id in item_ids:
         item = by_id[item_id]
-        text, note = await _item_text(session, item)
+        text, note = _item_text(item, extracted.get(item_id))
         resolved.append(
             NoteItem(
                 item_id=item.id,
@@ -248,27 +275,64 @@ async def load_items(session: AsyncSession, item_ids: Sequence[int]) -> list[Not
     return resolved
 
 
-async def _item_text(session: AsyncSession, item: FeedItem) -> tuple[str, str | None]:
+async def _extract_missing(
+    factory: SessionFactory, item_ids: Sequence[int]
+) -> dict[int, tuple[str, str | None]]:
+    """Extract every listed item at once, bounded by a semaphore.
+
+    Returns ``{item_id: (article text, reason it is missing)}`` — exactly one of
+    the pair is ever meaningful. Each extraction gets its own session because
+    SQLite takes one writer at a time: a shared transaction held open across N
+    concurrent HTTP fetches would serialise the whole batch behind the slowest
+    page, which is the very thing the concurrency is for.
+    """
+    if not item_ids:
+        return {}
+
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT_EXTRACTIONS)
+
+    async def extract_one(item_id: int) -> tuple[str, str | None]:
+        async with semaphore, factory() as session:
+            result = await extract_service.extract_item(
+                session, item_id, max_chars=NOTE_ITEM_MAX_CHARS
+            )
+            # Committed per item rather than at the end, so an article already
+            # fetched is kept even if a later one fails.
+            await session.commit()
+            text = (result.item.content_text or "").strip()
+            if result.extracted and text:
+                return text, None
+            return "", f"full text unavailable ({result.reason or 'no readable content'})"
+
+    outcomes = await asyncio.gather(
+        *(extract_one(item_id) for item_id in item_ids), return_exceptions=True
+    )
+
+    extracted: dict[int, tuple[str, str | None]] = {}
+    for item_id, outcome in zip(item_ids, outcomes, strict=True):
+        if isinstance(outcome, BaseException):
+            # One bad item must not end the generation.
+            logger.warning("Extraction raised for item %s", item_id, exc_info=outcome)
+            extracted[item_id] = ("", "the article could not be fetched")
+        else:
+            extracted[item_id] = outcome
+    return extracted
+
+
+def _item_text(
+    item: FeedItem, extracted: tuple[str, str | None] | None
+) -> tuple[str, str | None]:
+    """One item's prompt text, and why it is not the article when it is not."""
     stored = (item.content_text or "").strip()
     if stored:
         return stored, None
 
-    reason: str | None = None
-    if item.url:
-        try:
-            result = await extract_service.extract_item(
-                session, item.id, max_chars=NOTE_ITEM_MAX_CHARS
-            )
-        except Exception:  # noqa: BLE001 - one bad item must not end the generation
-            logger.warning("Extraction raised for item %s", item.id, exc_info=True)
-            reason = "the article could not be fetched"
-        else:
-            extracted = (result.item.content_text or "").strip()
-            if result.extracted and extracted:
-                return extracted, None
-            reason = f"full text unavailable ({result.reason or 'no readable content'})"
+    if extracted is None:
+        reason: str | None = "this item has no link"
     else:
-        reason = "this item has no link"
+        text, reason = extracted
+        if text:
+            return text, None
 
     summary = (strip_html(item.summary) or "").strip()
     if summary:
@@ -339,7 +403,7 @@ async def build_generation_context(
         if await session.get(ResearchSession, session_id) is None:
             raise UnknownSession(session_id)
 
-    items = await load_items(session, item_ids)
+    items = await load_items(session, factory, item_ids)
     template = effective_template(
         template_override, await settings_service.get_str(session, "note_template")
     )
@@ -463,7 +527,82 @@ async def save_note(
     Input items come first and keep their ``feed_item_id``; URLs the model went
     and read follow with a null one, deduped against the items and each other, so
     the Sources list distinguishes "what I asked about" from "what it found".
+
+    **A finished note is never lost to a vanished reference.** Generation takes
+    minutes, and the user is free to delete a feed item or the research session it
+    was started from while it runs; the foreign keys are ``ON DELETE SET NULL``,
+    but that does not help an *insert* naming a row that is already gone — it
+    raises, and the note the user has just paid for goes with it. So a failure
+    here is retried once with the missing references dropped: the note keeps its
+    body, and each orphaned source keeps the URL and title it was going to cite.
     """
+    try:
+        return await _insert_note(
+            factory,
+            title=title,
+            body_md=body_md,
+            template_used=template_used,
+            session_id=session_id,
+            items=items,
+            extra_sources=extra_sources,
+        )
+    except IntegrityError:
+        logger.warning(
+            "Saving note %r violated a foreign key (a referenced row was deleted "
+            "during generation); retrying with the missing links dropped",
+            title,
+            exc_info=True,
+        )
+
+    live_session_id, linkable = await _surviving_references(factory, session_id, items)
+    return await _insert_note(
+        factory,
+        title=title,
+        body_md=body_md,
+        template_used=template_used,
+        session_id=live_session_id,
+        items=items,
+        extra_sources=extra_sources,
+        linkable=linkable,
+    )
+
+
+async def _surviving_references(
+    factory: SessionFactory, session_id: int | None, items: Sequence[NoteItem]
+) -> tuple[int | None, set[int]]:
+    """Which of the note's references still exist: ``(session_id, item ids)``.
+
+    Read in its own transaction after the failed insert, so the retry drops
+    exactly what is gone rather than every link on the strength of one bad id.
+    """
+    item_ids = {item.item_id for item in items}
+    async with factory() as session:
+        live_session_id = session_id
+        if session_id is not None:
+            if await session.get(ResearchSession, session_id) is None:
+                live_session_id = None
+        linkable: set[int] = set()
+        if item_ids:
+            rows = await session.execute(
+                select(FeedItem.id).where(FeedItem.id.in_(list(item_ids)))
+            )
+            linkable = set(rows.scalars())
+    return live_session_id, linkable
+
+
+async def _insert_note(
+    factory: SessionFactory,
+    *,
+    title: str,
+    body_md: str,
+    template_used: str,
+    session_id: int | None,
+    items: Sequence[NoteItem],
+    extra_sources: Sequence[ExtraSource] = (),
+    linkable: set[int] | None = None,
+) -> int:
+    """One attempt at the write. ``linkable`` is ``None`` on the first attempt
+    (link everything) and the surviving item ids on the retry."""
     async with factory() as session:
         note = Note(
             title=title,
@@ -482,7 +621,9 @@ async def save_note(
             session.add(
                 NoteSource(
                     note_id=note.id,
-                    feed_item_id=item.item_id,
+                    feed_item_id=(
+                        item.item_id if linkable is None or item.item_id in linkable else None
+                    ),
                     url=url or None,
                     title=item.title,
                 )
@@ -499,6 +640,7 @@ async def save_note(
 
 __all__ = [
     "FETCH_ARTICLE",
+    "MAX_CONCURRENT_EXTRACTIONS",
     "MAX_NOTE_ITEMS",
     "NOTE_ASK",
     "NOTE_INSTRUCTIONS",

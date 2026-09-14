@@ -2,6 +2,7 @@ import {
   blocksToText,
   blocksToThinking,
   errorFromStopReason,
+  toolCallStatus,
   type ChatMessage,
   type ToolCallRow,
 } from '../../api/chat'
@@ -19,7 +20,7 @@ function cardFromRow(row: ToolCallRow): ToolCardState {
     server: row.server_name,
     partialJson: JSON.stringify(row.input_json ?? {}),
     input: (row.input_json as Record<string, unknown>) ?? undefined,
-    status: row.is_error ? 'error' : 'ok',
+    status: toolCallStatus(row),
     preview: typeof result?.content === 'string' ? result.content.slice(0, 600) : undefined,
     durationMs: row.duration_ms ?? undefined,
   }

@@ -7,10 +7,12 @@ question asked in a research chat, a line in a generated note.
 
 from __future__ import annotations
 
+from datetime import timedelta
 from urllib.parse import quote
 
 import pytest
 
+from app.agent.persistence import PREVIEW_CHARS
 from app.db.models import Feed, FeedItem, Message, Note, ResearchSession, utcnow
 from app.services import search as search_service
 
@@ -324,3 +326,133 @@ async def test_dismissed_items_are_still_history(client, db_session):
     body = (await client.get("/api/search", params={"q": CVE})).json()
 
     assert [hit["id"] for hit in body["items"]] == [dismissed.id]
+
+
+# ------------------------------ matching past the 300-character message preview
+
+
+LONG_ANSWER_PREFIX = "Here is what I found about the incident. " * 12
+
+
+async def add_long_message(db_session, research_id: int, seq: int, text: str) -> None:
+    """A message whose interesting part is well past ``PREVIEW_CHARS``."""
+    db_session.add(
+        Message(
+            session_id=research_id,
+            seq=seq,
+            role="assistant",
+            kind="assistant",
+            content_json=[{"type": "text", "text": text}],
+            text_preview=text[:PREVIEW_CHARS],
+        )
+    )
+    await db_session.flush()
+
+
+async def test_a_term_past_the_preview_is_still_found(db_session, client):
+    """The preview is 300 characters; an answer is thousands.
+
+    A CVE named mid-answer was simply unfindable — both in the global search and
+    in the chat sidebar's own filter, which shares the predicate.
+    """
+    research = await add_session(db_session, title="Tuesday triage")
+    body = f"{LONG_ANSWER_PREFIX}The root cause is {CVE}, patched in 4.2.1."
+    assert CVE not in body[:PREVIEW_CHARS]
+    await add_long_message(db_session, research.id, 1, body)
+    await db_session.commit()
+
+    hits = await search_service.search_sessions(db_session, CVE)
+    assert [hit.id for hit in hits] == [research.id]
+
+    # ...and through both HTTP surfaces that use the predicate.
+    found = (await client.get(f"/api/search?q={quote(CVE)}")).json()
+    assert [hit["id"] for hit in found["sessions"]] == [research.id]
+
+    listed = (await client.get(f"/api/sessions?q={quote(CVE)}")).json()
+    assert [row["id"] for row in listed["sessions"]] == [research.id]
+
+
+async def test_the_snippet_comes_from_where_the_match_actually_is(db_session):
+    """Showing the opening line of an answer that matched 2 000 characters in
+    would read as a wrong result."""
+    research = await add_session(db_session, title="Tuesday triage")
+    await add_long_message(
+        db_session,
+        research.id,
+        1,
+        f"{LONG_ANSWER_PREFIX}The root cause is {CVE}, patched in 4.2.1.",
+    )
+    await db_session.commit()
+
+    hit = (await search_service.search_sessions(db_session, CVE))[0]
+
+    assert CVE in hit.snippet
+    assert "patched in 4.2.1" in hit.snippet
+    assert len(hit.snippet) <= search_service.SNIPPET_WIDTH + 2 * len(search_service.ELLIPSIS)
+
+
+async def test_the_snippet_still_prefers_the_preview_when_it_matches(db_session):
+    await add_session(db_session, previews=[f"what do we know about {CVE}?"])
+    await db_session.commit()
+
+    hit = (await search_service.search_sessions(db_session, CVE))[0]
+
+    assert hit.snippet == f"what do we know about {CVE}?"
+
+
+async def test_a_tool_input_can_match_too(db_session):
+    """Documented consequence: the stored message is the verbatim block list, so
+    a URL the model fetched is searchable alongside what it said."""
+    research = await add_session(db_session, title="Tuesday triage")
+    db_session.add(
+        Message(
+            session_id=research.id,
+            seq=1,
+            role="assistant",
+            kind="assistant",
+            content_json=[
+                {
+                    "type": "tool_use",
+                    "id": "toolu_1",
+                    "name": "fetch_article",
+                    "input": {"url": f"https://vendor.test/{CVE}"},
+                }
+            ],
+            text_preview="[tool: fetch_article]",
+        )
+    )
+    await db_session.commit()
+
+    hits = await search_service.search_sessions(db_session, CVE)
+
+    assert [hit.id for hit in hits] == [research.id]
+
+
+# ------------------------------------------- items sort the way the inbox does
+
+
+async def test_undated_items_sort_by_when_they_were_fetched(db_session):
+    """``published_at`` is nullable, so ordering by it alone parked every undated
+    item at the bottom of the results while the inbox had it interleaved."""
+    feed = await add_feed(db_session)
+    newest = utcnow()
+    older = newest - timedelta(days=2)
+    oldest = newest - timedelta(days=4)
+
+    await add_item(db_session, feed.id, "dated-new", title=f"{CVE} dated new", published_at=newest)
+    undated = await add_item(
+        db_session, feed.id, "undated", title=f"{CVE} undated", published_at=None
+    )
+    undated.fetched_at = older
+    await add_item(db_session, feed.id, "dated-old", title=f"{CVE} dated old", published_at=oldest)
+    await db_session.commit()
+
+    hits = await search_service.search_items(db_session, CVE)
+
+    assert [hit.title for hit in hits] == [
+        f"{CVE} dated new",
+        f"{CVE} undated",
+        f"{CVE} dated old",
+    ]
+    # The date shown is the one the ordering used, not a blank.
+    assert hits[1].timestamp == older

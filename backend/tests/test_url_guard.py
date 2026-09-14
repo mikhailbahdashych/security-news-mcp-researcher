@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import socket
+import time
 
 import httpx2
 import pytest
@@ -264,3 +266,92 @@ async def test_a_feed_that_redirects_to_a_public_address_succeeds(
     result = await feeds_service.refresh_feeds(session_factory, None, transport=transport)
 
     assert result.total_new == 3
+
+
+# -------------------------------------------- the timeout bounds the whole fetch
+
+
+async def test_the_timeout_bounds_the_whole_fetch_not_one_hop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Six hops that each finish inside the timeout still cost six timeouts.
+
+    httpx's timeout is per operation, so a redirect chain (or a body that dribbles)
+    could hold a caller for ``MAX_REDIRECTS + 1`` times the number the user
+    configured. Note generation paid that serially, per item.
+    """
+    resolve_to(monkeypatch, PUBLIC)
+    hop_delay = 0.06
+    budget = 0.2
+
+    async def slow_redirect(request: httpx2.Request) -> httpx2.Response:
+        await asyncio.sleep(hop_delay)
+        hop = int(request.url.params.get("hop", "0"))
+        return httpx2.Response(
+            302, headers={"location": f"https://example.test/a?hop={hop + 1}"}
+        )
+
+    transport = RecordingTransport(slow_redirect)
+    async with build_client(budget, transport=transport) as client:
+        started = time.perf_counter()
+        with pytest.raises(TimeoutError):
+            await url_guard.fetch_guarded(client, "https://example.test/a?hop=0")
+        elapsed = time.perf_counter() - started
+
+    # Unbounded, this chain runs to TooManyRedirects after MAX_REDIRECTS + 1 hops.
+    assert len(transport.requests) < url_guard.MAX_REDIRECTS + 1
+    assert elapsed < hop_delay * (url_guard.MAX_REDIRECTS + 1)
+
+
+async def test_a_dribbling_body_is_bounded_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A response that never stops arriving is the other half of the same hole."""
+    resolve_to(monkeypatch, PUBLIC)
+
+    async def dribble():
+        for _ in range(100):
+            await asyncio.sleep(0.02)
+            yield b"x" * 8
+
+    async def slow_body(_request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, content=dribble())
+
+    async with build_client(0.15, transport=RecordingTransport(slow_body)) as client:
+        started = time.perf_counter()
+        with pytest.raises(TimeoutError):
+            await url_guard.fetch_guarded(client, "https://example.test/slow")
+        elapsed = time.perf_counter() - started
+
+    assert elapsed < 1.0
+
+
+async def test_an_explicit_timeout_overrides_the_client_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolve_to(monkeypatch, PUBLIC)
+
+    async def slow(_request: httpx2.Request) -> httpx2.Response:
+        await asyncio.sleep(0.3)
+        return httpx2.Response(200, text="late")
+
+    # The client would allow 30 s; the caller says 0.1.
+    async with build_client(30, transport=RecordingTransport(slow)) as client:
+        with pytest.raises(TimeoutError):
+            await url_guard.fetch_guarded(client, "https://example.test/slow", timeout_s=0.1)
+
+
+async def test_a_timed_out_article_is_reported_not_raised(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``extract_article`` turns the whole-fetch timeout into an ordinary reason."""
+    resolve_to(monkeypatch, PUBLIC)
+
+    async def slow(_request: httpx2.Request) -> httpx2.Response:
+        await asyncio.sleep(1.0)
+        return httpx2.Response(200, text="late")
+
+    result = await extract_service.extract_article(
+        "https://example.test/slow", timeout_s=0.1, transport=RecordingTransport(slow)
+    )
+
+    assert result.ok is False
+    assert result.reason == "timed out"

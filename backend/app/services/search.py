@@ -25,11 +25,13 @@ from datetime import datetime
 from typing import Literal
 from urllib.parse import quote
 
-from sqlalchemy import ColumnElement, or_, select
+from sqlalchemy import ColumnElement, Text, cast, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent.persistence import flatten_text
 from app.db.models import FeedItem, Message, Note, ResearchSession
 from app.db.util import matches
+from app.services import items as items_service
 
 HitType = Literal["item", "session", "note"]
 
@@ -55,9 +57,10 @@ UNTITLED_SESSION = "Untitled chat"
 class Hit:
     """One search result, before the route turns it into a link and JSON.
 
-    ``timestamp`` is whichever column the entity is ordered by — ``published_at``
-    for an item, ``updated_at`` for a session or a note — so the UI has one date
-    column to render instead of three.
+    ``timestamp`` is whichever expression the entity is ordered by —
+    ``COALESCE(published_at, fetched_at)`` for an item (the inbox's own rule),
+    ``updated_at`` for a session or a note — so the UI has one date column to
+    render instead of three, and it is always the one the ordering used.
     """
 
     type: HitType
@@ -130,6 +133,28 @@ def hit_link(hit: Hit, q: str) -> str:
 # ------------------------------------------------------------------ predicates
 
 
+def message_body(q: str) -> ColumnElement[bool]:
+    """A message matches ``q`` anywhere in it, not just in its preview.
+
+    ``text_preview`` is the first :data:`~app.agent.persistence.PREVIEW_CHARS`
+    characters, which is right for a sidebar row and useless for search: a CVE
+    named in the middle of a long answer was unfindable. ``content_json`` is the
+    verbatim content-block list and is TEXT in SQLite, so a substring scan over
+    it finds the term wherever it lands.
+
+    The preview is still matched as well: it is a flattening of the same content,
+    so it can match where the raw JSON does not (a term split across blocks reads
+    as one run of text in the preview).
+
+    One consequence worth knowing: the raw JSON also holds **tool inputs, tool
+    results and the block scaffolding**, so a session can match on a URL the model
+    fetched or on an argument it passed — not only on what was said. For a search
+    whose job is "which chat mentioned this?" that is the useful behaviour, but it
+    is why a hit's snippet may not contain the query.
+    """
+    return or_(matches(Message.text_preview, q), matches(cast(Message.content_json, Text), q))
+
+
 def session_match(q: str) -> ColumnElement[bool]:
     """A session matches on its own title or on anything said inside it.
 
@@ -139,9 +164,7 @@ def session_match(q: str) -> ColumnElement[bool]:
     what "matching" means.
     """
     said_it = (
-        select(1)
-        .where(Message.session_id == ResearchSession.id, matches(Message.text_preview, q))
-        .exists()
+        select(1).where(Message.session_id == ResearchSession.id, message_body(q)).exists()
     )
     return or_(matches(ResearchSession.title, q), said_it)
 
@@ -157,6 +180,11 @@ async def search_items(
     Every status is included — a dismissed item is still part of the history the
     user is searching.
     """
+    # The same expression the inbox orders by, not ``published_at`` alone:
+    # ``published_at`` is nullable, so undated items sorted to the very bottom
+    # here while the inbox had them interleaved by ingest time. Two views of the
+    # same rows disagreeing about "newest" is a bug the user sees directly.
+    sort_key = items_service.sort_key()
     statement = (
         select(
             FeedItem.id,
@@ -165,7 +193,7 @@ async def search_items(
             # The whole article, because the match can be anywhere in it and the
             # snippet is centred on where it lands. Bounded by `limit` rows.
             FeedItem.content_text,
-            FeedItem.published_at,
+            sort_key.label("sort_value"),
         )
         .where(
             or_(
@@ -174,7 +202,7 @@ async def search_items(
                 matches(FeedItem.content_text, q),
             )
         )
-        .order_by(FeedItem.published_at.desc(), FeedItem.id.desc())
+        .order_by(sort_key.desc(), FeedItem.id.desc())
         .limit(limit)
     )
     rows = (await session.execute(statement)).all()
@@ -184,7 +212,9 @@ async def search_items(
             id=row.id,
             title=row.title,
             snippet=_first_snippet(q, row.title, row.summary, row.content_text),
-            timestamp=row.published_at,
+            # Derived from the same expression, so the date shown is the one the
+            # result was sorted by.
+            timestamp=row.sort_value,
         )
         for row in rows
     ]
@@ -193,23 +223,40 @@ async def search_items(
 async def _first_matching_previews(
     session: AsyncSession, session_ids: Sequence[int], q: str
 ) -> dict[int, str]:
-    """The earliest matching message preview per session, in ONE query.
+    """The earliest matching message's snippet source per session, in ONE query.
 
     Ordered by ``seq`` and first-write-wins, so the snippet is the first thing
     said about the query in that conversation rather than the last.
+
+    The preview is used when the match is actually in it. When it is not — the
+    term is past :data:`~app.agent.persistence.PREVIEW_CHARS`, which is the whole
+    point of matching the body — the message's content is flattened and the
+    snippet is cut from that instead, so the user sees the sentence they searched
+    for rather than the opening line of the answer. The flattening is bounded:
+    only the matching message's blocks, and :func:`make_snippet` keeps
+    :data:`SNIPPET_WIDTH` characters of it.
     """
     if not session_ids:
         return {}
     rows = (
         await session.execute(
-            select(Message.session_id, Message.text_preview)
-            .where(Message.session_id.in_(list(session_ids)), matches(Message.text_preview, q))
+            select(Message.session_id, Message.text_preview, Message.content_json)
+            .where(Message.session_id.in_(list(session_ids)), message_body(q))
             .order_by(Message.session_id.asc(), Message.seq.asc())
         )
     ).all()
+    needle = q.lower()
     previews: dict[int, str] = {}
-    for session_id, preview in rows:
-        if preview and session_id not in previews:
+    for session_id, preview, content in rows:
+        if session_id in previews:
+            continue
+        if preview and needle in preview.lower():
+            previews[session_id] = preview
+            continue
+        flattened = flatten_text(content)
+        if flattened and needle in flattened.lower():
+            previews[session_id] = flattened
+        elif preview:
             previews[session_id] = preview
     return previews
 
@@ -224,7 +271,8 @@ async def search_sessions(
     """Research sessions matching ``q`` in their title or in any of their messages.
 
     The hit is always the session, never the message — the user wants to reopen
-    the conversation, not a line out of it.
+    the conversation, not a line out of it. "In any of their messages" means the
+    whole stored message, tool traffic included; see :func:`message_body`.
     """
     statement = select(
         ResearchSession.id, ResearchSession.title, ResearchSession.updated_at
@@ -284,6 +332,7 @@ __all__ = [
     "HitType",
     "hit_link",
     "make_snippet",
+    "message_body",
     "search_items",
     "search_notes",
     "search_sessions",
