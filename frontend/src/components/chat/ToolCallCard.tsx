@@ -8,6 +8,8 @@ export interface ToolCardState {
   partialJson: string
   /** Present for server tools, whose input arrives whole rather than streamed. */
   input?: Record<string, unknown>
+  /** The MCP server that owns the tool, when the transcript already knows it. */
+  server?: string | null
   status: 'running' | 'ok' | 'error'
   preview?: string
   durationMs?: number
@@ -19,6 +21,15 @@ const SOURCE_LABEL: Record<string, string> = {
   builtin: 'local',
   server: 'web',
   mcp: 'mcp',
+}
+
+/** `mcp__{server}__{tool}` -> `server`. The SSE event carries only the source, but
+ *  the namespaced name is enough to say which server answered. */
+function mcpServerName(card: ToolCardState): string | null {
+  if (card.server) return card.server
+  if (card.source !== 'mcp') return null
+  const match = /^mcp__([^_]+(?:_[^_]+)*?)__/.exec(card.name)
+  return match ? match[1] : null
 }
 
 function prettyArguments(card: ToolCardState): string {
@@ -42,6 +53,7 @@ function isResultList(
 export default function ToolCallCard({ card }: { card: ToolCardState }) {
   const [open, setOpen] = useState(false)
   const mark = card.status === 'running' ? '⋯' : card.status === 'ok' ? '✓' : '✗'
+  const server = mcpServerName(card)
 
   return (
     <div className="rounded-md border border-slate-200 bg-white">
@@ -54,6 +66,7 @@ export default function ToolCallCard({ card }: { card: ToolCardState }) {
         <span className="font-mono font-medium text-slate-800">{card.name}</span>
         <span className="rounded border border-slate-200 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-slate-500">
           {SOURCE_LABEL[card.source] ?? card.source}
+          {server ? ` · ${server}` : ''}
         </span>
         <span
           className={

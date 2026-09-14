@@ -16,6 +16,7 @@ import {
 } from '../api/settings'
 import ApiKeySection from '../components/settings/ApiKeySection'
 import Field, { controlClass } from '../components/settings/Field'
+import McpSection from '../components/settings/McpSection'
 import SettingsSection from '../components/settings/SettingsSection'
 import Toggle from '../components/settings/Toggle'
 
@@ -207,6 +208,8 @@ function SettingsForm({ settings }: { settings: AppSettings }) {
             />
           </Field>
         </SettingsSection>
+
+        <McpSection />
 
         <SettingsSection title="Feeds">
           <Field

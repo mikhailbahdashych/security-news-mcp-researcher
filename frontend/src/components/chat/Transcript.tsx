@@ -16,6 +16,7 @@ function cardFromRow(row: ToolCallRow): ToolCardState {
     toolUseId: row.tool_use_id ?? String(row.id),
     name: row.name ?? 'tool',
     source: row.source ?? 'builtin',
+    server: row.server_name,
     partialJson: JSON.stringify(row.input_json ?? {}),
     input: (row.input_json as Record<string, unknown>) ?? undefined,
     status: row.is_error ? 'error' : 'ok',
