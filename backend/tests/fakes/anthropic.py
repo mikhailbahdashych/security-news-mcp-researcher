@@ -529,3 +529,50 @@ def turn_text_editor(
         events=events,
         message=_message([use, result], stop_reason, container_id=container_id),
     )
+
+
+def turn_web_search(
+    *,
+    results: list[tuple[str, str]],
+    tool_use_id: str = "srvtoolu_ws",
+    query: str = "acmevpn rce",
+    text: str | None = None,
+    stop_reason: str = "end_turn",
+) -> ScriptedTurn:
+    """A server-side web_search call and its results, in one turn.
+
+    The result blocks are what note generation harvests extra source URLs from,
+    so the titles and URLs here are real ``BetaWebSearchResultBlock`` fields
+    rather than a hand-rolled dict.
+    """
+    from anthropic.types.beta import BetaWebSearchResultBlock, BetaWebSearchToolResultBlock
+
+    use = BetaServerToolUseBlock(
+        type="server_tool_use", id=tool_use_id, name="web_search", input={"query": query}
+    )
+    result = BetaWebSearchToolResultBlock(
+        type="web_search_tool_result",
+        tool_use_id=tool_use_id,
+        content=[
+            BetaWebSearchResultBlock(
+                type="web_search_result",
+                encrypted_content="enc",
+                page_age=None,
+                title=title,
+                url=url,
+            )
+            for title, url in results
+        ],
+    )
+    content: list[Any] = [use, result]
+    events: list[Any] = [
+        BetaRawContentBlockStartEvent(type="content_block_start", index=0, content_block=use),
+        BetaRawContentBlockStopEvent(type="content_block_stop", index=0),
+        BetaRawContentBlockStartEvent(type="content_block_start", index=1, content_block=result),
+        BetaRawContentBlockStopEvent(type="content_block_stop", index=1),
+    ]
+    if text is not None:
+        events.extend(_text_events(text, 2))
+        content.append(BetaTextBlock(type="text", text=text))
+    events.append(BetaRawMessageStopEvent(type="message_stop"))
+    return ScriptedTurn(events=events, message=_message(content, stop_reason))
