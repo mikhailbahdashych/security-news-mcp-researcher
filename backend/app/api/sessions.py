@@ -28,7 +28,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from app.agent import events as ev
 from app.agent import runner as agent_runner
-from app.agent.builtin import BuiltinToolProvider, ServerToolProvider
+from app.agent.providers import build_tool_providers
 from app.agent.registry import ToolRegistry
 from app.api import tasks as task_registry
 from app.api.deps import ChatClientFactory, DbSession, SessionFactory
@@ -290,15 +290,9 @@ async def post_message(
             headers=headers,
         )
 
-    server_tools = await ServerToolProvider.from_settings(session)
-    registry = ToolRegistry(
-        [
-            BuiltinToolProvider(session_factory),
-            server_tools,
-            # Task 5 appends its McpToolProvider here — the registry takes a
-            # sequence precisely so that is the only change needed.
-        ]
-    )
+    # Built-ins, Anthropic's server tools and every reachable MCP server, in that
+    # order. Shared with note generation so the two cannot offer different tools.
+    registry = ToolRegistry(await build_tool_providers(request, session, session_factory))
 
     client = client_factory(resolved["api_key"])
     generator = agent_runner.run(
