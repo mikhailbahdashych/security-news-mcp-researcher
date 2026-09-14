@@ -11,6 +11,7 @@ import {
 } from '../../api/search'
 import useDebouncedValue from '../inbox/useDebouncedValue'
 import { formatNoteDate } from '../notes/noteDate'
+import { OVERLAY_BACKDROP, OVERLAY_PANEL, SECTION_LABEL, cx } from './classes'
 
 const DEBOUNCE_MS = 250
 
@@ -20,14 +21,13 @@ const GROUPS = [
   { key: 'notes', label: 'Notes' },
 ] as const satisfies readonly { key: keyof SearchResults; label: string }[]
 
-/** `⌘K` on a Mac, `Ctrl K` everywhere else — the hint has to match the binding. */
-const SHORTCUT_HINT =
-  typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.userAgent)
-    ? '⌘K'
-    : 'Ctrl K'
+export interface GlobalSearchProps {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+}
 
 /**
- * The one search box, in the app nav on every route.
+ * The one search box, over every route.
  *
  * It searches the three histories at once and groups the answers, because the
  * user looking up a CVE does not know — and should not have to decide — whether
@@ -35,15 +35,14 @@ const SHORTCUT_HINT =
  * note. Clicking a hit lands on that entity's own view.
  *
  * `Cmd/Ctrl+K` rather than `/`: the chat composer and the note editor are text
- * fields where a slash has to type a slash.
+ * fields where a slash has to type a slash. The shortcut is owned here even
+ * though the shell owns the open flag, so there is one listener for one binding.
  */
-export default function GlobalSearch() {
+export default function GlobalSearch({ open, onOpenChange }: GlobalSearchProps) {
   const navigate = useNavigate()
   const [query, setQuery] = useState('')
-  const [open, setOpen] = useState(false)
   const [activeIndex, setActiveIndex] = useState(0)
   const inputRef = useRef<HTMLInputElement>(null)
-  const rootRef = useRef<HTMLDivElement>(null)
 
   const debounced = useDebouncedValue(query, DEBOUNCE_MS)
   const trimmed = debounced.trim()
@@ -52,7 +51,7 @@ export default function GlobalSearch() {
   const results = useQuery({
     queryKey: searchQueryKey(trimmed),
     queryFn: () => fetchSearch(trimmed),
-    enabled: ready,
+    enabled: open && ready,
   })
 
   const groups = useMemo(
@@ -67,33 +66,31 @@ export default function GlobalSearch() {
     const onKeyDown = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
         event.preventDefault()
-        setOpen(true)
-        inputRef.current?.focus()
-        inputRef.current?.select()
+        onOpenChange(true)
       }
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [])
+  }, [onOpenChange])
 
-  // A click anywhere else dismisses the panel; without this it would sit over
-  // the page until the user pressed Escape.
+  // Focus and select on open: reopening usually means refining the last search,
+  // and a selected value is one keystroke from either outcome.
   useEffect(() => {
-    if (!open) {
-      return
+    if (open) {
+      inputRef.current?.focus()
+      inputRef.current?.select()
     }
-    const onPointerDown = (event: PointerEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) {
-        setOpen(false)
-      }
-    }
-    document.addEventListener('pointerdown', onPointerDown)
-    return () => document.removeEventListener('pointerdown', onPointerDown)
   }, [open])
 
+  if (!open) {
+    return null
+  }
+
   const close = () => {
-    setOpen(false)
-    inputRef.current?.blur()
+    // Reset here rather than on open: closing is what makes the highlighted row
+    // stale, and doing it on the way out keeps the open effect to focus alone.
+    setActiveIndex(0)
+    onOpenChange(false)
   }
 
   const openHit = (hit: SearchHit) => {
@@ -123,30 +120,39 @@ export default function GlobalSearch() {
   }
 
   return (
-    <div ref={rootRef} className="relative mt-6 px-3">
-      <label className="sr-only" htmlFor="global-search">
-        Search everything
-      </label>
-      <input
-        id="global-search"
-        ref={inputRef}
-        type="search"
-        value={query}
-        placeholder={`Search  ${SHORTCUT_HINT}`}
-        onChange={(event) => {
-          setQuery(event.target.value)
-          // Reset the highlighted row here rather than in an effect on the
-          // results: the keystroke is what invalidated the old selection.
-          setActiveIndex(0)
-          setOpen(true)
-        }}
-        onFocus={() => setOpen(true)}
-        onKeyDown={onKeyDown}
-        className="w-full rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-xs text-slate-900 outline-none focus:border-slate-500"
-      />
+    <div
+      className={cx(OVERLAY_BACKDROP, 'flex items-start justify-center px-6 pt-24 pb-6')}
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) {
+          close()
+        }
+      }}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Search items, chats and notes"
+        className={cx(OVERLAY_PANEL, 'w-full max-w-[560px] overflow-hidden')}
+      >
+        <input
+          ref={inputRef}
+          type="text"
+          value={query}
+          placeholder="Search items, chats and notes…"
+          aria-label="Search items, chats and notes"
+          onChange={(event) => {
+            setQuery(event.target.value)
+            // Reset the highlighted row here rather than in an effect on the
+            // results: the keystroke is what invalidated the old selection.
+            setActiveIndex(0)
+          }}
+          onKeyDown={onKeyDown}
+          // No focus ring: it is the only focusable thing in the panel and it is
+          // focused the moment the panel appears, so a ring says nothing.
+          className="w-full border-b border-line bg-transparent px-4 py-3.5 text-[14px] text-ink outline-none focus-visible:outline-none"
+        />
 
-      {open && query.trim() !== '' ? (
-        <div className="absolute left-0 top-full z-50 mt-2 max-h-[70vh] w-[28rem] overflow-y-auto rounded-lg border border-slate-200 bg-white shadow-lg">
+        <div className="max-h-[340px] overflow-y-auto pb-1.5">
           <Panel
             ready={ready}
             isPending={results.isPending}
@@ -158,7 +164,7 @@ export default function GlobalSearch() {
             onPick={openHit}
           />
         </div>
-      ) : null}
+      </div>
     </div>
   )
 }
@@ -186,17 +192,17 @@ function Panel({
 }: PanelProps) {
   if (!ready) {
     return (
-      <p className="px-3 py-6 text-center text-xs text-slate-500">
+      <p className="px-4 py-6 text-center text-[11.5px] text-faint">
         Type at least {MIN_SEARCH_CHARS} characters.
       </p>
     )
   }
   if (isPending) {
-    return <p className="px-3 py-6 text-center text-xs text-slate-500">Searching…</p>
+    return <p className="px-4 py-6 text-center text-[11.5px] text-faint">Searching…</p>
   }
   if (isError) {
     return (
-      <p className="px-3 py-6 text-center text-xs text-rose-600">
+      <p className="px-4 py-6 text-center text-[11.5px] text-red">
         Could not search. Is the backend running?
       </p>
     )
@@ -208,18 +214,16 @@ function Panel({
   )
 
   return (
-    <div className="divide-y divide-slate-100">
+    <div>
       {groups.map((group, position) => {
         const start = starts[position]
         return (
           <section key={group.key}>
-            <h2 className="bg-slate-50 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-              {group.label}
-            </h2>
+            <p className={cx(SECTION_LABEL, 'mt-2.5 mb-1 px-4')}>{group.label}</p>
             {group.hits.length === 0 ? (
               // Rendered rather than hidden: an absent group would read as "this
               // search did not look there".
-              <p className="px-3 py-2.5 text-xs text-slate-400">No matches</p>
+              <p className="px-4 py-1.5 text-[11.5px] text-faint">No matches</p>
             ) : (
               <ul>
                 {group.hits.map((hit, index) => (
@@ -251,29 +255,26 @@ function HitRow({ hit, query, active, onPick }: HitRowProps) {
   // A hit that matched on its title has the title as its best snippet too, and
   // the same sentence twice in a row reads as a rendering bug.
   const snippet = hit.snippet === hit.title ? '' : hit.snippet
+  const meta = [snippet, hit.timestamp ? formatNoteDate(hit.timestamp) : '']
+    .filter(Boolean)
+    .join(' · ')
 
   return (
     <li>
       <button
         type="button"
         onClick={() => onPick(hit)}
-        className={`flex w-full items-start gap-3 px-3 py-2.5 text-left ${
-          active ? 'bg-slate-100' : 'hover:bg-slate-50'
-        }`}
+        className={cx(
+          'flex w-full flex-col items-start gap-px px-4 py-[7px] text-left transition-colors duration-150',
+          active ? 'bg-hover' : 'hover:bg-hover',
+        )}
       >
-        <span className="min-w-0 flex-1">
-          <span className="block truncate text-xs font-medium text-slate-900">
-            {highlight(hit.title, query)}
-          </span>
-          {snippet ? (
-            <span className="mt-0.5 line-clamp-2 block text-[11px] leading-relaxed text-slate-600">
-              {highlight(snippet, query)}
-            </span>
-          ) : null}
+        <span className="w-full truncate text-[12.5px] text-ink">
+          {highlight(hit.title, query)}
         </span>
-        {hit.timestamp ? (
-          <span className="shrink-0 pt-0.5 text-[10px] text-slate-400">
-            {formatNoteDate(hit.timestamp)}
+        {meta ? (
+          <span className="w-full truncate text-[10.5px] text-faint">
+            {highlight(meta, query)}
           </span>
         ) : null}
       </button>
@@ -302,7 +303,7 @@ function highlight(text: string, query: string): ReactNode {
       parts.push(text.slice(cursor, index))
     }
     parts.push(
-      <mark key={index} className="rounded-xs bg-amber-200 text-slate-900">
+      <mark key={index} className="rounded-[3px] bg-accent-soft text-accent">
         {text.slice(index, index + needle.length)}
       </mark>,
     )

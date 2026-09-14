@@ -18,6 +18,7 @@ import {
   type SessionFilters,
 } from '../api/chat'
 import type { FeedItem } from '../api/inbox'
+import type { EmbeddablePageProps } from '../components/ui/PageHost'
 import Composer from '../components/chat/Composer'
 import { emptyTurn, liveTurnReducer } from '../components/chat/liveTurn'
 import Markdown from '../components/chat/Markdown'
@@ -35,18 +36,35 @@ export interface ChatNavigationState {
   attachedItems?: FeedItem[]
 }
 
-export default function ChatPage() {
+export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
   const params = useParams<{ id?: string }>()
   const navigate = useNavigate()
   const location = useLocation()
   const queryClient = useQueryClient()
 
-  const sessionId = params.id ? Number(params.id) : null
+  // Which conversation is open. Routed, that is the URL; embedded (the split
+  // view's right pane) the URL belongs to the other pane, so it is local state
+  // and every "open this session" goes through `openSession` instead.
+  const [embeddedSessionId, setEmbeddedSessionId] = useState<number | null>(null)
+  const sessionId = embedded ? embeddedSessionId : params.id ? Number(params.id) : null
+
+  const openSession = useCallback(
+    (id: number | null, replace = false) => {
+      if (embedded) {
+        setEmbeddedSessionId(id)
+        return
+      }
+      navigate(id === null ? '/chat' : `/chat/${id}`, { replace })
+    },
+    [embedded, navigate],
+  )
+
   const [live, dispatch] = useReducer(liveTurnReducer, emptyTurn)
   // Items handed over by the Inbox's "Research these" ride in on route state, so
   // they are the initial value rather than something an effect sets afterwards.
-  const [attached, setAttached] = useState<FeedItem[]>(
-    () => (location.state as ChatNavigationState | null)?.attachedItems ?? [],
+  // The embedded pane is not the one that was navigated to, so it takes none.
+  const [attached, setAttached] = useState<FeedItem[]>(() =>
+    embedded ? [] : ((location.state as ChatNavigationState | null)?.attachedItems ?? []),
   )
   const [notesOpen, setNotesOpen] = useState(false)
   const [sessionSearch, setSessionSearch] = useState('')
@@ -89,10 +107,10 @@ export default function ChatPage() {
 
   // Clear the handover off the history entry so a reload does not re-attach.
   useEffect(() => {
-    if ((location.state as ChatNavigationState | null)?.attachedItems) {
+    if (!embedded && (location.state as ChatNavigationState | null)?.attachedItems) {
       navigate(location.pathname, { replace: true, state: null })
     }
-  }, [location.pathname, location.state, navigate])
+  }, [embedded, location.pathname, location.state, navigate])
 
   useEffect(() => {
     bottom.current?.scrollIntoView({ behavior: 'smooth' })
@@ -119,7 +137,7 @@ export default function ChatPage() {
         // Without this the deleted session's terminal error would follow the
         // user onto the blank /chat view.
         dispatch({ kind: 'reset' })
-        navigate('/chat')
+        openSession(null)
       }
     },
   })
@@ -131,7 +149,7 @@ export default function ChatPage() {
         const created = await createSession({})
         id = created.id
         await queryClient.invalidateQueries({ queryKey: sessionsQueryKey })
-        navigate(`/chat/${id}`, { replace: true })
+        openSession(id, true)
       }
 
       const itemIds = attached.map((item) => item.id)
@@ -181,7 +199,7 @@ export default function ChatPage() {
         dispatch({ kind: 'settle' })
       }
     },
-    [attached, navigate, queryClient, sessionId],
+    [attached, openSession, queryClient, sessionId],
   )
 
   const stop = useCallback(() => {
@@ -219,11 +237,11 @@ export default function ChatPage() {
         onShowArchivedChange={setShowArchived}
         onNew={() => {
           dispatch({ kind: 'reset' })
-          navigate('/chat')
+          openSession(null)
         }}
         onOpen={(id) => {
           dispatch({ kind: 'reset' })
-          navigate(`/chat/${id}`)
+          openSession(id)
         }}
         onRename={(id, title) => rename.mutate({ id, title })}
         onArchive={(id, archived) => archive.mutate({ id, archived })}

@@ -9,9 +9,11 @@ import {
   notesQueryKey,
   type NoteSummary,
 } from '../api/notes'
+import type { EmbeddablePageProps } from '../components/ui/PageHost'
 import useDebouncedValue from '../components/inbox/useDebouncedValue'
 import GenerateNotesDialog from '../components/notes/GenerateNotesDialog'
 import { formatNoteDate } from '../components/notes/noteDate'
+import NoteDetailPage from './NoteDetail'
 
 const primaryButtonClass =
   'rounded-md bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-800 ' +
@@ -21,10 +23,12 @@ const secondaryButtonClass =
   'rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 ' +
   'hover:border-slate-400 disabled:opacity-40'
 
-export default function NotesPage() {
+export default function NotesPage({ embedded = false }: EmbeddablePageProps) {
   const queryClient = useQueryClient()
   const [search, setSearch] = useState('')
   const [dialogOpen, setDialogOpen] = useState(false)
+  // Embedded there is no `/notes/:id` to go to — the detail view opens in place.
+  const [openNoteId, setOpenNoteId] = useState<number | null>(null)
   const debouncedSearch = useDebouncedValue(search)
 
   const notes = useInfiniteQuery({
@@ -40,6 +44,10 @@ export default function NotesPage() {
   })
 
   const rows = notes.data?.pages.flatMap((page) => page.notes) ?? []
+
+  if (embedded && openNoteId !== null) {
+    return <NoteDetailPage embedded noteId={openNoteId} onBack={() => setOpenNoteId(null)} />
+  }
 
   return (
     <section className="mx-auto flex max-w-4xl flex-col gap-4 px-8 py-8">
@@ -80,6 +88,7 @@ export default function NotesPage() {
               key={note.id}
               note={note}
               busy={remove.isPending}
+              onOpen={embedded ? () => setOpenNoteId(note.id) : undefined}
               onDelete={() => {
                 if (window.confirm(`Delete "${note.title ?? 'this note'}"? This cannot be undone.`)) {
                   remove.mutate(note.id)
@@ -110,18 +119,24 @@ interface NoteRowProps {
   note: NoteSummary
   busy: boolean
   onDelete: () => void
+  /** Set when there is no route to link to: opens the note in place instead. */
+  onOpen?: () => void
 }
 
-function NoteRow({ note, busy, onDelete }: NoteRowProps) {
+function NoteRow({ note, busy, onDelete, onOpen }: NoteRowProps) {
+  const titleClass = 'text-sm font-medium text-slate-900 underline-offset-2 hover:underline'
   return (
     <li className="flex items-start gap-3 px-4 py-3.5">
       <div className="min-w-0 flex-1">
-        <Link
-          to={`/notes/${note.id}`}
-          className="text-sm font-medium text-slate-900 underline-offset-2 hover:underline"
-        >
-          {note.title ?? `Note ${note.id}`}
-        </Link>
+        {onOpen ? (
+          <button type="button" onClick={onOpen} className={`block text-left ${titleClass}`}>
+            {note.title ?? `Note ${note.id}`}
+          </button>
+        ) : (
+          <Link to={`/notes/${note.id}`} className={titleClass}>
+            {note.title ?? `Note ${note.id}`}
+          </Link>
+        )}
         <p className="mt-0.5 text-[11px] text-slate-500">
           {formatNoteDate(note.created_at)} · {note.source_count}{' '}
           {note.source_count === 1 ? 'source' : 'sources'}

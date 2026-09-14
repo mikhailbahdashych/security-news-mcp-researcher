@@ -19,6 +19,15 @@ import Field, { controlClass } from '../components/settings/Field'
 import McpSection from '../components/settings/McpSection'
 import SettingsSection from '../components/settings/SettingsSection'
 import Toggle from '../components/settings/Toggle'
+import Checkbox from '../components/ui/Checkbox'
+import Select from '../components/ui/Select'
+import {
+  PAGE_KEYS,
+  PAGE_LABELS,
+  useLayout,
+  type PageKey,
+} from '../components/ui/layout'
+import type { EmbeddablePageProps } from '../components/ui/PageHost'
 
 /** Everything this form edits: not the write-only API key, and not the read-only
  *  `key_source` that describes where it came from. */
@@ -39,7 +48,8 @@ const toDraft = (settings: AppSettings): Draft => ({
   feed_timeout_s: settings.feed_timeout_s,
 })
 
-export default function SettingsPage() {
+/** Settings looks the same in both panes: it edits app state, not a selection. */
+export default function SettingsPage(_props: EmbeddablePageProps) {
   const settingsQuery = useQuery({ queryKey: settingsQueryKey, queryFn: fetchSettings })
 
   if (settingsQuery.isPending) {
@@ -87,6 +97,8 @@ function SettingsForm({ settings }: { settings: AppSettings }) {
   return (
     <Shell>
       <div className="flex flex-col gap-5">
+        <LayoutSection />
+
         <ApiKeySection settings={settings} />
 
         <SettingsSection
@@ -285,12 +297,67 @@ function SettingsForm({ settings }: { settings: AppSettings }) {
   )
 }
 
+/**
+ * Split-screen preferences.
+ *
+ * Phase 1 of the redesign: the shell renders the split, and this is its only
+ * on-switch. Styled like the rest of this page for now; the Settings redesign
+ * restyles it with the others.
+ */
+function LayoutSection() {
+  const layout = useLayout()
+
+  return (
+    <SettingsSection title="Layout" description="Show two pages side by side in one window.">
+      <Checkbox
+        id="split-screen"
+        label="Split screen"
+        checked={layout.split}
+        onChange={layout.setSplit}
+      />
+      {layout.split ? (
+        <>
+          <Field label="Left pane" htmlFor="pane-a">
+            <Select
+              id="pane-a"
+              value={layout.paneA}
+              onChange={(event) => layout.setPaneA(event.target.value as PageKey)}
+            >
+              {PAGE_KEYS.map((page) => (
+                <option key={page} value={page}>
+                  {PAGE_LABELS[page]}
+                </option>
+              ))}
+            </Select>
+          </Field>
+          <Field label="Right pane" htmlFor="pane-b">
+            <Select
+              id="pane-b"
+              value={layout.paneB}
+              onChange={(event) => layout.setPaneB(event.target.value as PageKey)}
+            >
+              {PAGE_KEYS.map((page) => (
+                <option key={page} value={page}>
+                  {PAGE_LABELS[page]}
+                </option>
+              ))}
+            </Select>
+          </Field>
+          <p className="text-xs text-slate-500">
+            Clicking a page in the rail opens it in the left pane.
+          </p>
+        </>
+      ) : null}
+    </SettingsSection>
+  )
+}
+
 function Shell({ children }: { children: React.ReactNode }) {
   return (
     <section className="mx-auto max-w-3xl px-8 py-10">
       <h1 className="text-2xl font-semibold tracking-tight text-slate-900">Settings</h1>
       <p className="mt-2 mb-6 text-sm text-slate-600">
-        API credentials, model preferences and the prompts used across the app.
+        Layout, API credentials, model preferences and the prompts used across the app.
       </p>
       {children}
     </section>

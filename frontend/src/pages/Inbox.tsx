@@ -19,6 +19,7 @@ import {
   type StatusFilter,
 } from '../api/inbox'
 import type { ChatNavigationState } from './ChatPage'
+import type { EmbeddablePageProps } from '../components/ui/PageHost'
 import BulkBar from '../components/inbox/BulkBar'
 import FilterBar from '../components/inbox/FilterBar'
 import ItemRow from '../components/inbox/ItemRow'
@@ -43,16 +44,19 @@ function readStatus(raw: string | null): StatusFilter | null {
     : null
 }
 
-export default function InboxPage() {
+export default function InboxPage({ embedded = false }: EmbeddablePageProps) {
   const queryClient = useQueryClient()
   const navigate = useNavigate()
   // The global search links here as `/?q=…&item=…&status=all`, because a feed
   // item has no page of its own. The query string seeds the filters; the item id
   // just calls out a row.
+  //
+  // Embedded (the split view's right pane) the URL belongs to the other pane, so
+  // none of this applies: the embedded Inbox starts on its own defaults.
   const [searchParams] = useSearchParams()
-  const linkedQuery = searchParams.get('q') ?? ''
-  const linkedStatus = readStatus(searchParams.get('status'))
-  const linkedItemId = Number(searchParams.get('item')) || null
+  const linkedQuery = embedded ? '' : (searchParams.get('q') ?? '')
+  const linkedStatus = embedded ? null : readStatus(searchParams.get('status'))
+  const linkedItemId = embedded ? null : Number(searchParams.get('item')) || null
 
   const [status, setStatus] = useState<StatusFilter>(linkedStatus ?? 'unread')
   const [feedId, setFeedId] = useState<number | null>(null)

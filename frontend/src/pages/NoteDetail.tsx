@@ -13,6 +13,7 @@ import {
   type NoteSource,
 } from '../api/notes'
 import Markdown from '../components/chat/Markdown'
+import type { EmbeddablePageProps } from '../components/ui/PageHost'
 import { formatNoteDate } from '../components/notes/noteDate'
 
 const buttonClass =
@@ -23,11 +24,26 @@ const primaryButtonClass =
   'rounded-md bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-800 ' +
   'disabled:bg-slate-300'
 
-export default function NoteDetailPage() {
+export interface NoteDetailPageProps extends EmbeddablePageProps {
+  /** Which note to show when embedded — there is no route to read it from. */
+  noteId?: number
+  /** How "back to the list" works when embedded. */
+  onBack?: () => void
+}
+
+export default function NoteDetailPage({ embedded = false, noteId: embeddedNoteId, onBack }: NoteDetailPageProps) {
   const params = useParams<{ id: string }>()
-  const noteId = Number(params.id)
+  const noteId = embedded ? (embeddedNoteId ?? Number.NaN) : Number(params.id)
   const navigate = useNavigate()
   const queryClient = useQueryClient()
+  const goBack = () => {
+    if (onBack) {
+      onBack()
+    } else {
+      navigate('/notes')
+    }
+  }
+  const backLink = <BackLink embedded={embedded} onBack={goBack} />
 
   const [editing, setEditing] = useState(false)
   const [draftTitle, setDraftTitle] = useState('')
@@ -53,16 +69,16 @@ export default function NoteDetailPage() {
     mutationFn: () => deleteNote(noteId),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: notesQueryKey })
-      navigate('/notes')
+      goBack()
     },
   })
 
   if (note.isPending) {
-    return <Shell>Loading note…</Shell>
+    return <Shell back={backLink}>Loading note…</Shell>
   }
   if (note.isError || !note.data) {
     return (
-      <Shell>
+      <Shell back={backLink}>
         <span className="text-rose-600">
           This note could not be loaded. It may have been deleted.
         </span>
@@ -95,9 +111,7 @@ export default function NoteDetailPage() {
 
   return (
     <section className="mx-auto flex max-w-3xl flex-col gap-4 px-8 py-8">
-      <Link to="/notes" className="text-xs text-slate-500 hover:text-slate-900">
-        ← All notes
-      </Link>
+      {backLink}
 
       <header className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
@@ -255,13 +269,28 @@ function SourceList({ label, sources }: { label: string; sources: NoteSource[] }
   )
 }
 
-function Shell({ children }: { children: React.ReactNode }) {
+function Shell({ back, children }: { back: React.ReactNode; children: React.ReactNode }) {
   return (
     <section className="mx-auto max-w-3xl px-8 py-10">
-      <Link to="/notes" className="text-xs text-slate-500 hover:text-slate-900">
-        ← All notes
-      </Link>
+      {back}
       <p className="mt-4 text-sm text-slate-600">{children}</p>
     </section>
+  )
+}
+
+/** A link when there is a route behind it, a button when the pane owns the state. */
+function BackLink({ embedded, onBack }: { embedded: boolean; onBack: () => void }) {
+  const className = 'text-xs text-slate-500 hover:text-slate-900'
+  if (embedded) {
+    return (
+      <button type="button" onClick={onBack} className={`block text-left ${className}`}>
+        ← All notes
+      </button>
+    )
+  }
+  return (
+    <Link to="/notes" className={className}>
+      ← All notes
+    </Link>
   )
 }
