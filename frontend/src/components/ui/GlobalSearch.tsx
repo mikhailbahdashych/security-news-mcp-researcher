@@ -248,6 +248,10 @@ interface HitRowProps {
 }
 
 function HitRow({ hit, query, active, onPick }: HitRowProps) {
+  // A hit that matched on its title has the title as its best snippet too, and
+  // the same sentence twice in a row reads as a rendering bug.
+  const snippet = hit.snippet === hit.title ? '' : hit.snippet
+
   return (
     <li>
       <button
@@ -261,9 +265,11 @@ function HitRow({ hit, query, active, onPick }: HitRowProps) {
           <span className="block truncate text-xs font-medium text-slate-900">
             {highlight(hit.title, query)}
           </span>
-          <span className="mt-0.5 line-clamp-2 block text-[11px] leading-relaxed text-slate-600">
-            {highlight(hit.snippet, query)}
-          </span>
+          {snippet ? (
+            <span className="mt-0.5 line-clamp-2 block text-[11px] leading-relaxed text-slate-600">
+              {highlight(snippet, query)}
+            </span>
+          ) : null}
         </span>
         {hit.timestamp ? (
           <span className="shrink-0 pt-0.5 text-[10px] text-slate-400">
