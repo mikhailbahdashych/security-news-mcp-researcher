@@ -37,7 +37,7 @@ from app.api.streaming import (
     sse_frame,
 )
 from app.db.models import Note, NoteSource, utcnow
-from app.db.util import LIKE_ESCAPE_CHAR, escape_like
+from app.db.util import matches
 from app.schemas.notes import (
     EXCERPT_CHARS,
     CancelResponse,
@@ -267,12 +267,8 @@ async def list_notes(
     )
 
     if q and q.strip():
-        pattern = f"%{escape_like(q.strip())}%"
         statement = statement.where(
-            or_(
-                Note.title.ilike(pattern, escape=LIKE_ESCAPE_CHAR),
-                Note.body_md.ilike(pattern, escape=LIKE_ESCAPE_CHAR),
-            )
+            or_(matches(Note.title, q.strip()), matches(Note.body_md, q.strip()))
         )
 
     if cursor:

@@ -23,7 +23,7 @@ from sqlalchemy import Select, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import FEED_ITEM_STATUSES, Feed, FeedItem
-from app.db.util import LIKE_ESCAPE_CHAR, escape_like
+from app.db.util import matches
 
 ItemStatus = Literal["unread", "starred", "dismissed"]
 StatusFilter = Literal["unread", "starred", "dismissed", "all"]
@@ -83,14 +83,10 @@ def _apply_filters(
     if feed_id is not None:
         statement = statement.where(FeedItem.feed_id == feed_id)
     if q and q.strip():
-        # One escaping rule for the whole app (app.db.util), so a query containing
+        # One matching rule for the whole app (app.db.util), so a query containing
         # % or _ searches for those characters instead of turning into a wildcard.
-        pattern = f"%{escape_like(q.strip())}%"
         statement = statement.where(
-            or_(
-                FeedItem.title.ilike(pattern, escape=LIKE_ESCAPE_CHAR),
-                FeedItem.summary.ilike(pattern, escape=LIKE_ESCAPE_CHAR),
-            )
+            or_(matches(FeedItem.title, q.strip()), matches(FeedItem.summary, q.strip()))
         )
     return statement
 
