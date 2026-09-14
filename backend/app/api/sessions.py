@@ -1,22 +1,14 @@
 """Research-session CRUD and the streaming chat turn.
 
-The streaming endpoint is the interesting one. Three things it has to get right:
-
-* **The turn must outlive the client.** An SSE disconnect does not stop billing —
-  the LLM call keeps running server-side — so the runner is consumed inside a task
-  registered in :mod:`app.api.tasks`, and a disconnect cancels that task rather
-  than merely stopping the writes.
-* **No buffering.** ``EventSourceResponse`` with ``ping=15`` keeps the connection
-  alive through a long thinking pause, and ``X-Accel-Buffering: no`` stops a proxy
-  from holding the stream back.
-* **One turn per session.** A second POST while a turn is running is a 409, not a
-  second billed turn.
+The streaming endpoint is the interesting one, and the parts it shares with note
+generation — the cancellable pump, the disconnect watcher, the headers and the
+frame encoder — live in :mod:`app.api.streaming`. What stays here is what is
+specific to a chat turn: the attachments, the per-session conflict check, and the
+fact that a chat turn ends on the runner's own ``done`` event.
 """
 
 from __future__ import annotations
 
-import asyncio
-import json
 import logging
 from typing import Annotated, Any
 
@@ -32,6 +24,7 @@ from app.agent.providers import build_tool_providers
 from app.agent.registry import ToolRegistry
 from app.api import tasks as task_registry
 from app.api.deps import ChatClientFactory, DbSession, SessionFactory
+from app.api.streaming import SSE_HEADERS, SSE_PING_S, frames, pump_agent_events, sse_frame
 from app.db.models import FeedItem, Message, ResearchSession, ToolCall
 from app.db.util import LIKE_ESCAPE_CHAR, escape_like
 from app.schemas.sessions import (
@@ -54,9 +47,6 @@ router = APIRouter(tags=["sessions"])
 
 DEFAULT_LIMIT = 50
 MAX_LIMIT = 200
-
-#: How long the disconnect watcher waits between polls of ``is_disconnected``.
-DISCONNECT_POLL_S = 1.0
 
 
 # ---------------------------------------------------------------- session CRUD
@@ -246,17 +236,6 @@ async def _turn_settings(session: AsyncSession) -> dict[str, Any]:
     }
 
 
-def _sse(event: ev.AgentEvent) -> dict[str, str]:
-    name, payload = event.to_sse()
-    return {"event": name, "data": json.dumps(payload, default=str)}
-
-
-async def _error_stream(error: ev.Error, session_id: int) -> Any:
-    """A two-frame stream for a failure we can see before the runner starts."""
-    yield _sse(error)
-    yield _sse(ev.Done(session_id=session_id, message_ids=[]))
-
-
 @router.post("/sessions/{session_id}/messages")
 async def post_message(
     session_id: int,
@@ -279,15 +258,14 @@ async def post_message(
     user_content: list[dict[str, Any]] = [{"type": "text", "text": payload.content}]
     user_content.extend(await _resolve_attachments(session, payload.attached_item_ids))
 
-    headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
-
     if not resolved["api_key"]:
         return EventSourceResponse(
-            _error_stream(
-                ev.Error(error_type="api_error", message="no API key configured"), session_id
+            frames(
+                ev.Error(error_type="api_error", message="no API key configured"),
+                ev.Done(session_id=session_id, message_ids=[]),
             ),
-            ping=15,
-            headers=headers,
+            ping=SSE_PING_S,
+            headers=SSE_HEADERS,
         )
 
     # Built-ins, Anthropic's server tools and every reachable MCP server, in that
@@ -309,7 +287,9 @@ async def post_message(
     )
 
     return EventSourceResponse(
-        _stream_turn(request, generator, client, key, session_id), ping=15, headers=headers
+        _stream_turn(request, generator, client, key, session_id),
+        ping=SSE_PING_S,
+        headers=SSE_HEADERS,
     )
 
 
@@ -320,69 +300,20 @@ async def _stream_turn(
     key: str,
     session_id: int,
 ) -> Any:
-    """Pump the runner's events out as SSE frames.
+    """Encode the runner's events as SSE frames.
 
-    The runner is consumed inside a task so that a client disconnect or a POST to
-    ``/cancel`` can cancel the LLM call itself. Whatever the runner already
-    committed stays committed; only the un-run remainder of the turn is dropped.
+    A chat turn's terminal event is the runner's own ``done``; the two paths that
+    end without one — a duplicate POST and a cancellation, both of which
+    :func:`pump_agent_events` reports as a terminal ``error`` — get one appended
+    here, because the browser waits for ``done`` before it stops streaming.
     """
-    queue: asyncio.Queue[ev.AgentEvent | None] = asyncio.Queue()
+    saw_done = False
+    async for event in pump_agent_events(request, generator, key=key, client=client):
+        saw_done = saw_done or isinstance(event, ev.Done)
+        yield sse_frame(event)
 
-    async def pump() -> None:
-        try:
-            async for event in generator:
-                await queue.put(event)
-        finally:
-            await queue.put(None)
-
-    task = asyncio.create_task(pump())
-    try:
-        await task_registry.register(key, task)
-    except KeyError:
-        task.cancel()
-        yield _sse(ev.Error(error_type="api_error", message="A turn is already running."))
-        yield _sse(ev.Done(session_id=session_id, message_ids=[]))
-        await client.close()
-        return
-
-    cancelled = False
-    try:
-        while True:
-            try:
-                event = await asyncio.wait_for(queue.get(), timeout=DISCONNECT_POLL_S)
-            except TimeoutError:
-                # SSE disconnect alone does not stop billing, so a gone client
-                # must actually cancel the in-flight stream.
-                if await request.is_disconnected():
-                    task.cancel()
-                    cancelled = True
-                    break
-                continue
-
-            if event is None:
-                break
-            yield _sse(event)
-    except asyncio.CancelledError:
-        task.cancel()
-        raise
-    finally:
-        if not task.done():
-            task.cancel()
-            cancelled = True
-        await asyncio.gather(task, return_exceptions=True)
-        # A POST to /cancel kills the pump task directly, which still drains the
-        # queue cleanly — so the cancellation shows up here, not in the loop.
-        cancelled = cancelled or task.cancelled()
-        await task_registry.unregister(key)
-        await client.close()
-        if cancelled:
-            logger.info("Turn for session %s ended early", session_id)
-
-    if cancelled:
-        yield _sse(
-            ev.Error(error_type="cancelled", message="The turn was stopped before it finished.")
-        )
-        yield _sse(ev.Done(session_id=session_id, message_ids=[]))
+    if not saw_done:
+        yield sse_frame(ev.Done(session_id=session_id, message_ids=[]))
 
 
 __all__ = ["router"]

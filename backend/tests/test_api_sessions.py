@@ -7,7 +7,6 @@ overridden app-wide, so no test can reach the network even by accident.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 
 import httpx2
@@ -15,6 +14,7 @@ import pytest
 from fakes.anthropic import ScriptedAnthropic, turn_text, turn_tool_use
 from httpx2 import ASGITransport
 from sqlalchemy import func, select
+from sse_util import parse_sse
 
 from app.api import tasks as task_registry
 from app.api.deps import get_chat_client_factory
@@ -40,26 +40,6 @@ def use_script(app, *turns) -> ScriptedAnthropic:
     client = ScriptedAnthropic(list(turns))
     app.dependency_overrides[get_chat_client_factory] = lambda: lambda _key: client
     return client
-
-
-def parse_sse(body: str) -> list[tuple[str, dict]]:
-    """Parse a raw SSE body into ``(event, payload)`` pairs, ignoring heartbeats."""
-    parsed: list[tuple[str, dict]] = []
-    for frame in body.replace("\r\n", "\n").split("\n\n"):
-        name = "message"
-        data: list[str] = []
-        for line in frame.split("\n"):
-            if not line or line.startswith(":"):
-                continue
-            field, _, value = line.partition(":")
-            value = value[1:] if value.startswith(" ") else value
-            if field == "event":
-                name = value
-            elif field == "data":
-                data.append(value)
-        if data:
-            parsed.append((name, json.loads("\n".join(data))))
-    return parsed
 
 
 async def create_session(client: httpx2.AsyncClient) -> int:

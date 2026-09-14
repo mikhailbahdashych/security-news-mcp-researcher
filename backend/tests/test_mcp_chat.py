@@ -16,6 +16,7 @@ from fakes.anthropic import ScriptedAnthropic, turn_text, turn_tool_use
 from fakes.mcp import BrokenTarget, SpyFactory, build_server
 from fastapi import FastAPI
 from sqlalchemy import select
+from sse_util import parse_sse
 
 from app.api import tasks as task_registry
 from app.api.deps import get_chat_client_factory
@@ -47,26 +48,6 @@ async def chat_app(app: FastAPI) -> AsyncIterator[FastAPI]:
         yield app
     finally:
         await manager.aclose()
-
-
-def parse_sse(body: str) -> list[tuple[str, dict]]:
-    import json
-
-    parsed: list[tuple[str, dict]] = []
-    for frame in body.replace("\r\n", "\n").split("\n\n"):
-        name, data = "message", []
-        for line in frame.split("\n"):
-            if not line or line.startswith(":"):
-                continue
-            field, _, value = line.partition(":")
-            value = value[1:] if value.startswith(" ") else value
-            if field == "event":
-                name = value
-            elif field == "data":
-                data.append(value)
-        if data:
-            parsed.append((name, json.loads("\n".join(data))))
-    return parsed
 
 
 async def start(client: httpx2.AsyncClient, servers: dict) -> int:
