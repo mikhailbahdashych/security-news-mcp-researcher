@@ -139,6 +139,10 @@ class ScriptedTurn:
     events: list[Any]
     message: BetaMessage
     delay_s: float = 0.0
+    #: How long ``__aexit__`` takes. A real stream does not stop the instant it
+    #: is cancelled — the runner still has commits in flight — and a caller that
+    #: only *requests* cancellation returns before any of that has happened.
+    teardown_s: float = 0.0
 
 
 def _text_events(text: str, index: int = 0) -> list[Any]:
@@ -180,6 +184,7 @@ def turn_tool_use(
     *,
     text: str | None = None,
     delay_s: float = 0.0,
+    teardown_s: float = 0.0,
 ) -> ScriptedTurn:
     """One or more ``tool_use`` blocks, optionally preceded by some text."""
     events: list[Any] = []
@@ -214,7 +219,12 @@ def turn_tool_use(
         index += 1
 
     events.append(BetaRawMessageStopEvent(type="message_stop"))
-    return ScriptedTurn(events=events, message=_message(content, stop_reason), delay_s=delay_s)
+    return ScriptedTurn(
+        events=events,
+        message=_message(content, stop_reason),
+        delay_s=delay_s,
+        teardown_s=teardown_s,
+    )
 
 
 def turn_thinking_then_text(
@@ -302,6 +312,8 @@ class _ScriptedStream:
         return self
 
     async def __aexit__(self, *_exc: object) -> bool:
+        if self._turn.teardown_s:
+            await asyncio.sleep(self._turn.teardown_s)
         return False
 
     def __aiter__(self):

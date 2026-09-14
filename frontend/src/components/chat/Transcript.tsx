@@ -1,7 +1,14 @@
-import { blocksToText, blocksToThinking, type ChatMessage, type ToolCallRow } from '../../api/chat'
+import {
+  blocksToText,
+  blocksToThinking,
+  errorFromStopReason,
+  type ChatMessage,
+  type ToolCallRow,
+} from '../../api/chat'
 import Markdown from './Markdown'
 import ThinkingPane from './ThinkingPane'
 import ToolCallCard, { type ToolCardState } from './ToolCallCard'
+import TurnError from './TurnError'
 
 function cardFromRow(row: ToolCallRow): ToolCardState {
   const result = row.result_json as { content?: string } | null
@@ -40,6 +47,9 @@ export default function Transcript({ messages }: { messages: ChatMessage[] }) {
 
         const thinking = blocksToThinking(message.content_json)
         const text = blocksToText(message.content_json)
+        // A refusal stores an empty content list; without this the turn would
+        // render as nothing at all, both now and after every future reload.
+        const terminal = errorFromStopReason(message)
         return (
           <div key={message.id} className="space-y-2">
             {thinking ? <ThinkingPane text={thinking} streaming={false} /> : null}
@@ -47,6 +57,7 @@ export default function Transcript({ messages }: { messages: ChatMessage[] }) {
               <ToolCallCard key={row.id} card={cardFromRow(row)} />
             ))}
             {text ? <Markdown>{text}</Markdown> : null}
+            {terminal ? <TurnError error={terminal} /> : null}
           </div>
         )
       })}

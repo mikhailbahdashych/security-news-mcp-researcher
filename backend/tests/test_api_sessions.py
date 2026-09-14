@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 
 import httpx2
 import pytest
@@ -331,4 +332,54 @@ async def test_mid_turn_refresh_sees_a_partial_transcript(app, client, with_key,
 
 async def test_no_session_row_is_written_for_an_unknown_session(client, session_factory):
     async with session_factory() as session:
+        assert await session.scalar(select(func.count()).select_from(ResearchSession)) == 0
+
+
+async def test_delete_during_a_running_turn_cancels_and_awaits_it_first(
+    app, with_key, session_factory, caplog
+):
+    """DELETE must not return while the turn is still winding down.
+
+    Deleting first and firing a bare ``cancel()`` left the runner free to finish
+    a write it had already started — an INSERT for a session that no longer
+    exists, i.e. a foreign-key failure swallowed inside the pump task. What the
+    fix guarantees is that the task is *done* by the time the response comes
+    back, so the scripted stream below takes a measurable moment to unwind and a
+    fire-and-forget cancel fails the assertion.
+    """
+    scripted = ScriptedAnthropic(
+        [
+            turn_tool_use(
+                [("search_feed_items", {"q": "x"})],
+                text="looking",
+                delay_s=0.02,
+                teardown_s=0.25,
+            ),
+            turn_text("done"),
+        ]
+    )
+    app.dependency_overrides[get_chat_client_factory] = lambda: lambda _key: scripted
+
+    async with httpx2.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as http:
+        session_id = await create_session(http)
+        stream = asyncio.create_task(
+            http.post(f"/api/sessions/{session_id}/messages", json={"content": "go"})
+        )
+        await asyncio.sleep(0.08)
+        key = task_registry.session_key(session_id)
+        assert await task_registry.is_running(key) is True
+
+        with caplog.at_level(logging.ERROR):
+            deleted = await http.delete(f"/api/sessions/{session_id}")
+
+        assert deleted.status_code == 204
+        # The load-bearing assertion: finished, not merely asked to stop.
+        assert await task_registry.is_running(key) is False
+        assert "FOREIGN KEY" not in caplog.text
+        assert "IntegrityError" not in caplog.text
+
+        await stream
+
+    async with session_factory() as session:
+        assert await session.scalar(select(func.count()).select_from(Message)) == 0
         assert await session.scalar(select(func.count()).select_from(ResearchSession)) == 0

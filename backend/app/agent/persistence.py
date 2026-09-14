@@ -116,12 +116,90 @@ async def _append(
         return message.id
 
 
+#: What a synthesised ``tool_result`` says when the turn died before the tool ran.
+INTERRUPTED_TOOL_RESULT = "tool call was interrupted"
+
+
+def _ids(blocks: Any, block_type: str, key: str) -> list[str]:
+    found: list[str] = []
+    for block in blocks if isinstance(blocks, list) else []:
+        if isinstance(block, dict) and block.get("type") == block_type:
+            value = block.get(key)
+            if isinstance(value, str):
+                found.append(value)
+    return found
+
+
+def repair_unanswered_tool_use(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Answer every ``tool_use`` block that the stored transcript left hanging.
+
+    A turn can die between persisting the assistant message and persisting its
+    tool results — the tool-turn cap fires, the user hits Stop, the process is
+    killed mid-``gather``. Replayed verbatim, that history sends
+    ``assistant[tool_use]`` followed by a plain ``user[text]``, which the API
+    rejects; and because the transcript is append-only the session would 400 on
+    every subsequent turn. Permanently bricked, from one interrupted turn.
+
+    The repair is **synthesis, not dropping**: each unanswered ``tool_use`` gets a
+    matching ``tool_result`` with ``is_error: true``. Dropping the block would
+    also work for the API, but it would take the assistant's thinking and text
+    with it whenever the turn was tool-use-only, and it would leave the model
+    unable to see that it had tried something and been cut off. A synthesised
+    error result reads correctly to both the model and a human.
+
+    Results are merged into the following user message when there is one, and
+    otherwise become a new trailing user message — so roles keep strictly
+    alternating either way.
+    """
+    repaired: list[dict[str, Any]] = []
+    for index, message in enumerate(history):
+        repaired.append(message)
+        if message["role"] != "assistant":
+            continue
+
+        pending = _ids(message["content"], "tool_use", "id")
+        if not pending:
+            continue
+
+        following = history[index + 1] if index + 1 < len(history) else None
+        answered: set[str] = set()
+        if following is not None and following["role"] == "user":
+            answered = set(_ids(following["content"], "tool_result", "tool_use_id"))
+
+        missing = [tool_use_id for tool_use_id in pending if tool_use_id not in answered]
+        if not missing:
+            continue
+
+        synthesised = [
+            {
+                "type": "tool_result",
+                "tool_use_id": tool_use_id,
+                "content": INTERRUPTED_TOOL_RESULT,
+                "is_error": True,
+            }
+            for tool_use_id in missing
+        ]
+
+        if following is not None and following["role"] == "user":
+            # tool_result blocks lead the user message they belong to.
+            existing = following["content"]
+            following["content"] = synthesised + (existing if isinstance(existing, list) else [])
+        else:
+            repaired.append({"role": "user", "content": synthesised})
+
+    return repaired
+
+
 async def load_history(factory: SessionFactory, session_id: int) -> list[dict[str, Any]]:
     """Rebuild the API ``messages`` array from the stored transcript, seq ASC.
 
-    ``content_json`` is stored verbatim, so this is a straight read — except that
-    assistant turns go through :func:`app.agent.runner.sanitize_for_replay`, which
-    strips the model-internal blocks that precede a mid-output fallback boundary.
+    ``content_json`` is stored verbatim, so this is close to a straight read. Two
+    things happen on the way out: assistant turns go through
+    :func:`app.agent.runner.sanitize_for_replay`, which strips the model-internal
+    blocks preceding a mid-output fallback boundary; and
+    :func:`repair_unanswered_tool_use` answers any ``tool_use`` block the stored
+    transcript left hanging, so a session interrupted mid-tool-call is replayable
+    rather than permanently broken.
     """
     from app.agent.runner import sanitize_for_replay  # circular at import time only
 
@@ -140,8 +218,11 @@ async def load_history(factory: SessionFactory, session_id: int) -> list[dict[st
             content = sanitize_for_replay(content)
             if not content:
                 continue
-        history.append({"role": role, "content": content})
-    return history
+        # Copy the list: the repair rewrites message content in place, and these
+        # come straight off the ORM's JSON column.
+        blocks = list(content) if isinstance(content, list) else content
+        history.append({"role": role, "content": blocks})
+    return repair_unanswered_tool_use(history)
 
 
 async def append_user_message(
@@ -359,6 +440,7 @@ class NullPersistence(Persistence):
 
 
 __all__ = [
+    "INTERRUPTED_TOOL_RESULT",
     "PREVIEW_CHARS",
     "TITLE_CHARS",
     "NullPersistence",
@@ -372,5 +454,6 @@ __all__ = [
     "flatten_text",
     "load_history",
     "record_tool_calls",
+    "repair_unanswered_tool_use",
     "update_tool_call_result",
 ]

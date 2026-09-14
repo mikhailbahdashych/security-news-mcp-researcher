@@ -178,11 +178,16 @@ async def update_session(
 @router.delete("/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_session(session_id: int, session: DbSession) -> Response:
     """Deleting a session cascades its messages and tool calls; notes survive with
-    ``session_id`` set to NULL (they outlive the chat they came from)."""
+    ``session_id`` set to NULL (they outlive the chat they came from).
+
+    The in-flight turn is stopped **and awaited** before the rows go, not after:
+    the runner commits as it goes, so a turn still running past the DELETE would
+    try to write a message for a session that no longer exists.
+    """
     await _load_session(session, session_id)
+    await task_registry.cancel_and_wait(task_registry.session_key(session_id))
     await session.execute(delete(ResearchSession).where(ResearchSession.id == session_id))
     await session.commit()
-    await task_registry.cancel(task_registry.session_key(session_id))
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

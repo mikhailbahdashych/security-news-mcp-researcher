@@ -52,6 +52,26 @@ async def cancel(key: str) -> bool:
     return True
 
 
+async def cancel_and_wait(key: str) -> bool:
+    """Cancel the task under *key* and wait for it to actually stop.
+
+    ``cancel`` only *requests* cancellation; the task keeps running until the next
+    await point, and it may be mid-commit. A caller that is about to delete rows
+    the task writes to has to wait, or the task races it and writes a row for a
+    session that no longer exists.
+    """
+    async with _lock:
+        task = _tasks.get(key)
+    if task is None or task.done():
+        return False
+    task.cancel()
+    # gather(..., return_exceptions=True) so the CancelledError we just caused
+    # does not propagate into the caller's own task.
+    await asyncio.gather(task, return_exceptions=True)
+    logger.info("Cancelled and awaited in-flight task %s", key)
+    return True
+
+
 async def unregister(key: str) -> None:
     async with _lock:
         _tasks.pop(key, None)
@@ -63,4 +83,12 @@ async def clear() -> None:
         _tasks.clear()
 
 
-__all__ = ["cancel", "clear", "is_running", "register", "session_key", "unregister"]
+__all__ = [
+    "cancel",
+    "cancel_and_wait",
+    "clear",
+    "is_running",
+    "register",
+    "session_key",
+    "unregister",
+]

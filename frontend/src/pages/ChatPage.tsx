@@ -136,7 +136,10 @@ export default function ChatPage() {
         // The Query cache becomes the source of truth again once the turn ends.
         await queryClient.invalidateQueries({ queryKey: sessionQueryKey(id) })
         await queryClient.invalidateQueries({ queryKey: sessionsQueryKey })
-        dispatch({ kind: 'reset' })
+        // `settle`, not `reset`: a refusal, a stop or a connection failure has to
+        // stay on screen until the next send, or the user is left looking at
+        // their own question with nothing under it.
+        dispatch({ kind: 'settle' })
       }
     },
     [attached, navigate, queryClient, sessionId],
@@ -201,13 +204,15 @@ export default function ChatPage() {
 
           <Transcript messages={messages} />
 
-          {live.prompt !== null ? (
+          {live.prompt !== null || live.error !== null ? (
             <div className="mt-4 space-y-2">
-              <div className="flex justify-end">
-                <div className="max-w-2xl whitespace-pre-wrap rounded-lg bg-slate-900 px-3 py-2 text-sm text-white">
-                  {live.prompt}
+              {live.prompt !== null ? (
+                <div className="flex justify-end">
+                  <div className="max-w-2xl whitespace-pre-wrap rounded-lg bg-slate-900 px-3 py-2 text-sm text-white">
+                    {live.prompt}
+                  </div>
                 </div>
-              </div>
+              ) : null}
 
               <ThinkingPane text={live.thinking} streaming={awaitingFirstText} />
               {live.cards.map((card) => (

@@ -7,6 +7,7 @@ the exact request kwargs it sent.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
 
@@ -21,6 +22,7 @@ from fakes.anthropic import (
 from sqlalchemy import func, select
 
 from app.agent import events as ev
+from app.agent import persistence
 from app.agent import runner as runner_module
 from app.agent.registry import RegisteredTool, ToolRegistry, ToolResult, ToolSource
 from app.db.models import Message, ResearchSession, ToolCall
@@ -241,16 +243,48 @@ async def test_parallel_tool_use_returns_one_user_message(session_factory, sessi
 # --------------------------------------------------------------- 5. pause_turn
 
 
-async def test_pause_turn_re_requests_without_injecting_a_user_message(session_factory, session_id):
+async def test_pause_turn_re_requests_with_the_full_history_and_no_user_message(
+    session_factory, session_id
+):
+    """The resume carries the WHOLE session, not just the paused turn.
+
+    The SDK docs illustrate the resume by truncating to ``[user, assistant]``.
+    That is a minimal example, not what a multi-turn session wants — so this
+    fixture seeds a completed turn first, which a truncating implementation
+    would silently drop.
+    """
     from fakes.anthropic import turn_pause
 
+    # Turn one: a completed exchange that must survive the resume.
+    await drive(
+        ScriptedAnthropic([turn_text("first answer")]),
+        session_factory,
+        session_id,
+        user_content=[{"type": "text", "text": "first question"}],
+    )
+
     client = ScriptedAnthropic([turn_pause(), turn_text("resumed and finished")])
+    await drive(
+        client,
+        session_factory,
+        session_id,
+        user_content=[{"type": "text", "text": "second question"}],
+    )
 
-    await drive(client, session_factory, session_id)
-
+    opening = client.calls[0]["messages"]
     resumed = client.calls[1]["messages"]
+
+    # Every message of the paused request is still there, in order...
+    assert resumed[: len(opening)] == opening
+    # ...plus exactly one appended assistant turn, and no injected user message.
+    assert len(resumed) == len(opening) + 1
     assert resumed[-1]["role"] == "assistant"
-    assert [m["role"] for m in resumed] == ["user", "assistant"]
+    assert [m["role"] for m in resumed] == ["user", "assistant", "user", "assistant"]
+    assert [m["content"][0].get("text") for m in resumed[:3]] == [
+        "first question",
+        "first answer",
+        "second question",
+    ]
 
 
 async def test_pause_turn_restart_cap_emits_turn_limit(session_factory, session_id):
@@ -501,3 +535,266 @@ def test_sanitize_keeps_a_paired_server_tool_use_before_the_boundary():
     kept = runner_module.sanitize_for_replay(content)
 
     assert [block["type"] for block in kept] == ["server_tool_use", "web_search_tool_result"]
+
+
+# ------------------------------- interrupted tool calls (review finding 1)
+
+
+def unanswered_ids(messages: list[dict]) -> set[str]:
+    """tool_use ids in *messages* with no matching tool_result after them."""
+    asked: set[str] = set()
+    answered: set[str] = set()
+    for message in messages:
+        for block in message["content"] if isinstance(message["content"], list) else []:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_use":
+                asked.add(block["id"])
+            elif block.get("type") == "tool_result":
+                answered.add(block["tool_use_id"])
+    return asked - answered
+
+
+def assert_alternates(messages: list[dict]) -> None:
+    roles = [message["role"] for message in messages]
+    assert all(a != b for a, b in zip(roles, roles[1:], strict=False)), roles
+
+
+async def test_a_capped_turn_leaves_a_replayable_transcript(session_factory, session_id):
+    """The turn cap must not strand a tool_use block in the stored transcript."""
+    capped = ScriptedAnthropic(
+        [turn_tool_use([("search_feed_items", {"q": "x"})]) for _ in range(3)]
+    )
+    collected = await drive(capped, session_factory, session_id, max_tool_turns=1)
+    assert next(e for e in collected if e.type == "error").error_type == "turn_limit"
+
+    # The close-out is WRITTEN at the time of the cap, not reconstructed on read:
+    # the stored transcript has to be valid on its own.
+    async with session_factory() as session:
+        rows = (
+            await session.execute(
+                select(Message.kind, Message.content_json)
+                .where(Message.session_id == session_id)
+                .order_by(Message.seq)
+            )
+        ).all()
+        calls = (await session.execute(select(ToolCall).order_by(ToolCall.id))).scalars().all()
+
+    assert [kind for kind, _ in rows] == [
+        "user",
+        "assistant",
+        "tool_result",
+        "assistant",
+        "tool_result",
+    ]
+    assert rows[4][1] == [
+        {
+            "type": "tool_result",
+            "tool_use_id": "toolu_0",
+            "content": persistence.INTERRUPTED_TOOL_RESULT,
+            "is_error": True,
+        }
+    ]
+    # ...and the audit row for the call that never ran says so.
+    assert calls[-1].is_error is True
+    assert calls[-1].result_json["content"] == persistence.INTERRUPTED_TOOL_RESULT
+
+    # The very next turn goes through, with a history the API would accept.
+    follow_up = ScriptedAnthropic([turn_text("recovered")])
+    await drive(
+        follow_up,
+        session_factory,
+        session_id,
+        user_content=[{"type": "text", "text": "still there?"}],
+    )
+
+    sent = follow_up.calls[0]["messages"]
+    assert unanswered_ids(sent) == set()
+    assert_alternates(sent)
+
+
+async def test_cancellation_mid_gather_leaves_a_replayable_transcript(session_factory, session_id):
+    """Stop pressed while the handlers are running strands a tool_use too."""
+
+    async def never_returns(**_kwargs: object) -> ToolResult:
+        await asyncio.sleep(30)
+        return ToolResult(content="unreachable")
+
+    hanging = RegisteredTool(
+        name="search_feed_items",
+        source=ToolSource.BUILTIN,
+        definition={"name": "search_feed_items", "description": "d", "input_schema": {}},
+        handler=never_returns,
+    )
+
+    generator = runner_module.run(
+        client=ScriptedAnthropic([turn_tool_use([("search_feed_items", {"q": "x"})])]),
+        db_session_factory=session_factory,
+        registry=registry_with(hanging),
+        session_id=session_id,
+        user_content=[{"type": "text", "text": "go"}],
+        model="claude-opus-5",
+        effort="high",
+        thinking_display="summarized",
+        max_tool_turns=12,
+    )
+
+    async def consume() -> None:
+        async for _event in generator:
+            pass
+
+    task = asyncio.create_task(consume())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+    async with session_factory() as session:
+        kinds = (
+            (
+                await session.execute(
+                    select(Message.kind)
+                    .where(Message.session_id == session_id)
+                    .order_by(Message.seq)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    # The assistant turn committed; its tool results never did.
+    assert kinds == ["user", "assistant"]
+
+    follow_up = ScriptedAnthropic([turn_text("recovered")])
+    await drive(
+        follow_up,
+        session_factory,
+        session_id,
+        user_content=[{"type": "text", "text": "still there?"}],
+    )
+
+    sent = follow_up.calls[0]["messages"]
+    assert unanswered_ids(sent) == set()
+    assert_alternates(sent)
+
+
+async def test_load_history_repairs_a_stored_unanswered_tool_use(session_factory, session_id):
+    """A transcript already on disk from before this fix must recover too."""
+    async with session_factory() as session:
+        session.add_all(
+            [
+                Message(
+                    session_id=session_id,
+                    seq=1,
+                    role="user",
+                    kind="user",
+                    content_json=[{"type": "text", "text": "go"}],
+                ),
+                Message(
+                    session_id=session_id,
+                    seq=2,
+                    role="assistant",
+                    kind="assistant",
+                    content_json=[
+                        {"type": "text", "text": "looking"},
+                        {"type": "tool_use", "id": "toolu_orphan", "name": "x", "input": {}},
+                    ],
+                    stop_reason="tool_use",
+                ),
+            ]
+        )
+        await session.commit()
+
+    history = await persistence.load_history(session_factory, session_id)
+
+    assert_alternates(history)
+    assert unanswered_ids(history) == set()
+    assert history[-1] == {
+        "role": "user",
+        "content": [
+            {
+                "type": "tool_result",
+                "tool_use_id": "toolu_orphan",
+                "content": persistence.INTERRUPTED_TOOL_RESULT,
+                "is_error": True,
+            }
+        ],
+    }
+    # The assistant's own text is kept — the repair synthesises, it does not drop.
+    assert history[1]["content"][0] == {"type": "text", "text": "looking"}
+
+
+async def test_the_repair_merges_into_the_next_user_turn(session_factory, session_id):
+    """With a following user message the results lead it, keeping alternation."""
+    async with session_factory() as session:
+        session.add_all(
+            [
+                Message(
+                    session_id=session_id,
+                    seq=1,
+                    role="assistant",
+                    kind="assistant",
+                    content_json=[
+                        {"type": "tool_use", "id": "toolu_a", "name": "x", "input": {}},
+                        {"type": "tool_use", "id": "toolu_b", "name": "y", "input": {}},
+                    ],
+                ),
+                Message(
+                    session_id=session_id,
+                    seq=2,
+                    role="user",
+                    kind="tool_result",
+                    content_json=[
+                        {"type": "tool_result", "tool_use_id": "toolu_a", "content": "ok"}
+                    ],
+                ),
+            ]
+        )
+        await session.commit()
+
+    history = await persistence.load_history(session_factory, session_id)
+
+    assert len(history) == 2
+    assert [block["tool_use_id"] for block in history[1]["content"]] == ["toolu_b", "toolu_a"]
+    assert unanswered_ids(history) == set()
+
+
+# ------------------------------------- unexpected errors (review finding 2)
+
+
+async def test_an_unexpected_exception_still_ends_with_error_and_done(session_factory, session_id):
+    """A non-API exception must not strand the consumer on a truncated stream."""
+    client = ScriptedAnthropic(error=RuntimeError("the socket melted"))
+
+    collected = await drive(client, session_factory, session_id)
+
+    assert names(collected)[-2:] == ["error", "done"]
+    error = next(e for e in collected if e.type == "error")
+    assert error.error_type == "api_error"
+    assert "RuntimeError" in error.message
+    assert "the socket melted" in error.message
+
+
+async def test_a_refusal_persists_its_category_for_reload(session_factory, session_id):
+    """The refused turn stores an empty content list, so the UI has only this."""
+    await drive(
+        ScriptedAnthropic([turn_refusal(category="cyber", explanation="policy")]),
+        session_factory,
+        session_id,
+    )
+
+    async with session_factory() as session:
+        row = (
+            (
+                await session.execute(
+                    select(Message)
+                    .where(Message.session_id == session_id, Message.kind == "assistant")
+                    .order_by(Message.seq)
+                )
+            )
+            .scalars()
+            .one()
+        )
+
+    assert row.stop_reason == "refusal"
+    assert row.content_json == []
+    assert row.usage_json["stop_details"]["category"] == "cyber"
+    assert row.usage_json["stop_details"]["explanation"] == "policy"

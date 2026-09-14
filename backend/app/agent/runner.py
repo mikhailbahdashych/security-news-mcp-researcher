@@ -33,7 +33,12 @@ from anthropic import AsyncAnthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agent import events as ev
-from app.agent.persistence import NullPersistence, Persistence, ToolCallRecord
+from app.agent.persistence import (
+    INTERRUPTED_TOOL_RESULT,
+    NullPersistence,
+    Persistence,
+    ToolCallRecord,
+)
 from app.agent.prompts import build_system_prompt
 from app.agent.registry import RegisteredTool, ToolRegistry, ToolResult, ToolSource
 
@@ -292,7 +297,15 @@ async def run(
     system_prompt = build_system_prompt(override=system_override, extra=system_extra)
 
     messages = await store.load_history()
-    messages.append({"role": "user", "content": user_content})
+    if messages and messages[-1]["role"] == "user":
+        # load_history's repair can leave a synthesised tool_result message at the
+        # end; merging keeps user/assistant strictly alternating rather than
+        # relying on the API to coalesce two user turns.
+        messages[-1]["content"] = list(messages[-1]["content"]) + list(user_content)
+    else:
+        messages.append({"role": "user", "content": user_content})
+    # What is *persisted* is only ever the user's own content — the repair blocks
+    # belong to the interrupted turn, not to this one.
     await store.user_message(user_content)
 
     turn = 0
@@ -342,8 +355,18 @@ async def run(
             # content can be an empty list.
             content_dicts = [_to_dict(block) for block in (getattr(final, "content", None) or [])]
 
+            # `messages` has no column for stop_details, and a refused turn
+            # persists an EMPTY content list — so stop_reason plus this is
+            # everything the UI has to render a refusal from after a reload.
+            # usage_json is the turn's metadata blob; nothing reads it back into
+            # a request.
+            details = getattr(final, "stop_details", None)
+            turn_meta: dict[str, Any] = dict(usage)
+            if details is not None:
+                turn_meta["stop_details"] = _to_dict(details)
+
             assistant_message_id = await store.assistant_message(
-                content_dicts, stop_reason, usage or None
+                content_dicts, stop_reason, turn_meta or None
             )
             tool_use_blocks = [
                 block
@@ -380,7 +403,6 @@ async def run(
             yield ev.TurnEnd(turn=turn, stop_reason=stop_reason, usage=usage)
 
             if stop_reason == "refusal":
-                details = getattr(final, "stop_details", None)
                 terminal = ev.Error(
                     error_type="refusal",
                     message=(getattr(details, "explanation", None) or "")
@@ -418,6 +440,12 @@ async def run(
             if stop_reason == "tool_use":
                 turn += 1
                 if turn > max_tool_turns:
+                    # The assistant turn with its tool_use blocks is already
+                    # committed. Leaving it unanswered would make the stored
+                    # transcript unreplayable, so close it out before stopping.
+                    await _persist_interrupted_tool_results(
+                        store, assistant_message_id, tool_use_blocks
+                    )
                     terminal = ev.Error(
                         error_type="turn_limit",
                         message=f"Stopped after {max_tool_turns} tool turns.",
@@ -492,13 +520,47 @@ async def run(
 
     except (asyncio.CancelledError, GeneratorExit):
         # Whatever committed stays committed — that is the point of per-turn
-        # commits. Re-raise so the task actually dies.
+        # commits. Re-raise so the task actually dies. The unanswered tool_use
+        # blocks this may leave behind are repaired on the way back out, by
+        # persistence.repair_unanswered_tool_use.
         logger.info("Agent turn cancelled for session %s", session_id)
         raise
+    except Exception as exc:  # noqa: BLE001 - the generator owes its consumer a terminal event
+        # Anything not already mapped above. Letting it escape would strand the
+        # consumer: the SSE pump would end without `error` or `done`, and the
+        # browser would sit on a truncated stream forever.
+        logger.exception("Agent turn failed for session %s", session_id)
+        terminal = ev.Error(error_type="api_error", message=f"{type(exc).__name__}: {exc}")
 
     if terminal is not None:
         yield terminal
     yield ev.Done(session_id=session_id, message_ids=list(store.message_ids))
+
+
+async def _persist_interrupted_tool_results(
+    store: Persistence, assistant_message_id: int, tool_use_blocks: list[Any]
+) -> None:
+    """Close out tool_use blocks whose handlers never ran."""
+    if not tool_use_blocks:
+        return
+    blocks = [
+        {
+            "type": "tool_result",
+            "tool_use_id": block.id,
+            "content": INTERRUPTED_TOOL_RESULT,
+            "is_error": True,
+        }
+        for block in tool_use_blocks
+    ]
+    await store.tool_result_message(blocks)
+    for block in tool_use_blocks:
+        await store.tool_call_result(
+            assistant_message_id,
+            block.id,
+            result_json={"content": INTERRUPTED_TOOL_RESULT, "raw": None},
+            is_error=True,
+            duration_ms=None,
+        )
 
 
 def _source_of(by_name: dict[str, RegisteredTool], name: str) -> str:

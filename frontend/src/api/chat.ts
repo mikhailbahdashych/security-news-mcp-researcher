@@ -39,7 +39,16 @@ export interface ChatMessage {
   content_json: ContentBlock[]
   text_preview: string | null
   stop_reason: string | null
-  usage_json: { input_tokens?: number; output_tokens?: number } | null
+  /**
+   * The turn's metadata blob. Usage counts, plus `stop_details` on a refusal —
+   * `messages` has no column for it and a refused turn stores an empty
+   * `content_json`, so this is the only place the category survives a reload.
+   */
+  usage_json: {
+    input_tokens?: number
+    output_tokens?: number
+    stop_details?: { category?: string | null; explanation?: string | null } | null
+  } | null
   created_at: string
   tool_calls: ToolCallRow[]
 }
@@ -171,4 +180,30 @@ export function blocksToThinking(blocks: ContentBlock[] | null | undefined): str
     .map((block) => block.thinking as string)
     .join('\n')
     .trim()
+}
+
+/**
+ * The terminal state a persisted assistant turn represents, if any.
+ *
+ * A refusal and a truncated answer are properties of the stored turn, not of the
+ * live stream, so they have to be rendered from the transcript — otherwise they
+ * vanish on reload, and the user is left looking at their own question with no
+ * response beneath it.
+ */
+export function errorFromStopReason(message: ChatMessage): ErrorPayload | null {
+  if (message.role !== 'assistant') {
+    return null
+  }
+  if (message.stop_reason === 'refusal') {
+    const details = message.usage_json?.stop_details
+    return {
+      type: 'refusal',
+      message: details?.explanation ?? '',
+      category: details?.category ?? null,
+    }
+  }
+  if (message.stop_reason === 'max_tokens') {
+    return { type: 'max_tokens', message: '', category: null }
+  }
+  return null
 }
