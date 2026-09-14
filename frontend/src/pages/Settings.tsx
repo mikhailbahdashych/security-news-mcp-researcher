@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useState } from 'react'
+import { useId, useState, type ReactNode } from 'react'
 
 import {
   EFFORTS,
@@ -15,12 +15,19 @@ import {
   type ThinkingDisplay,
 } from '../api/settings'
 import ApiKeySection from '../components/settings/ApiKeySection'
-import Field, { controlClass } from '../components/settings/Field'
+import Field, { FIELD_GRID } from '../components/settings/Field'
 import McpSection from '../components/settings/McpSection'
+import NumberField from '../components/settings/NumberField'
 import SettingsSection from '../components/settings/SettingsSection'
-import Toggle from '../components/settings/Toggle'
+import Button from '../components/ui/Button'
+import Card from '../components/ui/Card'
 import Checkbox from '../components/ui/Checkbox'
+import EmptyState from '../components/ui/EmptyState'
+import Input from '../components/ui/Input'
+import PageHeader from '../components/ui/PageHeader'
 import Select from '../components/ui/Select'
+import Textarea from '../components/ui/Textarea'
+import { FIELD_HINT } from '../components/ui/classes'
 import {
   PAGE_KEYS,
   PAGE_LABELS,
@@ -28,6 +35,7 @@ import {
   type PageKey,
 } from '../components/ui/layout'
 import type { EmbeddablePageProps } from '../components/ui/PageHost'
+import Page from './Page'
 
 /** Everything this form edits: not the write-only API key, and not the read-only
  *  `key_source` that describes where it came from. */
@@ -55,7 +63,9 @@ export default function SettingsPage(_props: EmbeddablePageProps) {
   if (settingsQuery.isPending) {
     return (
       <Shell>
-        <p className="text-sm text-slate-500">Loading settings…</p>
+        <Card>
+          <EmptyState title="Loading settings…" />
+        </Card>
       </Shell>
     )
   }
@@ -63,7 +73,14 @@ export default function SettingsPage(_props: EmbeddablePageProps) {
   if (settingsQuery.isError) {
     return (
       <Shell>
-        <p className="text-sm text-rose-600">Could not load settings. Is the backend running?</p>
+        <Card>
+          <EmptyState
+            tone="error"
+            icon="warning"
+            title="Could not load settings."
+            description="Is the backend running?"
+          />
+        </Card>
       </Shell>
     )
   }
@@ -77,12 +94,20 @@ export default function SettingsPage(_props: EmbeddablePageProps) {
 function SettingsForm({ settings }: { settings: AppSettings }) {
   const queryClient = useQueryClient()
   const modelsQuery = useQuery({ queryKey: modelsQueryKey, queryFn: fetchModels })
+  // Settings can legitimately be on screen twice (both split panes), so every
+  // control needs an id that is unique to this instance or the labels of the
+  // second copy would point at the first copy's inputs.
+  const uid = useId()
   const [draft, setDraft] = useState<Draft>(() => toDraft(settings))
+  // What the server last told us. Only the difference from this is worth a PUT.
+  const [saved, setSaved] = useState<Draft>(() => toDraft(settings))
 
   const save = useMutation({
     mutationFn: (patch: SettingsUpdate) => updateSettings(patch),
-    onSuccess: (saved) => {
-      setDraft(toDraft(saved))
+    onSuccess: (result) => {
+      const next = toDraft(result)
+      setDraft(next)
+      setSaved(next)
       return queryClient.invalidateQueries({ queryKey: settingsQueryKey })
     },
   })
@@ -92,22 +117,22 @@ function SettingsForm({ settings }: { settings: AppSettings }) {
     setDraft((current) => ({ ...current, [key]: value }))
   }
 
+  // Every value in a draft is a primitive, so key-by-key identity is the whole
+  // comparison — no deep equality, and no false positives from a re-render.
+  const dirty = (Object.keys(draft) as (keyof Draft)[]).some((key) => draft[key] !== saved[key])
   const models = modelsQuery.data ?? []
 
   return (
     <Shell>
-      <div className="flex flex-col gap-5">
-        <LayoutSection />
+      <LayoutSection />
 
-        <ApiKeySection settings={settings} />
+      <ApiKeySection settings={settings} />
 
-        <SettingsSection
-          title="Model"
-          description="Used by the research chat and by note generation."
-        >
+      <SettingsSection title="Model" description="Used by the research chat and by note generation.">
+        <div className={FIELD_GRID}>
           <Field
             label="Model"
-            htmlFor="model"
+            htmlFor={`${uid}-model`}
             hint={
               models.length === 0
                 ? 'The model list needs a working API key. Until then, type a model id by hand.'
@@ -115,20 +140,20 @@ function SettingsForm({ settings }: { settings: AppSettings }) {
             }
           >
             {models.length === 0 ? (
-              <input
-                id="model"
+              <Input
+                id={`${uid}-model`}
+                tone="bg"
                 type="text"
                 spellCheck={false}
                 value={draft.model}
                 onChange={(event) => edit('model', event.target.value)}
-                className={controlClass}
               />
             ) : (
-              <select
-                id="model"
+              <Select
+                id={`${uid}-model`}
+                tone="bg"
                 value={draft.model}
                 onChange={(event) => edit('model', event.target.value)}
-                className={controlClass}
               >
                 {models.every((option) => option.id !== draft.model) ? (
                   <option value={draft.model}>{draft.model} (not available)</option>
@@ -138,160 +163,151 @@ function SettingsForm({ settings }: { settings: AppSettings }) {
                     {option.display_name}
                   </option>
                 ))}
-              </select>
+              </Select>
             )}
           </Field>
 
-          <Field label="Effort" htmlFor="effort" hint="How hard the model thinks per turn.">
-            <select
-              id="effort"
+          <Field label="Effort" htmlFor={`${uid}-effort`} hint="How hard the model thinks per turn.">
+            <Select
+              id={`${uid}-effort`}
+              tone="bg"
               value={draft.effort}
               onChange={(event) => edit('effort', event.target.value as Effort)}
-              className={controlClass}
             >
               {EFFORTS.map((value) => (
                 <option key={value} value={value}>
                   {value}
                 </option>
               ))}
-            </select>
+            </Select>
           </Field>
 
           <Field
             label="Thinking display"
-            htmlFor="thinking-display"
+            htmlFor={`${uid}-thinking-display`}
             hint="Whether the chat shows a summary of the model's reasoning."
           >
-            <select
-              id="thinking-display"
+            <Select
+              id={`${uid}-thinking-display`}
+              tone="bg"
               value={draft.thinking_display}
-              onChange={(event) =>
-                edit('thinking_display', event.target.value as ThinkingDisplay)
-              }
-              className={controlClass}
+              onChange={(event) => edit('thinking_display', event.target.value as ThinkingDisplay)}
             >
               {THINKING_DISPLAYS.map((value) => (
                 <option key={value} value={value}>
                   {value}
                 </option>
               ))}
-            </select>
+            </Select>
           </Field>
-        </SettingsSection>
-
-        <SettingsSection
-          title="Tools"
-          description="Server-side tools the model may use while researching."
-        >
-          <Toggle
-            id="web-search-enabled"
-            label="Web search"
-            checked={draft.web_search_enabled}
-            onChange={(checked) => edit('web_search_enabled', checked)}
-          />
-          <Field label="Max web searches per turn" htmlFor="web-search-max-uses">
-            <NumberInput
-              id="web-search-max-uses"
-              value={draft.web_search_max_uses}
-              min={1}
-              max={100}
-              onChange={(value) => edit('web_search_max_uses', value)}
-            />
-          </Field>
-
-          <Toggle
-            id="web-fetch-enabled"
-            label="Web fetch"
-            hint="Lets the model read pages that are already linked in the conversation."
-            checked={draft.web_fetch_enabled}
-            onChange={(checked) => edit('web_fetch_enabled', checked)}
-          />
-
-          <Field
-            label="Max tool turns"
-            htmlFor="max-tool-turns"
-            hint="Safety stop for the agent loop."
-          >
-            <NumberInput
-              id="max-tool-turns"
-              value={draft.max_tool_turns}
-              min={1}
-              max={100}
-              onChange={(value) => edit('max_tool_turns', value)}
-            />
-          </Field>
-        </SettingsSection>
-
-        <McpSection />
-
-        <SettingsSection title="Feeds">
-          <Field
-            label="Feed timeout (seconds)"
-            htmlFor="feed-timeout"
-            hint="How long to wait for a single feed before giving up."
-          >
-            <NumberInput
-              id="feed-timeout"
-              value={draft.feed_timeout_s}
-              min={1}
-              max={300}
-              onChange={(value) => edit('feed_timeout_s', value)}
-            />
-          </Field>
-        </SettingsSection>
-
-        <SettingsSection
-          title="Prompts"
-          description="Reused every time notes are generated or a research chat starts."
-        >
-          <Field
-            label="Note template"
-            htmlFor="note-template"
-            hint={
-              <>
-                One section per news item. <code>{'{Item title}'}</code> is replaced with the
-                item&rsquo;s real headline; keep <code>##</code> as the per-item heading level so
-                notes render consistently.
-              </>
-            }
-          >
-            <textarea
-              id="note-template"
-              rows={9}
-              value={draft.note_template}
-              onChange={(event) => edit('note_template', event.target.value)}
-              className={`${controlClass} font-mono`}
-            />
-          </Field>
-          <Field
-            label="Extra system prompt"
-            htmlFor="system-prompt-extra"
-            hint="Appended to the built-in system prompt. Leave empty for the default behaviour."
-          >
-            <textarea
-              id="system-prompt-extra"
-              rows={4}
-              value={draft.system_prompt_extra}
-              onChange={(event) => edit('system_prompt_extra', event.target.value)}
-              className={controlClass}
-            />
-          </Field>
-        </SettingsSection>
-
-        <div className="flex items-center gap-3 pb-4">
-          <button
-            type="button"
-            disabled={save.isPending}
-            onClick={() => save.mutate(draft)}
-            className="rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:bg-slate-300"
-          >
-            {save.isPending ? 'Saving…' : 'Save settings'}
-          </button>
-          {save.isSuccess ? <span className="text-xs text-emerald-700">Saved.</span> : null}
-          {save.isError ? (
-            <span className="text-xs text-rose-600">Could not save. Is the backend running?</span>
-          ) : null}
         </div>
+      </SettingsSection>
+
+      <SettingsSection
+        title="Tools"
+        description="Server-side tools the model may use while researching."
+      >
+        <Checkbox
+          id={`${uid}-web-search-enabled`}
+          label="Web search"
+          checked={draft.web_search_enabled}
+          onChange={(checked) => edit('web_search_enabled', checked)}
+        />
+        <Checkbox
+          id={`${uid}-web-fetch-enabled`}
+          label="Web fetch"
+          hint="Lets the model read pages that are already linked in the conversation."
+          checked={draft.web_fetch_enabled}
+          onChange={(checked) => edit('web_fetch_enabled', checked)}
+        />
+        <div className={FIELD_GRID}>
+          <NumberField
+            id={`${uid}-web-search-max-uses`}
+            label="Max web searches per turn"
+            value={draft.web_search_max_uses}
+            min={1}
+            max={100}
+            onChange={(value) => edit('web_search_max_uses', value)}
+          />
+          <NumberField
+            id={`${uid}-max-tool-turns`}
+            label="Max tool turns"
+            hint="Safety stop for the agent loop."
+            value={draft.max_tool_turns}
+            min={1}
+            max={100}
+            onChange={(value) => edit('max_tool_turns', value)}
+          />
+        </div>
+      </SettingsSection>
+
+      <McpSection />
+
+      <SettingsSection title="Feeds">
+        <NumberField
+          id={`${uid}-feed-timeout`}
+          label="Feed timeout (seconds)"
+          hint="How long to wait for a single feed before giving up."
+          className="max-w-[200px]"
+          value={draft.feed_timeout_s}
+          min={1}
+          max={300}
+          onChange={(value) => edit('feed_timeout_s', value)}
+        />
+      </SettingsSection>
+
+      <SettingsSection
+        title="Prompts"
+        description="Reused every time notes are generated or a research chat starts."
+      >
+        <Field
+          label="Note template"
+          htmlFor={`${uid}-note-template`}
+          hint={
+            <>
+              One section per news item. <code>{'{Item title}'}</code> is replaced with the
+              item&rsquo;s real headline; keep <code>##</code> as the per-item heading level so
+              notes render consistently.
+            </>
+          }
+        >
+          <Textarea
+            id={`${uid}-note-template`}
+            tone="bg"
+            mono
+            rows={7}
+            value={draft.note_template}
+            onChange={(event) => edit('note_template', event.target.value)}
+          />
+        </Field>
+        <Field
+          label="Extra system prompt"
+          htmlFor={`${uid}-system-prompt-extra`}
+          hint="Appended to the built-in system prompt. Leave empty for the default behaviour."
+        >
+          <Textarea
+            id={`${uid}-system-prompt-extra`}
+            tone="bg"
+            rows={3}
+            value={draft.system_prompt_extra}
+            onChange={(event) => edit('system_prompt_extra', event.target.value)}
+          />
+        </Field>
+      </SettingsSection>
+
+      <div className="flex flex-wrap items-center gap-3">
+        <Button
+          variant="primary"
+          disabled={!dirty}
+          loading={save.isPending}
+          onClick={() => save.mutate(draft)}
+        >
+          {save.isPending ? 'Saving…' : 'Save settings'}
+        </Button>
+        {save.isSuccess ? <span className="text-[11.5px] text-green">Saved</span> : null}
+        {save.isError ? (
+          <span className="text-[11.5px] text-red">Could not save. Is the backend running?</span>
+        ) : null}
       </div>
     </Shell>
   )
@@ -300,92 +316,74 @@ function SettingsForm({ settings }: { settings: AppSettings }) {
 /**
  * Split-screen preferences.
  *
- * Phase 1 of the redesign: the shell renders the split, and this is its only
- * on-switch. Styled like the rest of this page for now; the Settings redesign
- * restyles it with the others.
+ * The shell renders the split; this is its only on-switch. `useLayout` writes
+ * straight to shared storage, so the rail and the panes follow immediately —
+ * there is nothing here for "Save settings" to save.
  */
 function LayoutSection() {
   const layout = useLayout()
+  const uid = useId()
 
   return (
     <SettingsSection title="Layout" description="Show two pages side by side in one window.">
       <Checkbox
-        id="split-screen"
+        id={`${uid}-split-screen`}
         label="Split screen"
         checked={layout.split}
         onChange={layout.setSplit}
       />
       {layout.split ? (
         <>
-          <Field label="Left pane" htmlFor="pane-a">
-            <Select
-              id="pane-a"
-              value={layout.paneA}
-              onChange={(event) => layout.setPaneA(event.target.value as PageKey)}
-            >
-              {PAGE_KEYS.map((page) => (
-                <option key={page} value={page}>
-                  {PAGE_LABELS[page]}
-                </option>
-              ))}
-            </Select>
-          </Field>
-          <Field label="Right pane" htmlFor="pane-b">
-            <Select
-              id="pane-b"
-              value={layout.paneB}
-              onChange={(event) => layout.setPaneB(event.target.value as PageKey)}
-            >
-              {PAGE_KEYS.map((page) => (
-                <option key={page} value={page}>
-                  {PAGE_LABELS[page]}
-                </option>
-              ))}
-            </Select>
-          </Field>
-          <p className="text-xs text-slate-500">
-            Clicking a page in the rail opens it in the left pane.
-          </p>
+          <div className={FIELD_GRID}>
+            <Field label="Left pane" htmlFor={`${uid}-pane-a`}>
+              <Select
+                id={`${uid}-pane-a`}
+                tone="bg"
+                value={layout.paneA}
+                onChange={(event) => layout.setPaneA(event.target.value as PageKey)}
+              >
+                <PaneOptions />
+              </Select>
+            </Field>
+            <Field label="Right pane" htmlFor={`${uid}-pane-b`}>
+              <Select
+                id={`${uid}-pane-b`}
+                tone="bg"
+                value={layout.paneB}
+                onChange={(event) => layout.setPaneB(event.target.value as PageKey)}
+              >
+                <PaneOptions />
+              </Select>
+            </Field>
+          </div>
+          <p className={FIELD_HINT}>Clicking a page in the rail opens it in the left pane.</p>
         </>
       ) : null}
     </SettingsSection>
   )
 }
 
-function Shell({ children }: { children: React.ReactNode }) {
+function PaneOptions() {
   return (
-    <section className="mx-auto max-w-3xl px-8 py-10">
-      <h1 className="text-2xl font-semibold tracking-tight text-slate-900">Settings</h1>
-      <p className="mt-2 mb-6 text-sm text-slate-600">
-        Layout, API credentials, model preferences and the prompts used across the app.
-      </p>
-      {children}
-    </section>
+    <>
+      {PAGE_KEYS.map((page) => (
+        <option key={page} value={page}>
+          {PAGE_LABELS[page]}
+        </option>
+      ))}
+    </>
   )
 }
 
-interface NumberInputProps {
-  id: string
-  value: number
-  min: number
-  max: number
-  onChange: (value: number) => void
-}
-
-function NumberInput({ id, value, min, max, onChange }: NumberInputProps) {
+function Shell({ children }: { children: ReactNode }) {
   return (
-    <input
-      id={id}
-      type="number"
-      min={min}
-      max={max}
-      value={value}
-      onChange={(event) => {
-        const parsed = Number.parseInt(event.target.value, 10)
-        // An empty or half-typed field must not send NaN to the API.
-        onChange(Number.isNaN(parsed) ? min : Math.min(Math.max(parsed, min), max))
-      }}
-      className={`${controlClass} max-w-32`}
-    />
+    <Page width="settings">
+      <PageHeader
+        className="mb-1.5"
+        title="Settings"
+        subtitle="Layout, API credentials, model preferences and the prompts used across the app."
+      />
+      {children}
+    </Page>
   )
 }
