@@ -4,6 +4,7 @@ interface BulkBarProps {
   onStar: () => void
   onDismiss: () => void
   onMarkUnread: () => void
+  onGenerateNotes: () => void
   onResearch: () => void
   onClear: () => void
 }
@@ -19,6 +20,7 @@ export default function BulkBar({
   onStar,
   onDismiss,
   onMarkUnread,
+  onGenerateNotes,
   onResearch,
   onClear,
 }: BulkBarProps) {
@@ -37,9 +39,7 @@ export default function BulkBar({
         Mark unread
       </button>
 
-      {/* Arriving in a later task; shown disabled so the shape of the workflow is
-          visible rather than surprising. */}
-      <button type="button" disabled className={buttonClass} title="Coming in a later task">
+      <button type="button" disabled={busy} onClick={onGenerateNotes} className={buttonClass}>
         Generate notes
       </button>
       <button type="button" disabled={busy} onClick={onResearch} className={buttonClass}>

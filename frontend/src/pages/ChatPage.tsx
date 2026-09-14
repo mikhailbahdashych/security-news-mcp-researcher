@@ -23,6 +23,7 @@ import ThinkingPane from '../components/chat/ThinkingPane'
 import ToolCallCard from '../components/chat/ToolCallCard'
 import Transcript from '../components/chat/Transcript'
 import TurnError from '../components/chat/TurnError'
+import GenerateNotesDialog from '../components/notes/GenerateNotesDialog'
 import { SSEHttpError, streamSSE } from '../lib/sse'
 
 /** What the Inbox's "Research these" button hands over. */
@@ -43,6 +44,7 @@ export default function ChatPage() {
   const [attached, setAttached] = useState<FeedItem[]>(
     () => (location.state as ChatNavigationState | null)?.attachedItems ?? [],
   )
+  const [notesOpen, setNotesOpen] = useState(false)
   const abort = useRef<AbortController | null>(null)
   const bottom = useRef<HTMLDivElement>(null)
 
@@ -193,20 +195,32 @@ export default function ChatPage() {
       />
 
       <section className="flex min-w-0 flex-1 flex-col">
-        <header className="border-b border-slate-200 px-6 py-3">
-          <h1 className="truncate text-sm font-semibold text-slate-900">
-            {detail.data?.session.title || 'New chat'}
-          </h1>
-          {detail.data ? (
-            <p className="text-xs text-slate-500">
-              {detail.data.session.model} · {detail.data.session.total_input_tokens} in /{' '}
-              {detail.data.session.total_output_tokens} out
-            </p>
-          ) : (
-            <p className="text-xs text-slate-500">
-              Ask about the inbox, an advisory, or a URL you paste.
-            </p>
-          )}
+        <header className="flex items-start justify-between gap-3 border-b border-slate-200 px-6 py-3">
+          <div className="min-w-0">
+            <h1 className="truncate text-sm font-semibold text-slate-900">
+              {detail.data?.session.title || 'New chat'}
+            </h1>
+            {detail.data ? (
+              <p className="text-xs text-slate-500">
+                {detail.data.session.model} · {detail.data.session.total_input_tokens} in /{' '}
+                {detail.data.session.total_output_tokens} out
+              </p>
+            ) : (
+              <p className="text-xs text-slate-500">
+                Ask about the inbox, an advisory, or a URL you paste.
+              </p>
+            )}
+          </div>
+          {sessionId !== null ? (
+            <button
+              type="button"
+              disabled={live.streaming}
+              onClick={() => setNotesOpen(true)}
+              className="shrink-0 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:border-slate-400 disabled:opacity-40"
+            >
+              Generate notes from this session
+            </button>
+          ) : null}
         </header>
 
         <div className="flex-1 overflow-y-auto px-6 py-4">
@@ -239,6 +253,13 @@ export default function ChatPage() {
 
           <div ref={bottom} />
         </div>
+
+        {notesOpen && sessionId !== null ? (
+          <GenerateNotesDialog
+            initialSessionId={sessionId}
+            onClose={() => setNotesOpen(false)}
+          />
+        ) : null}
 
         <Composer
           streaming={live.streaming}

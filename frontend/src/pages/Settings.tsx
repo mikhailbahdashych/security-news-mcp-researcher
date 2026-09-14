@@ -231,7 +231,17 @@ function SettingsForm({ settings }: { settings: AppSettings }) {
           title="Prompts"
           description="Reused every time notes are generated or a research chat starts."
         >
-          <Field label="Note template" htmlFor="note-template">
+          <Field
+            label="Note template"
+            htmlFor="note-template"
+            hint={
+              <>
+                One section per news item. <code>{'{Item title}'}</code> is replaced with the
+                item&rsquo;s real headline; keep <code>##</code> as the per-item heading level so
+                notes render consistently.
+              </>
+            }
+          >
             <textarea
               id="note-template"
               rows={9}

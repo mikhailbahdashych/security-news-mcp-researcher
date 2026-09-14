@@ -22,6 +22,7 @@ import BulkBar from '../components/inbox/BulkBar'
 import FilterBar from '../components/inbox/FilterBar'
 import ItemRow from '../components/inbox/ItemRow'
 import ManageFeeds from '../components/inbox/ManageFeeds'
+import GenerateNotesDialog from '../components/notes/GenerateNotesDialog'
 import RefreshSummary from '../components/inbox/RefreshSummary'
 import StatusBadge from '../components/inbox/StatusBadge'
 import useDebouncedValue from '../components/inbox/useDebouncedValue'
@@ -45,6 +46,7 @@ export default function InboxPage() {
   const [showFeeds, setShowFeeds] = useState(false)
   const [refreshResult, setRefreshResult] = useState<RefreshResponse | null>(null)
   const [extractNotes, setExtractNotes] = useState<Record<number, string>>({})
+  const [notesFor, setNotesFor] = useState<FeedItem[] | null>(null)
 
   const debouncedSearch = useDebouncedValue(search)
   const filters: ItemFilters = useMemo(
@@ -196,6 +198,7 @@ export default function InboxPage() {
           onStar={() => bulk.mutate({ ids: selectedIds, next: 'starred' })}
           onDismiss={() => bulk.mutate({ ids: selectedIds, next: 'dismissed' })}
           onMarkUnread={() => bulk.mutate({ ids: selectedIds, next: 'unread' })}
+          onGenerateNotes={() => setNotesFor(selectedItems)}
           onResearch={() => {
             // The Chat page reads these off the route state and pre-attaches
             // them to the first message.
@@ -262,6 +265,10 @@ export default function InboxPage() {
           ))}
         </ul>
       </div>
+
+      {notesFor ? (
+        <GenerateNotesDialog initialItems={notesFor} onClose={() => setNotesFor(null)} />
+      ) : null}
 
       {itemsQuery.hasNextPage ? (
         <button
