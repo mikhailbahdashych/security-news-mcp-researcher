@@ -12,15 +12,15 @@ import {
   type Feed,
 } from '../../api/inbox'
 import { ApiError } from '../../api/client'
+import Badge from '../ui/Badge'
+import Button from '../ui/Button'
+import Dialog from '../ui/Dialog'
+import Input from '../ui/Input'
 
 interface ManageFeedsProps {
   feeds: Feed[]
   onClose: () => void
 }
-
-const buttonClass =
-  'rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 ' +
-  'hover:border-slate-400 disabled:opacity-40'
 
 function lastRefreshed(feed: Feed): string {
   if (!feed.last_fetched_at) {
@@ -29,7 +29,7 @@ function lastRefreshed(feed: Feed): string {
   return `refreshed ${parseUtc(feed.last_fetched_at).toLocaleString()}`
 }
 
-/** Add, rename-by-disabling, enable/disable and delete feeds; seed the defaults. */
+/** Add, enable/disable and delete feeds; seed the defaults. */
 export default function ManageFeeds({ feeds, onClose }: ManageFeedsProps) {
   const queryClient = useQueryClient()
   const [url, setUrl] = useState('')
@@ -63,20 +63,19 @@ export default function ManageFeeds({ feeds, onClose }: ManageFeedsProps) {
   const busy = add.isPending || seed.isPending || toggle.isPending || remove.isPending
 
   return (
-    <section className="rounded-lg border border-slate-200 bg-white p-4">
-      <div className="flex items-center justify-between">
-        <h2 className="text-sm font-semibold text-slate-900">Feeds</h2>
-        <button
-          type="button"
-          onClick={onClose}
-          className="text-xs text-slate-500 hover:text-slate-900"
-        >
+    <Dialog
+      title="Feeds"
+      description="The sources the inbox pulls from."
+      width="lg"
+      onClose={onClose}
+      footer={
+        <Button variant="primary" onClick={onClose}>
           Done
-        </button>
-      </div>
-
+        </Button>
+      }
+    >
       <form
-        className="mt-3 flex flex-wrap gap-2"
+        className="flex flex-wrap gap-2"
         onSubmit={(event) => {
           event.preventDefault()
           if (url.trim()) {
@@ -84,72 +83,77 @@ export default function ManageFeeds({ feeds, onClose }: ManageFeedsProps) {
           }
         }}
       >
-        <input
+        <Input
           type="url"
+          tone="bg"
           value={url}
           required
+          aria-label="Feed URL"
           placeholder="https://example.com/feed.xml"
           onChange={(event) => setUrl(event.target.value)}
-          className="min-w-64 flex-1 rounded-md border border-slate-300 px-3 py-1.5 text-xs outline-none focus:border-slate-500"
+          className="min-w-[240px] flex-1"
         />
-        <button type="submit" disabled={busy} className={buttonClass}>
+        <Button type="submit" variant="primary" loading={add.isPending} disabled={busy}>
           Add feed
-        </button>
-        <button
-          type="button"
+        </Button>
+        <Button
+          loading={seed.isPending}
           disabled={busy}
           onClick={() => seed.mutate()}
-          className={buttonClass}
           title="Add the built-in security feeds that are not configured yet"
         >
           Seed defaults
-        </button>
+        </Button>
       </form>
 
-      {error ? <p className="mt-2 text-xs text-rose-600">{error}</p> : null}
+      {error ? <p className="mt-2 text-[11.5px] text-red">{error}</p> : null}
 
       {feeds.length === 0 ? (
-        <p className="mt-4 text-xs text-slate-500">
-          No feeds yet. Add one above, or press <strong>Seed defaults</strong> for a starter set of
-          security sources.
+        <p className="mt-4 text-[12px] text-muted">
+          No feeds yet. Add one above, or press <strong className="text-ink">Seed defaults</strong>{' '}
+          for a starter set of security sources.
         </p>
       ) : (
-        <ul className="mt-4 divide-y divide-slate-100">
+        <ul className="mt-4 flex max-h-[42vh] flex-col gap-1.5 overflow-y-auto">
           {feeds.map((feed) => (
-            <li key={feed.id} className="flex flex-wrap items-start gap-3 py-2.5">
+            <li
+              key={feed.id}
+              className="flex flex-wrap items-start gap-3 rounded-[8px] border border-line bg-bg px-3 py-2"
+            >
               <div className="min-w-0 flex-1">
-                <p className="truncate text-xs font-medium text-slate-900">{feedLabel(feed)}</p>
-                <p className="truncate text-[11px] text-slate-500">{feed.url}</p>
-                <p className="mt-0.5 text-[11px] text-slate-500">
-                  {feed.enabled ? 'enabled' : 'disabled'} · {lastRefreshed(feed)}
-                </p>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <p className="truncate text-[12.5px] font-medium text-ink">{feedLabel(feed)}</p>
+                  {feed.enabled ? null : <Badge>disabled</Badge>}
+                  {feed.last_error ? <Badge tone="red">error</Badge> : null}
+                </div>
+                <p className="truncate text-[11px] text-faint">{feed.url}</p>
+                <p className="mt-0.5 text-[11px] text-faint">{lastRefreshed(feed)}</p>
                 {feed.last_error ? (
-                  <p className="mt-0.5 text-[11px] text-rose-600">{feed.last_error}</p>
+                  <p className="mt-0.5 text-[11px] text-red">{feed.last_error}</p>
                 ) : null}
               </div>
-              <div className="flex gap-1.5">
-                <button
-                  type="button"
+              <div className="flex shrink-0 gap-1.5">
+                <Button
+                  size="sm"
                   disabled={busy}
                   onClick={() => toggle.mutate({ id: feed.id, enabled: !feed.enabled })}
-                  className={buttonClass}
                 >
                   {feed.enabled ? 'Disable' : 'Enable'}
-                </button>
-                <button
-                  type="button"
+                </Button>
+                <Button
+                  size="sm"
+                  variant="danger"
                   disabled={busy}
                   onClick={() => remove.mutate(feed.id)}
-                  className={`${buttonClass} text-rose-600`}
                   title="Deletes the feed and every item it brought in"
                 >
                   Delete
-                </button>
+                </Button>
               </div>
             </li>
           ))}
         </ul>
       )}
-    </section>
+    </Dialog>
   )
 }

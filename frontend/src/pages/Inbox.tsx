@@ -28,14 +28,11 @@ import GenerateNotesDialog from '../components/notes/GenerateNotesDialog'
 import RefreshSummary from '../components/inbox/RefreshSummary'
 import StatusBadge from '../components/inbox/StatusBadge'
 import useDebouncedValue from '../components/inbox/useDebouncedValue'
-
-const primaryButtonClass =
-  'rounded-md bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-800 ' +
-  'disabled:bg-slate-300'
-
-const secondaryButtonClass =
-  'rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 ' +
-  'hover:border-slate-400 disabled:opacity-40'
+import Button from '../components/ui/Button'
+import EmptyState from '../components/ui/EmptyState'
+import PageHeader from '../components/ui/PageHeader'
+import { CARD, cx } from '../components/ui/classes'
+import Page from './Page'
 
 /** `?status=` from a deep link, if it names a filter we actually have. */
 function readStatus(raw: string | null): StatusFilter | null {
@@ -177,39 +174,29 @@ export default function InboxPage({ embedded = false }: EmbeddablePageProps) {
   const selectedIds = selectedItems.map((item) => item.id)
   const busy = triage.isPending || bulk.isPending || extract.isPending
   const allOnPageSelected = items.length > 0 && selectedIds.length === items.length
+  const selecting = selectedIds.length > 0
 
   return (
-    <section className="mx-auto flex max-w-4xl flex-col gap-4 px-8 py-8">
-      <header className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight text-slate-900">Inbox</h1>
-          <p className="mt-0.5 text-xs text-slate-500">
-            Security headlines from your feeds, newest first.
-          </p>
-        </div>
-        <div className="flex gap-2">
-          <button
-            type="button"
-            onClick={() => setShowFeeds((current) => !current)}
-            className={secondaryButtonClass}
-          >
-            {showFeeds ? 'Hide feeds' : 'Manage feeds'}
-          </button>
-          <button
-            type="button"
-            disabled={refresh.isPending}
-            onClick={() => refresh.mutate()}
-            className={primaryButtonClass}
-          >
-            {refresh.isPending ? 'Refreshing…' : 'Refresh feeds'}
-          </button>
-        </div>
-      </header>
-
-      {showFeeds ? <ManageFeeds feeds={feeds} onClose={() => setShowFeeds(false)} /> : null}
+    <Page>
+      <PageHeader
+        title="Inbox"
+        subtitle="Security headlines from your feeds, newest first."
+        actions={
+          <>
+            <Button onClick={() => setShowFeeds(true)}>Manage feeds</Button>
+            <Button
+              variant="primary"
+              loading={refresh.isPending}
+              onClick={() => refresh.mutate()}
+            >
+              {refresh.isPending ? 'Refreshing…' : 'Refresh feeds'}
+            </Button>
+          </>
+        }
+      />
 
       {refresh.isError ? (
-        <p className="text-xs text-rose-600">The refresh failed. Is the backend running?</p>
+        <p className="text-[12px] text-red">The refresh failed. Is the backend running?</p>
       ) : null}
 
       {refreshResult ? (
@@ -236,44 +223,33 @@ export default function InboxPage({ embedded = false }: EmbeddablePageProps) {
         onSearchChange={setSearch}
       />
 
-      {selectedIds.length > 0 ? (
-        <BulkBar
-          count={selectedIds.length}
-          busy={busy}
-          onStar={() => bulk.mutate({ ids: selectedIds, next: 'starred' })}
-          onDismiss={() => bulk.mutate({ ids: selectedIds, next: 'dismissed' })}
-          onMarkUnread={() => bulk.mutate({ ids: selectedIds, next: 'unread' })}
-          onGenerateNotes={() => setNotesFor(selectedItems)}
-          onResearch={() => {
-            // The Chat page reads these off the route state and pre-attaches
-            // them to the first message.
-            const state: ChatNavigationState = { attachedItems: selectedItems }
-            navigate('/chat', { state })
-          }}
-          onClear={() => setSelected(new Set())}
-        />
-      ) : null}
-
-      <div className="rounded-lg border border-slate-200 bg-white">
-        {items.length > 0 ? (
-          <div className="flex items-center gap-3 border-b border-slate-100 px-4 py-2">
-            <input
-              type="checkbox"
-              checked={allOnPageSelected}
-              aria-label="Select every loaded item"
-              onChange={(event) =>
-                setSelected(
-                  event.target.checked ? new Set(items.map((item) => item.id)) : new Set(),
-                )
-              }
-              className="size-4 rounded border-slate-300 accent-slate-900"
-            />
-            <span className="text-[11px] text-slate-500">
+      {/*
+        Not a `Card`: the primitive clips its overflow, and a clipped ancestor is
+        its own scrollport — which would pin the bulk bar to the bottom of the
+        card instead of to the bottom of the viewport.
+      */}
+      <div className={CARD}>
+        {itemsQuery.isPending || itemsQuery.isError ? null : (
+          <div className="flex items-center gap-2.5 px-4 py-2">
+            {items.length > 0 ? (
+              <input
+                type="checkbox"
+                checked={allOnPageSelected}
+                aria-label="Select every loaded item"
+                onChange={(event) =>
+                  setSelected(
+                    event.target.checked ? new Set(items.map((item) => item.id)) : new Set(),
+                  )
+                }
+                className="size-[15px] cursor-pointer accent-[var(--accent-btn)]"
+              />
+            ) : null}
+            <span className="text-[11px] text-faint">
               {items.length} loaded
               {itemsQuery.hasNextPage ? ' (more available)' : ''}
             </span>
           </div>
-        ) : null}
+        )}
 
         <Body
           isPending={itemsQuery.isPending}
@@ -284,13 +260,15 @@ export default function InboxPage({ embedded = false }: EmbeddablePageProps) {
           onManageFeeds={() => setShowFeeds(true)}
         />
 
-        <ul className="divide-y divide-slate-100">
+        <ul className={cx(!selecting && '[&>li:last-child]:rounded-b-[11px]')}>
           {items.map((item) => (
             <ItemRow
               key={item.id}
               item={item}
               selected={selected.has(item.id)}
+              selecting={selecting}
               busy={busy}
+              extracting={extract.isPending && extract.variables === item.id}
               highlighted={item.id === linkedItemId}
               extractNote={extractNotes[item.id]}
               onToggleSelect={toggleSelect}
@@ -310,23 +288,42 @@ export default function InboxPage({ embedded = false }: EmbeddablePageProps) {
             />
           ))}
         </ul>
+
+        {selecting ? (
+          <BulkBar
+            count={selectedIds.length}
+            busy={busy}
+            onStar={() => bulk.mutate({ ids: selectedIds, next: 'starred' })}
+            onDismiss={() => bulk.mutate({ ids: selectedIds, next: 'dismissed' })}
+            onRestore={() => bulk.mutate({ ids: selectedIds, next: 'unread' })}
+            onGenerateNotes={() => setNotesFor(selectedItems)}
+            onResearch={() => {
+              // The Chat page reads these off the route state and pre-attaches
+              // them to the first message.
+              const state: ChatNavigationState = { attachedItems: selectedItems }
+              navigate('/chat', { state })
+            }}
+            onClear={() => setSelected(new Set())}
+          />
+        ) : null}
       </div>
+
+      {itemsQuery.hasNextPage ? (
+        <Button
+          className="self-center"
+          loading={itemsQuery.isFetchingNextPage}
+          onClick={() => void itemsQuery.fetchNextPage()}
+        >
+          {itemsQuery.isFetchingNextPage ? 'Loading…' : 'Load more'}
+        </Button>
+      ) : null}
+
+      {showFeeds ? <ManageFeeds feeds={feeds} onClose={() => setShowFeeds(false)} /> : null}
 
       {notesFor ? (
         <GenerateNotesDialog initialItems={notesFor} onClose={() => setNotesFor(null)} />
       ) : null}
-
-      {itemsQuery.hasNextPage ? (
-        <button
-          type="button"
-          disabled={itemsQuery.isFetchingNextPage}
-          onClick={() => void itemsQuery.fetchNextPage()}
-          className={`${secondaryButtonClass} self-center`}
-        >
-          {itemsQuery.isFetchingNextPage ? 'Loading…' : 'Load more'}
-        </button>
-      ) : null}
-    </section>
+    </Page>
   )
 }
 
@@ -342,13 +339,16 @@ interface BodyProps {
 /** The states a list can be in before it has rows to show. */
 function Body({ isPending, isError, isEmpty, hasFeeds, status, onManageFeeds }: BodyProps) {
   if (isPending) {
-    return <p className="px-4 py-10 text-center text-xs text-slate-500">Loading items…</p>
+    return <EmptyState icon="spinner" title="Loading items…" />
   }
   if (isError) {
     return (
-      <p className="px-4 py-10 text-center text-xs text-rose-600">
-        Could not load items. Is the backend running?
-      </p>
+      <EmptyState
+        tone="error"
+        icon="warning"
+        title="Could not load items."
+        description="Is the backend running?"
+      />
     )
   }
   if (!isEmpty) {
@@ -356,18 +356,22 @@ function Body({ isPending, isError, isEmpty, hasFeeds, status, onManageFeeds }: 
   }
   if (!hasFeeds) {
     return (
-      <div className="px-4 py-10 text-center">
-        <p className="text-xs text-slate-500">No feeds configured yet.</p>
-        <button type="button" onClick={onManageFeeds} className={`${secondaryButtonClass} mt-3`}>
-          Manage feeds
-        </button>
-      </div>
+      <EmptyState
+        icon="inbox"
+        title="No feeds configured yet."
+        action={<Button onClick={onManageFeeds}>Manage feeds</Button>}
+      />
     )
   }
   return (
-    <p className="flex items-center justify-center gap-2 px-4 py-10 text-xs text-slate-500">
-      Nothing here. <StatusBadge status={status === 'all' ? 'unread' : status} /> is empty — try
-      another filter or refresh the feeds.
-    </p>
+    <EmptyState
+      icon="inbox"
+      title={
+        <span className="inline-flex flex-wrap items-center justify-center gap-1.5">
+          Nothing here. <StatusBadge status={status === 'all' ? 'unread' : status} /> is empty.
+        </span>
+      }
+      description="Try another filter, or refresh the feeds."
+    />
   )
 }

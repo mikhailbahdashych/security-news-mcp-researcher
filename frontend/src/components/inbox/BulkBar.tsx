@@ -1,58 +1,59 @@
+import Button from '../ui/Button'
+
 interface BulkBarProps {
   count: number
   busy: boolean
   onStar: () => void
   onDismiss: () => void
-  onMarkUnread: () => void
+  onRestore: () => void
   onGenerateNotes: () => void
   onResearch: () => void
   onClear: () => void
 }
 
-const buttonClass =
-  'rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 ' +
-  'hover:border-slate-400 disabled:opacity-40'
-
-/** Appears only with a selection: the bulk triage actions for it. */
+/**
+ * The bulk triage actions for the current selection.
+ *
+ * Sticky to the bottom of the list card: on a long list the actions stay in
+ * reach while you are still picking rows further down. It is opaque for the
+ * same reason — it floats over the rows it is about.
+ */
 export default function BulkBar({
   count,
   busy,
   onStar,
   onDismiss,
-  onMarkUnread,
+  onRestore,
   onGenerateNotes,
   onResearch,
   onClear,
 }: BulkBarProps) {
   return (
-    <div className="flex flex-wrap items-center gap-2 rounded-md border border-slate-900/10 bg-slate-900/5 px-3 py-2">
-      <span className="text-xs font-medium text-slate-700">
-        {count} selected
+    <div className="sticky bottom-0 z-10 flex flex-wrap items-center gap-2 border-t border-line bg-panel px-4 py-2.5">
+      <span className="text-[11.5px] font-medium text-muted">{count} selected</span>
+      <span aria-hidden className="text-[11.5px] text-faint">
+        ·
       </span>
-      <button type="button" disabled={busy} onClick={onStar} className={buttonClass}>
+
+      <Button size="sm" disabled={busy} onClick={onStar}>
         Star
-      </button>
-      <button type="button" disabled={busy} onClick={onDismiss} className={buttonClass}>
+      </Button>
+      <Button size="sm" disabled={busy} onClick={onDismiss}>
         Dismiss
-      </button>
-      <button type="button" disabled={busy} onClick={onMarkUnread} className={buttonClass}>
-        Mark unread
-      </button>
-
-      <button type="button" disabled={busy} onClick={onGenerateNotes} className={buttonClass}>
+      </Button>
+      <Button size="sm" disabled={busy} onClick={onRestore}>
+        Restore
+      </Button>
+      <Button size="sm" disabled={busy} onClick={onGenerateNotes}>
         Generate notes
-      </button>
-      <button type="button" disabled={busy} onClick={onResearch} className={buttonClass}>
+      </Button>
+      <Button size="sm" disabled={busy} onClick={onResearch}>
         Research these
-      </button>
+      </Button>
 
-      <button
-        type="button"
-        onClick={onClear}
-        className="ml-auto text-xs text-slate-500 hover:text-slate-900"
-      >
+      <Button size="sm" variant="ghost" className="ml-auto" onClick={onClear}>
         Clear
-      </button>
+      </Button>
     </div>
   )
 }
