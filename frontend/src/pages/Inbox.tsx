@@ -1,6 +1,6 @@
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useMemo, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useEffect, useMemo, useState } from 'react'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 
 import {
   bulkSetStatus,
@@ -11,6 +11,7 @@ import {
   itemsQueryKey,
   refreshFeeds,
   setItemStatus,
+  STATUS_FILTERS,
   type FeedItem,
   type ItemFilters,
   type ItemStatus,
@@ -35,13 +36,41 @@ const secondaryButtonClass =
   'rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 ' +
   'hover:border-slate-400 disabled:opacity-40'
 
+/** `?status=` from a deep link, if it names a filter we actually have. */
+function readStatus(raw: string | null): StatusFilter | null {
+  return (STATUS_FILTERS as readonly string[]).includes(raw ?? '')
+    ? (raw as StatusFilter)
+    : null
+}
+
 export default function InboxPage() {
   const queryClient = useQueryClient()
   const navigate = useNavigate()
+  // The global search links here as `/?q=…&item=…&status=all`, because a feed
+  // item has no page of its own. The query string seeds the filters; the item id
+  // just calls out a row.
+  const [searchParams] = useSearchParams()
+  const linkedQuery = searchParams.get('q') ?? ''
+  const linkedStatus = readStatus(searchParams.get('status'))
+  const linkedItemId = Number(searchParams.get('item')) || null
 
-  const [status, setStatus] = useState<StatusFilter>('unread')
+  const [status, setStatus] = useState<StatusFilter>(linkedStatus ?? 'unread')
   const [feedId, setFeedId] = useState<number | null>(null)
-  const [search, setSearch] = useState('')
+  const [search, setSearch] = useState(linkedQuery)
+
+  // A second search from the nav while the Inbox is already open changes the
+  // query string without remounting this page, so the filters have to follow a
+  // new link here too — adjusted during the render that saw it change, rather
+  // than in an effect that would show the stale list for a frame first.
+  const [appliedLink, setAppliedLink] = useState(`${linkedQuery}|${linkedStatus ?? ''}`)
+  const link = `${linkedQuery}|${linkedStatus ?? ''}`
+  if (appliedLink !== link) {
+    setAppliedLink(link)
+    setSearch(linkedQuery)
+    if (linkedStatus) {
+      setStatus(linkedStatus)
+    }
+  }
   const [selected, setSelected] = useState<ReadonlySet<number>>(new Set())
   const [showFeeds, setShowFeeds] = useState(false)
   const [refreshResult, setRefreshResult] = useState<RefreshResponse | null>(null)
@@ -68,6 +97,18 @@ export default function InboxPage() {
     () => itemsQuery.data?.pages.flatMap((page) => page.items) ?? [],
     [itemsQuery.data],
   )
+
+  // Scroll the linked row into view once the page it lives on has loaded. If it
+  // is not in the loaded pages the `q` filter alone has to be enough — seeking
+  // across pages for one row is not worth the machinery.
+  useEffect(() => {
+    if (linkedItemId === null) {
+      return
+    }
+    document
+      .getElementById(`item-${linkedItemId}`)
+      ?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  }, [linkedItemId, items.length])
 
   /** Refetch the list and the feed rows (their last_status just changed). */
   const reload = async () => {
@@ -246,6 +287,7 @@ export default function InboxPage() {
               item={item}
               selected={selected.has(item.id)}
               busy={busy}
+              highlighted={item.id === linkedItemId}
               extractNote={extractNotes[item.id]}
               onToggleSelect={toggleSelect}
               onStar={(target: FeedItem) =>

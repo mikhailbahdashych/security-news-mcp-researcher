@@ -1,6 +1,7 @@
 import { NavLink, Route, Routes } from 'react-router-dom'
 
 import BackendStatus from './components/BackendStatus'
+import GlobalSearch from './components/ui/GlobalSearch'
 import ChatPage from './pages/ChatPage'
 import InboxPage from './pages/Inbox'
 import NoteDetailPage from './pages/NoteDetail'
@@ -23,7 +24,9 @@ export default function App() {
           <p className="text-xs text-slate-500">Researcher</p>
         </div>
 
-        <nav className="mt-8 flex flex-col gap-1">
+        <GlobalSearch />
+
+        <nav className="mt-6 flex flex-col gap-1">
           {NAV.map(({ to, label }) => (
             <NavLink
               key={to}
