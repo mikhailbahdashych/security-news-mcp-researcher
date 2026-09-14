@@ -372,17 +372,25 @@ async def build_generation_context(
 
 @dataclass(slots=True)
 class SourceCollector:
-    """Watches a generation's events for URLs the model actually read.
+    """Watches a generation's events for URLs the model actually used.
 
-    ``fetch_article`` arguments arrive as ``input_json_delta`` fragments that are
-    only valid JSON once concatenated, so they are buffered per tool-use id and
-    parsed when the call comes back — and only when it came back **successfully**,
-    because a URL that failed to fetch is not a source.
+    Two kinds of URL turn up in a generation, and they mean different things:
+
+    * A ``fetch_article`` argument is a **deliberate read** — the model asked for
+      that page. Those arguments arrive as ``input_json_delta`` fragments that
+      are only valid JSON once concatenated, so they are buffered per tool-use id
+      and parsed when the call comes back, and only when it came back
+      *successfully*: a URL that failed to fetch is not a source.
+    * A ``web_search`` result is a **candidate** the model was shown. A single
+      query hands back ten of them, mostly aggregators reprinting the same story,
+      and storing all of them buries the handful that matter. Those are kept only
+      when the finished note actually cites them — see :meth:`sources`.
     """
 
     _names: dict[str, str] = field(default_factory=dict)
     _buffers: dict[str, str] = field(default_factory=dict)
-    _found: list[ExtraSource] = field(default_factory=list)
+    _fetched: list[ExtraSource] = field(default_factory=list)
+    _searched: list[ExtraSource] = field(default_factory=list)
 
     def observe(self, event: ev.AgentEvent) -> None:
         if isinstance(event, ev.ToolUseStart):
@@ -397,19 +405,25 @@ class SourceCollector:
                 return
             url = parse_tool_input(buffered).get("url")
             if isinstance(url, str):
-                self._found.append(ExtraSource(url=url))
+                self._fetched.append(ExtraSource(url=url))
         elif isinstance(event, ev.ServerToolResult):
             if event.is_error or not isinstance(event.results, list):
                 return
             for result in event.results:
                 if isinstance(result, dict) and isinstance(result.get("url"), str):
-                    self._found.append(
+                    self._searched.append(
                         ExtraSource(url=result["url"], title=result.get("title") or None)
                     )
 
-    def sources(self) -> list[ExtraSource]:
-        """The http(s) URLs seen, deduped, in the order they were first read."""
-        return _dedupe_sources(self._found)
+    def sources(self, *, body_md: str = "") -> list[ExtraSource]:
+        """The extra sources worth keeping, deduped, in the order first seen.
+
+        Every fetched URL is kept. A search result is kept only if *body_md*
+        mentions it, which is what separates "the model cited this" from "the
+        search engine returned this".
+        """
+        cited = [source for source in self._searched if source.url and source.url in body_md]
+        return _dedupe_sources([*self._fetched, *cited])
 
 
 def _dedupe_sources(

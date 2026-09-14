@@ -542,7 +542,12 @@ async def test_a_fetched_url_matching_an_item_is_not_duplicated(
     assert sources[0].feed_item_id == item_ids[0]
 
 
-async def test_web_search_result_urls_become_sources(app, client, with_key, session_factory):
+async def test_cited_web_search_results_become_sources(app, client, with_key, session_factory):
+    """A search result is a source only once the note actually cites it.
+
+    One query hands back ten results, mostly aggregators reprinting the same
+    story; storing all of them buries the handful the note was written from.
+    """
     item_ids = await seed_items(session_factory, 1)
     use_script(
         app,
@@ -551,8 +556,9 @@ async def test_web_search_result_urls_become_sources(app, client, with_key, sess
                 ("Vendor advisory", "https://vendor.test/advisory"),
                 ("Duplicate", "https://vendor.test/advisory"),
                 ("Not a web page", "ftp://vendor.test/file"),
+                ("Never cited", "https://aggregator.test/reprint"),
             ],
-            text="## Story 0",
+            text="## Story 0\nSee the [advisory](https://vendor.test/advisory).",
         ),
     )
 
@@ -562,6 +568,32 @@ async def test_web_search_result_urls_become_sources(app, client, with_key, sess
     assert [(source.feed_item_id, source.url, source.title) for source in sources] == [
         (item_ids[0], "https://example.test/story-0", "Story 0: AcmeVPN pre-auth RCE"),
         (None, "https://vendor.test/advisory", "Vendor advisory"),
+    ]
+
+
+async def test_a_fetched_url_is_kept_even_when_the_note_does_not_link_it(
+    app, client, with_key, session_factory, monkeypatch
+):
+    """Unlike a search hit, fetching a page is a deliberate act: it is a source
+    even when the sentence it informed carries no link."""
+    item_ids = await seed_items(session_factory, 1)
+
+    async def fake_article(url, *_args, **_kwargs):
+        return extract_service.ExtractResult(ok=True, text="advisory body")
+
+    monkeypatch.setattr(extract_service, "extract_article", fake_article)
+    use_script(
+        app,
+        turn_tool_use([("fetch_article", {"url": "https://vendor.test/unlinked"})]),
+        turn_text("## Story 0\nNo links at all."),
+    )
+
+    await generate(client, item_ids=item_ids)
+
+    sources = await source_rows(session_factory)
+    assert [source.url for source in sources] == [
+        "https://example.test/story-0",
+        "https://vendor.test/unlinked",
     ]
 
 

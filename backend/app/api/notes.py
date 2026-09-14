@@ -215,7 +215,7 @@ async def _stream_generation(
         template_used=context.template,
         session_id=context.session_id,
         items=context.items,
-        extra_sources=collector.sources(),
+        extra_sources=collector.sources(body_md=body),
     )
     logger.info("Saved note %s from generation %s", note_id, generation_id)
     yield sse_data("done", {"note_id": note_id})
