@@ -1,7 +1,7 @@
 import { QueryClient } from '@tanstack/react-query'
 import { describe, expect, it } from 'vitest'
 
-import { feedTitlesFromCache, type FeedItem } from './inbox'
+import { cacheEventChangesData, feedTitlesFromCache, type FeedItem } from './inbox'
 
 function item(id: number, feedTitle: string | null): FeedItem {
   return {
@@ -58,5 +58,31 @@ describe('feedTitlesFromCache', () => {
     client.setQueryData(['items', 'inbox'], { pages: [{ items: [item(5, 'Project Zero')] }] })
 
     expect(feedTitlesFromCache(client).get(5)).toBe('Project Zero')
+  })
+})
+
+describe('cacheEventChangesData', () => {
+  const query = {} as never
+
+  it('accepts the events that change stored data', () => {
+    expect(cacheEventChangesData({ type: 'added', query })).toBe(true)
+    expect(cacheEventChangesData({ type: 'removed', query })).toBe(true)
+    expect(
+      cacheEventChangesData({ type: 'updated', query, action: { type: 'success', data: {} } }),
+    ).toBe(true)
+  })
+
+  it('ignores the events that only describe observers', () => {
+    // These fire on every render of a subscribed component — during a streamed
+    // turn, on every delta — and cannot move a feed title.
+    expect(cacheEventChangesData({ type: 'observerAdded', query, observer: {} as never })).toBe(
+      false,
+    )
+    expect(
+      cacheEventChangesData({ type: 'observerResultsUpdated', query } as never),
+    ).toBe(false)
+    expect(cacheEventChangesData({ type: 'updated', query, action: { type: 'fetch' } })).toBe(
+      false,
+    )
   })
 })

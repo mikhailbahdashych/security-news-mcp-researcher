@@ -1,4 +1,8 @@
-import { useQueryClient, type QueryClient } from '@tanstack/react-query'
+import {
+  useQueryClient,
+  type QueryCacheNotifyEvent,
+  type QueryClient,
+} from '@tanstack/react-query'
 import { useCallback, useRef, useSyncExternalStore } from 'react'
 
 import { apiDelete, apiGet, apiPatch, apiPost } from './client'
@@ -177,6 +181,25 @@ function sameTitles(left: Map<number, string>, right: Map<number, string>): bool
 }
 
 /**
+ * Whether a cache event can have changed what `feedTitlesFromCache` would find.
+ *
+ * Only these three touch stored data. The rest — an observer mounting, a
+ * component re-rendering, options changing — fire constantly during a streamed
+ * turn and cannot move a single feed title, so they must not trigger a rescan.
+ */
+export function cacheEventChangesData(event: QueryCacheNotifyEvent): boolean {
+  switch (event.type) {
+    case 'added':
+    case 'removed':
+      return true
+    case 'updated':
+      return event.action.type === 'success' || event.action.type === 'setState'
+    default:
+      return false
+  }
+}
+
+/**
  * `feedTitlesFromCache`, kept in step with the cache it reads.
  *
  * Calling it inside a `useMemo` sampled the cache at whatever moment the memo's
@@ -184,19 +207,35 @@ function sameTitles(left: Map<number, string>, right: Map<number, string>): bool
  * arrived kept naming items by their domain until something else re-rendered
  * the page. Subscribing means a late-loading query updates the names.
  *
- * The snapshot is cached and compared by value because `useSyncExternalStore`
- * re-renders on identity: a fresh `Map` per call would make every cache event
- * anywhere in the app a re-render of the whole chat.
+ * The scan walks every cached query, so it is counted rather than repeated:
+ * `getSnapshot` runs on every render of the chat page — which during a streamed
+ * turn is every delta — and reruns the scan only when a data-changing cache
+ * event has bumped `version` since the last one. The result is then compared by
+ * value, because `useSyncExternalStore` re-renders on identity and a fresh `Map`
+ * per call would make every cache event a re-render of the whole chat.
  */
 export function useFeedTitlesFromCache(): Map<number, string> {
   const client = useQueryClient()
   const snapshot = useRef<Map<number, string> | null>(null)
+  const version = useRef(0)
+  const scanned = useRef(-1)
 
   const subscribe = useCallback(
-    (onChange: () => void) => client.getQueryCache().subscribe(onChange),
+    (onChange: () => void) =>
+      client.getQueryCache().subscribe((event) => {
+        if (!cacheEventChangesData(event)) {
+          return
+        }
+        version.current += 1
+        onChange()
+      }),
     [client],
   )
   const getSnapshot = useCallback(() => {
+    if (snapshot.current !== null && scanned.current === version.current) {
+      return snapshot.current
+    }
+    scanned.current = version.current
     const next = feedTitlesFromCache(client)
     if (snapshot.current === null || !sameTitles(snapshot.current, next)) {
       snapshot.current = next
