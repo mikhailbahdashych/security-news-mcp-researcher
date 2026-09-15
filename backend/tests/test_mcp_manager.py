@@ -7,11 +7,23 @@ hostname, and the whole file runs in well under a second.
 from __future__ import annotations
 
 import asyncio
+import logging
 
+import httpx2
 import pytest
+from mcp import MCPError
+from mcp.types import REQUEST_TIMEOUT
 
 from app.mcp.config import McpServerConfig
-from app.mcp.manager import McpManager, TargetSpec, describe_error, result_text
+from app.mcp.manager import (
+    HTTP_CONNECT_TIMEOUT_S,
+    HTTP_READ_TIMEOUT_S,
+    McpManager,
+    TargetSpec,
+    default_target,
+    describe_error,
+    result_text,
+)
 from tests.fakes.mcp import (
     BrokenTarget,
     ExitTracker,
@@ -272,3 +284,146 @@ def test_result_text_narrows_non_text_blocks() -> None:
         type = "image"
 
     assert result_text([NotText()]) == "[non-text content omitted]"
+
+
+def test_describe_error_strips_a_token_out_of_a_url_query() -> None:
+    """A hosted MCP server's credential often lives in the query string, and this
+    string is shown in the UI and written to the log."""
+    message = describe_error(
+        RuntimeError("POST https://example.com/mcp?key=s3cret-token returned 401")
+    )
+
+    assert "s3cret-token" not in message
+    assert "https://example.com/mcp?***" in message
+
+
+async def test_connecting_logs_the_keys_of_env_and_headers_but_not_the_values(caplog) -> None:
+    config = McpServerConfig(
+        name="fixture",
+        transport="stdio",
+        command="fixture",
+        env={"API_TOKEN": "s3cret-value"},
+    )
+    manager = McpManager([config], target_factory=SpyFactory({"fixture": build_server()}))
+    try:
+        with caplog.at_level(logging.DEBUG, logger="app.mcp.manager"):
+            await manager.list_tools("fixture")
+    finally:
+        await manager.aclose()
+
+    connecting = [
+        record.getMessage() for record in caplog.records if "Connecting" in record.message
+    ]
+    assert connecting, "the connect attempt logged nothing"
+    assert "s3cret-value" not in connecting[0]
+    # Useless if it hid the keys too: "which variables did it pass?" is the
+    # question this line exists to answer.
+    assert "API_TOKEN" in connecting[0]
+
+
+# --------------------------------------------------------- timeout classification
+
+
+class RaisingClient:
+    """Stands in for a live ``Client`` whose call blows up at the transport level."""
+
+    def __init__(self, exc: BaseException) -> None:
+        self.exc = exc
+
+    async def call_tool(self, *_args: object, **_kwargs: object) -> None:
+        raise self.exc
+
+
+async def call_with(exc: BaseException) -> tuple[McpManager, str, bool]:
+    """Connect for real, then make the *call* fail with ``exc``."""
+    manager = McpManager([stdio("fixture")], target_factory=SpyFactory({"fixture": build_server()}))
+    await manager.list_tools("fixture")
+    connection = manager._states["fixture"].connection
+    assert connection is not None
+    connection.client = RaisingClient(exc)  # type: ignore[assignment]
+    text, is_error = await manager.call_tool("fixture", "echo", {"text": "x"})
+    return manager, text, is_error
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [TimeoutError("whatever the transport says"), MCPError(REQUEST_TIMEOUT, "Request timed out")],
+)
+async def test_a_timeout_keeps_the_connection(exc: BaseException) -> None:
+    """Classified by type: the old substring match read the server's own wording,
+    so a tool whose *answer* mentioned a timeout kept a dead connection alive —
+    and a real timeout worded differently tore a healthy one down."""
+    manager, text, is_error = await call_with(exc)
+    try:
+        assert is_error is True
+        assert "timed out after" in text
+        assert manager.status("fixture") == "connected"
+    finally:
+        await manager.aclose()
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        MCPError(-32603, "Internal error: the upstream request timed out"),
+        OSError("broken pipe"),
+    ],
+)
+async def test_a_non_timeout_failure_retires_the_connection(exc: BaseException) -> None:
+    manager, text, is_error = await call_with(exc)
+    try:
+        assert is_error is True
+        assert "timed out after" not in text
+        assert manager.status("fixture") == "error"
+    finally:
+        await manager.aclose()
+
+
+# ------------------------------------------------------ the HTTP target factory
+
+
+async def test_default_target_builds_the_http_transport_and_hands_back_its_client() -> None:
+    """The HTTP branch had no coverage at all — and it cannot be exercised by
+    connecting, because that would need a server. Nothing here opens a socket:
+    ``streamable_http_client`` only builds a context manager, and an
+    ``httpx2.AsyncClient`` connects on first use."""
+    config = McpServerConfig(
+        name="remote",
+        transport="http",
+        url="https://mcp.example.test/sse",
+        headers={"Authorization": "Bearer s3cret"},
+    )
+
+    spec = default_target(config)
+
+    http_client = spec.closers[0]
+    assert isinstance(http_client, httpx2.AsyncClient)
+    # `Client(...)` takes no headers= or timeout= in the 2.x SDK: they live on
+    # this client, and it is the caller's to close — hence the closer.
+    assert http_client.headers["Authorization"] == "Bearer s3cret"
+    assert http_client.timeout.connect == HTTP_CONNECT_TIMEOUT_S
+    assert http_client.timeout.read == HTTP_READ_TIMEOUT_S
+    # The transport is built around the configured URL and that same client.
+    assert spec.server.args[0] == "https://mcp.example.test/sse"
+    assert spec.server.kwds["http_client"] is http_client
+
+    await http_client.aclose()
+
+
+def test_default_target_builds_stdio_parameters_for_a_command() -> None:
+    config = McpServerConfig(
+        name="files",
+        transport="stdio",
+        command="npx",
+        args=["-y", "@modelcontextprotocol/server-filesystem"],
+        env={"API_TOKEN": "s3cret"},
+        cwd="/data",
+    )
+
+    spec = default_target(config)
+
+    assert spec.closers == ()
+    assert spec.server.command == "npx"
+    assert spec.server.args == ["-y", "@modelcontextprotocol/server-filesystem"]
+    assert spec.server.env == {"API_TOKEN": "s3cret"}
+    assert spec.server.cwd == "/data"
