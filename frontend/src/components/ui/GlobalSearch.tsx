@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
 
 import {
@@ -12,6 +12,7 @@ import {
 import useDebouncedValue from '../../lib/useDebouncedValue'
 import { formatNoteDate } from '../notes/noteDate'
 import { OVERLAY_BACKDROP, OVERLAY_PANEL, SECTION_LABEL, cx } from './classes'
+import { useModalPanel } from './modal'
 
 const DEBOUNCE_MS = 250
 
@@ -39,28 +40,9 @@ export interface GlobalSearchProps {
  * though the shell owns the open flag, so there is one listener for one binding.
  */
 export default function GlobalSearch({ open, onOpenChange }: GlobalSearchProps) {
-  const navigate = useNavigate()
+  // The query outlives the overlay: reopening ⌘K usually means refining the last
+  // search, and the panel selects what is there so one keystroke replaces it.
   const [query, setQuery] = useState('')
-  const [activeIndex, setActiveIndex] = useState(0)
-  const inputRef = useRef<HTMLInputElement>(null)
-
-  const debounced = useDebouncedValue(query, DEBOUNCE_MS)
-  const trimmed = debounced.trim()
-  const ready = trimmed.length >= MIN_SEARCH_CHARS
-
-  const results = useQuery({
-    queryKey: searchQueryKey(trimmed),
-    queryFn: () => fetchSearch(trimmed),
-    enabled: open && ready,
-  })
-
-  const groups = useMemo(
-    () => GROUPS.map((group) => ({ ...group, hits: results.data?.[group.key] ?? [] })),
-    [results.data],
-  )
-  // One flat list behind the three rendered ones, so the arrow keys can walk
-  // across group boundaries without the groups having to know about each other.
-  const flat = useMemo(() => groups.flatMap((group) => group.hits), [groups])
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -73,37 +55,68 @@ export default function GlobalSearch({ open, onOpenChange }: GlobalSearchProps) 
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [onOpenChange])
 
-  // Focus and select on open: reopening usually means refining the last search,
-  // and a selected value is one keystroke from either outcome.
-  useEffect(() => {
-    if (open) {
-      inputRef.current?.focus()
-      inputRef.current?.select()
-    }
-  }, [open])
-
   if (!open) {
     return null
   }
+  return <SearchOverlay query={query} onQueryChange={setQuery} onClose={() => onOpenChange(false)} />
+}
 
-  const close = () => {
-    // Reset here rather than on open: closing is what makes the highlighted row
-    // stale, and doing it on the way out keeps the open effect to focus alone.
-    setActiveIndex(0)
-    onOpenChange(false)
-  }
+interface SearchOverlayProps {
+  query: string
+  onQueryChange: (query: string) => void
+  onClose: () => void
+}
 
-  const openHit = (hit: SearchHit) => {
-    close()
-    navigate(hit.link)
-  }
+/**
+ * The overlay proper, mounted only while it is open.
+ *
+ * A separate component so it can be a real modal: `useModalPanel` needs a mount
+ * to focus on, an unmount to hand focus back on, and a live panel to cycle Tab
+ * inside. Rendering `null` from one long-lived component gave it none of those —
+ * the panel said `aria-modal` while Escape only worked from the input and Tab
+ * walked straight out onto the page behind.
+ */
+function SearchOverlay({ query, onQueryChange, onClose }: SearchOverlayProps) {
+  const navigate = useNavigate()
+  const [activeIndex, setActiveIndex] = useState(0)
+  const inputRef = useRef<HTMLInputElement>(null)
+  const panelRef = useModalPanel<HTMLDivElement>(onClose)
 
+  const debounced = useDebouncedValue(query, DEBOUNCE_MS)
+  const trimmed = debounced.trim()
+  const ready = trimmed.length >= MIN_SEARCH_CHARS
+
+  const results = useQuery({
+    queryKey: searchQueryKey(trimmed),
+    queryFn: () => fetchSearch(trimmed),
+    enabled: ready,
+  })
+
+  const groups = useMemo(
+    () => GROUPS.map((group) => ({ ...group, hits: results.data?.[group.key] ?? [] })),
+    [results.data],
+  )
+  // One flat list behind the three rendered ones, so the arrow keys can walk
+  // across group boundaries without the groups having to know about each other.
+  const flat = useMemo(() => groups.flatMap((group) => group.hits), [groups])
+
+  // `useModalPanel` has already focused the input — the first focusable thing in
+  // the panel — so this is only about what a keystroke would replace.
+  useEffect(() => {
+    inputRef.current?.select()
+  }, [])
+
+  const openHit = useCallback(
+    (hit: SearchHit) => {
+      onClose()
+      navigate(hit.link)
+    },
+    [navigate, onClose],
+  )
+
+  // Escape and Tab belong to `useModalPanel`, which listens on the document, so
+  // they work from a result button as well as from the input.
   const onKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
-    if (event.key === 'Escape') {
-      event.preventDefault()
-      close()
-      return
-    }
     if (flat.length === 0) {
       return
     }
@@ -124,11 +137,12 @@ export default function GlobalSearch({ open, onOpenChange }: GlobalSearchProps) 
       className={cx(OVERLAY_BACKDROP, 'flex items-start justify-center px-6 pt-24 pb-6')}
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) {
-          close()
+          onClose()
         }
       }}
     >
       <div
+        ref={panelRef}
         role="dialog"
         aria-modal="true"
         aria-label="Search items, chats and notes"
@@ -141,14 +155,14 @@ export default function GlobalSearch({ open, onOpenChange }: GlobalSearchProps) 
           placeholder="Search items, chats and notes…"
           aria-label="Search items, chats and notes"
           onChange={(event) => {
-            setQuery(event.target.value)
+            onQueryChange(event.target.value)
             // Reset the highlighted row here rather than in an effect on the
             // results: the keystroke is what invalidated the old selection.
             setActiveIndex(0)
           }}
           onKeyDown={onKeyDown}
-          // No focus ring: it is the only focusable thing in the panel and it is
-          // focused the moment the panel appears, so a ring says nothing.
+          // No focus ring: it is focused the moment the panel appears, and a
+          // ring on the thing you are already typing into says nothing.
           className="w-full border-b border-line bg-transparent px-4 py-3.5 text-[14px] text-ink outline-none focus-visible:outline-none"
         />
 

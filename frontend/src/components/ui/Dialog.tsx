@@ -1,7 +1,8 @@
-import { useEffect, useId, useRef, type ReactNode } from 'react'
+import { useId, type ReactNode } from 'react'
 
 import IconButton from './IconButton'
 import { OVERLAY_BACKDROP, OVERLAY_PANEL, cx } from './classes'
+import { useModalPanel } from './modal'
 
 export type DialogWidth = 'sm' | 'md' | 'lg'
 
@@ -25,10 +26,6 @@ const WIDTHS: Record<DialogWidth, string> = {
   lg: 'max-w-[720px]',
 }
 
-const FOCUSABLE =
-  'a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),' +
-  'textarea:not([disabled]),[tabindex]:not([tabindex="-1"])'
-
 /**
  * A modal.
  *
@@ -49,42 +46,8 @@ export default function Dialog({
   hideClose = false,
   className,
 }: DialogProps) {
-  const panelRef = useRef<HTMLDivElement>(null)
+  const panelRef = useModalPanel<HTMLDivElement>(onClose)
   const titleId = useId()
-
-  // Focus in on mount, back out on unmount.
-  useEffect(() => {
-    const previous = document.activeElement as HTMLElement | null
-    const panel = panelRef.current
-    ;(panel?.querySelector<HTMLElement>(FOCUSABLE) ?? panel)?.focus()
-    return () => previous?.focus?.()
-  }, [])
-
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        event.preventDefault()
-        onClose()
-        return
-      }
-      const panel = panelRef.current
-      if (event.key !== 'Tab' || !panel) {
-        return
-      }
-      const focusable = [...panel.querySelectorAll<HTMLElement>(FOCUSABLE)]
-      if (focusable.length === 0) {
-        return
-      }
-      const edge = event.shiftKey ? focusable[0] : focusable[focusable.length - 1]
-      if (document.activeElement === edge) {
-        event.preventDefault()
-        ;(event.shiftKey ? focusable[focusable.length - 1] : focusable[0]).focus()
-      }
-    }
-
-    document.addEventListener('keydown', onKeyDown)
-    return () => document.removeEventListener('keydown', onKeyDown)
-  }, [onClose])
 
   return (
     <div

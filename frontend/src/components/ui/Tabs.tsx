@@ -15,10 +15,13 @@ export interface TabsProps<T extends string> {
 }
 
 /**
- * The segmented control: one sunken track, the active tab raised out of it.
+ * The segmented control: one sunken track, the active pill raised out of it.
  *
- * Buttons in a `tablist` rather than radio inputs — these switch a view, they do
- * not submit a value.
+ * A group of toggle buttons, not a `tablist`. Tabs owe a screen reader an
+ * `aria-controls` pointing at a `tabpanel` they show and hide; this control
+ * filters a list that is already on the page and goes on being the same list, so
+ * there is no panel to name. `aria-pressed` says the true thing — "Starred,
+ * pressed" — without promising a relationship that does not exist.
  */
 export default function Tabs<T extends string>({
   tabs,
@@ -29,7 +32,7 @@ export default function Tabs<T extends string>({
 }: TabsProps<T>) {
   return (
     <div
-      role="tablist"
+      role="group"
       aria-label={label}
       className={cx('inline-flex rounded-[8px] bg-panel2 p-[2px]', className)}
     >
@@ -39,8 +42,7 @@ export default function Tabs<T extends string>({
           <button
             key={tab.value}
             type="button"
-            role="tab"
-            aria-selected={active}
+            aria-pressed={active}
             onClick={() => onChange(tab.value)}
             className={cx(
               'rounded-[6px] px-3 py-[5px] text-[12px] font-medium transition-colors duration-150',
