@@ -47,7 +47,7 @@ like a hung connection.
 | `app/db/util.py` | `escape_like` / `LIKE_ESCAPE_CHAR` — the one escaping rule for every `LIKE`. |
 | `app/schemas/` | Pydantic request/response models, one module per domain. |
 | `app/api/` | Routers (`health`, `settings`, `models`, `feeds`, `items`, `sessions`, `mcp`) wired in `app/api/__init__.py`; `deps.py`; `tasks.py` (**not** a router — the cancel registry). |
-| `app/services/` | Domain logic, no FastAPI imports: `settings` (kv store), `feeds` (ingest), `extract` (trafilatura), `items` (inbox queries + keyset cursor), `http` (UA/timeout policy + the browser-TLS transport), `url_guard` (SSRF), `anthropic_models` (model list + key check, 1 h in-process cache keyed on a digest of the key). |
+| `app/services/` | Domain logic, no FastAPI imports: `settings` (kv store), `feeds` (ingest), `extract` (trafilatura), `items` (inbox queries + keyset cursor), `http` (UA/timeout policy), `url_guard` (SSRF), `anthropic_models` (model list + key check, 1 h in-process cache keyed on a digest of the key). |
 | `app/agent/` | The agent loop and tool registry — see `app/agent/CLAUDE.md`. |
 | `app/mcp/` | The MCP client — see `app/mcp/CLAUDE.md`. |
 
@@ -86,52 +86,6 @@ Keys: `anthropic_api_key` (""), `model` (`claude-opus-5`), `effort` (`high`),
 `get_effective_api_key(session)` — `ANTHROPIC_API_KEY` from the process environment wins
 over the stored value and is never written back. `mask_key` is the only shape the key may
 take in a response or a log. `seed_defaults` only inserts missing keys.
-
-## Outbound fetching: the two clients (`app/services/http.py`)
-
-**`USER_AGENT` must not claim to be a browser.** It used to send a desktop Chrome
-UA; Cloudflare scores the *consistency* of a client, so claiming Chrome over an
-httpx/OpenSSL handshake reads as a spoofed browser and earns a managed challenge.
-That single header was why `bleepingcomputer.com` answered **403** for both its
-feed and every article page, while the same client with a Firefox, Safari, robot
-or empty UA got 200. The UA now names the application in the conventional
-`Mozilla/5.0 (compatible; ...)` robot form. The full probe table is in
-`.superpowers/sdd/.../feeds-403-report.md` — **re-run it before changing this**.
-
-`build_client` is the ordinary client. `build_impersonating_client` returns one
-whose transport is `ImpersonatingTransport` (libcurl via `curl_cffi`,
-`impersonate="chrome"`), for sites that decide on the **TLS ClientHello** and that
-no header can reach — CISA's Akamai config is the live example, and it 403s
-CPython+OpenSSL 3.0 (which is what the Docker image has) while serving curl and
-browsers. It returns `None` when the wheel is absent, so a missing dependency
-degrades to an error message rather than a failed start.
-
-Two rules hold for it:
-
-- It is **an httpx transport, not a second fetching path**, so `fetch_guarded`
-  still drives every request: manual redirects, per-hop address validation, the
-  byte ceiling, the whole-fetch timeout. Anything that bypassed `fetch_guarded`
-  would be a hole in the SSRF guard.
-- `_CurlByteStream.aclose` **sets `quit_now` before closing**. curl_cffi's async
-  `aclose()` (unlike its sync `close()`) does not, and its write callback only
-  aborts when that flag is set — so without it, hitting the byte ceiling would
-  still pull the entire body into an unbounded queue.
-
-Both `feeds.refresh_feeds` and `extract.extract_article` retry **once, only on
-403**, through that client. Each takes an `impersonate_transport=` seam alongside
-`transport=`; a caller that passes `transport` **alone gets no retry**, which is
-what keeps a 403 fixture in the test suite off the network.
-
-Three more ingest invariants worth not re-litigating (`app/services/feeds.py`):
-
-- A feed that parses cleanly with **zero entries is `last_status="ok"`**, not an
-  error. Only "no entries *and* the parser complained" is an error, and on that
-  branch feedparser's salvaged title is deliberately **not** adopted.
-- `feed_items` inserts go in chunks of `INSERT_CHUNK_ROWS` (500 × 10 bound
-  parameters), inside one transaction, so a feed of several thousand entries
-  cannot outrun SQLite's parameter ceiling.
-- A 403 surfaces as `BOT_PROTECTION_ERROR`, never the response body — a challenge
-  page is several KB of markup that helps nobody.
 
 ## Endpoints
 
@@ -188,7 +142,7 @@ waiting on the event queue; on cancel it emits `error(cancelled)` then `done`.
 
 ## Tests (`backend/tests/`)
 
-`make test` → `uv run pytest` (505 tests on this branch, ~14 s). Layout: one
+`make test` → `uv run pytest` (326 tests on this branch, ~9 s). Layout: one
 `test_<area>.py` per area, `fakes/` for client stand-ins, `fixtures/` for XML/HTML,
 `feed_fixtures.py` for the mock HTTP layer.
 
@@ -222,9 +176,6 @@ Fakes:
   `app/mcp/CLAUDE.md`.
 - `tests/feed_fixtures.py` — `routes_transport({url: Response|Exception|callable})` over
   `httpx2.MockTransport`, recording every outgoing request (UA assertions).
-- `tests/test_http_client.py` — the outbound header policy and the browser-TLS
-  transport, with a fake `curl_cffi` session. The fake models `quit_now` because
-  that flag is the whole point of the transport's `aclose` (see below).
 
 ## How to add ...
 
