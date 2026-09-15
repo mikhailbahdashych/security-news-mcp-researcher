@@ -6,8 +6,7 @@ through ``PUT /api/settings`` and is only ever read back masked.
 
 from __future__ import annotations
 
-import logging
-from typing import Any, get_args
+from typing import Any, cast
 
 from fastapi import APIRouter
 
@@ -22,8 +21,6 @@ from app.schemas.settings import (
 from app.services import anthropic_models
 from app.services import settings as settings_service
 
-logger = logging.getLogger(__name__)
-
 router = APIRouter(tags=["settings"])
 
 
@@ -34,32 +31,17 @@ def _as_text(value: Any) -> str:
     return str(value)
 
 
-def _one_of[T: str](value: str, allowed: tuple[T, ...], key: str) -> T:
-    """The stored value if it is one of ``allowed``, else that key's default.
-
-    ``PUT /api/settings`` validates both of these fields, so the only way an
-    unknown value gets in is a hand-edited database — and answering that with a
-    500 from response validation would lock the user out of the Settings page
-    that could fix it. The frontend keeps its own "(unknown value)" option for
-    the same reason: neither side trusts the other to have coerced first.
-    """
-    if value in allowed:
-        return value  # type: ignore[return-value]
-    logger.warning("Stored %s is not a known value; falling back to the default", key)
-    return settings_service.DEFAULT_SETTINGS[key]  # type: ignore[return-value]
-
-
 async def _read(session: DbSession, settings: AppSettings) -> SettingsRead:
     api_key = await settings_service.get_str(session, "anthropic_api_key")
     return SettingsRead(
         model=await settings_service.get_str(session, "model"),
-        effort=_one_of(
-            await settings_service.get_str(session, "effort"), get_args(Effort), "effort"
-        ),
-        thinking_display=_one_of(
-            await settings_service.get_str(session, "thinking_display"),
-            get_args(ThinkingDisplay),
-            "thinking_display",
+        # Coerced in the service, not here, so that the turn settings read the
+        # same value this page shows — see `settings_service.ALLOWED_VALUES`.
+        # The frontend keeps its own "(unknown value)" option regardless:
+        # neither side trusts the other to have coerced first.
+        effort=cast(Effort, await settings_service.get_choice(session, "effort")),
+        thinking_display=cast(
+            ThinkingDisplay, await settings_service.get_choice(session, "thinking_display")
         ),
         # "a key is stored in *this database*" — deliberately not "a key is
         # usable", which is what ``key_source`` answers: an ``ANTHROPIC_API_KEY``

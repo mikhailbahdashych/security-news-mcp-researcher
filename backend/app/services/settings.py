@@ -12,6 +12,7 @@ The raw API key must never reach a response body or a log line — use
 
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Mapping
 from typing import Literal
@@ -22,6 +23,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
 from app.db.models import Setting, utcnow
+
+logger = logging.getLogger(__name__)
 
 API_KEY_ENV_VAR = "ANTHROPIC_API_KEY"
 
@@ -50,6 +53,22 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "note_template": DEFAULT_NOTE_TEMPLATE,
     "system_prompt_extra": "",
     "feed_timeout_s": "15",
+}
+
+#: Settings whose value is one of a closed set, and what that set is.
+#:
+#: The single source for both readers: ``GET /api/settings`` renders these and
+#: ``app.agent.providers.turn_settings`` sends them to the API. They used to
+#: coerce separately — the page repaired a hand-edited ``effort`` for display
+#: while the turn still sent the raw value, so the user saw "high" and every
+#: message came back 400 with nothing connecting the two.
+#:
+#: ``tests/test_settings_service.py`` pins these against the ``Literal``s in
+#: ``app.schemas.settings``, which is where the API's own promise lives; the
+#: service deliberately does not import them, so the layering stays one-way.
+ALLOWED_VALUES: dict[str, tuple[str, ...]] = {
+    "effort": ("low", "medium", "high", "xhigh", "max"),
+    "thinking_display": ("summarized", "omitted"),
 }
 
 _TRUE_VALUES = frozenset({"true", "1", "yes", "on"})
@@ -123,6 +142,26 @@ async def get_str(session: AsyncSession, key: str) -> str:
     if value is None:
         return DEFAULT_SETTINGS.get(key, "")
     return value
+
+
+async def get_choice(session: AsyncSession, key: str) -> str:
+    """A setting from :data:`ALLOWED_VALUES`, falling back to its default.
+
+    ``PUT /api/settings`` validates these fields, so the only way an unknown
+    value gets in is a hand-edited database. Answering that with a 500 from
+    response validation would lock the user out of the Settings page that could
+    fix it, and sending it to the Anthropic API would 400 every message — so it
+    is coerced here, once, for every caller, and the row is left for the next
+    PUT to overwrite. The warning is the only trace that it is being ignored.
+    """
+    allowed = ALLOWED_VALUES[key]
+    value = await get_str(session, key)
+    if value in allowed:
+        return value
+    logger.warning(
+        "Stored %s is not one of %s; falling back to the default", key, ", ".join(allowed)
+    )
+    return DEFAULT_SETTINGS[key]
 
 
 async def get_bool(session: AsyncSession, key: str) -> bool:
@@ -208,6 +247,7 @@ def _parse_int(value: str | None, key: str) -> int:
 
 
 __all__ = [
+    "ALLOWED_VALUES",
     "API_KEY_ENV_VAR",
     "DEFAULT_NOTE_TEMPLATE",
     "DEFAULT_SETTINGS",
@@ -216,6 +256,7 @@ __all__ = [
     "get",
     "get_all",
     "get_bool",
+    "get_choice",
     "get_effective_api_key",
     "get_int",
     "get_key_source",

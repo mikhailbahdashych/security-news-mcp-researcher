@@ -1,5 +1,7 @@
 """`/api/settings`, `/api/settings/test-key` and the raw-key-leak guarantee."""
 
+import logging
+
 import anthropic
 import httpx2
 import pytest
@@ -167,7 +169,7 @@ async def test_test_key_survives_an_api_error_that_is_neither_status_nor_connect
     [("effort", "turbo", "high"), ("thinking_display", "loud", "summarized")],
 )
 async def test_an_off_union_stored_value_falls_back_to_the_default(
-    client: httpx2.AsyncClient, db_session, key: str, stored: str, expected: str
+    client: httpx2.AsyncClient, db_session, caplog, key: str, stored: str, expected: str
 ) -> None:
     """Both fields are closed sets in the response model, and the store behind
     them is TEXT. A hand-edited row must not turn the Settings page — the one
@@ -178,10 +180,14 @@ async def test_an_off_union_stored_value_falls_back_to_the_default(
     # on a write that never landed, since the fallback *is* the seeded value.
     assert await settings_service.get(db_session, key) == stored
 
-    response = await client.get("/api/settings")
+    with caplog.at_level(logging.WARNING, logger="app.services.settings"):
+        response = await client.get("/api/settings")
 
     assert response.status_code == 200
     assert response.json()[key] == expected
+    # A coercion the user cannot see in the response has to be visible somewhere.
+    assert key in caplog.text
+    assert "falling back" in caplog.text
     # Reading is not repairing: the row is left for the next PUT to overwrite.
     assert await settings_service.get(db_session, key) == stored
 
