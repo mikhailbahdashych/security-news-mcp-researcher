@@ -20,7 +20,7 @@ export default function RefreshSummary({ result, feeds, onDismiss }: RefreshSumm
   const failed = result.results.filter((entry) => entry.error)
 
   return (
-    <div className={cx(CARD, 'px-4 py-3')}>
+    <div className={cx(CARD, 'bg-panel px-4 py-3')}>
       <div className="flex items-start justify-between gap-3">
         <p className="text-[12px] font-medium text-ink">
           {result.total_new} new {result.total_new === 1 ? 'item' : 'items'} from{' '}

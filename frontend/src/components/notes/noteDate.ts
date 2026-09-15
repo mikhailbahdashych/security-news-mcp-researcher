@@ -1,4 +1,4 @@
-import { parseUtc } from '../../api/inbox'
+import { parseUtc } from '../../lib/dates'
 
 /**
  * A note timestamp in the reader's locale, to the minute.

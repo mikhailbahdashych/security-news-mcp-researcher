@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react'
 import { whenLabel, type ResearchSession } from '../../api/chat'
 import Button from '../ui/Button'
 import Checkbox from '../ui/Checkbox'
+import ConfirmDialog from '../ui/ConfirmDialog'
 import Icon from '../ui/Icon'
 import IconButton from '../ui/IconButton'
 import Input from '../ui/Input'
@@ -58,12 +59,18 @@ export default function HistoryDrawer({
   const [editingId, setEditingId] = useState<number | null>(null)
   const [menuId, setMenuId] = useState<number | null>(null)
   const [draft, setDraft] = useState('')
+  const [pendingDelete, setPendingDelete] = useState<ResearchSession | null>(null)
 
-  // Escape unwinds one layer at a time: the row menu, then a rename in
-  // progress, then the drawer. Closing everything at once loses the edit.
+  // Escape unwinds one layer at a time: the confirm dialog, the row menu, then a
+  // rename in progress, then the drawer. Closing everything at once loses the
+  // edit — or answers a question the user was still reading.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') {
+        return
+      }
+      if (pendingDelete !== null) {
+        // The dialog is modal and closes itself; this listener stays out of it.
         return
       }
       if (menuId !== null) {
@@ -76,7 +83,7 @@ export default function HistoryDrawer({
     }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
-  }, [editingId, menuId, onClose])
+  }, [editingId, menuId, onClose, pendingDelete])
 
   const commit = (id: number) => {
     const title = draft.trim()
@@ -90,20 +97,6 @@ export default function HistoryDrawer({
     setDraft(session.title ?? '')
     setEditingId(session.id)
     setMenuId(null)
-  }
-
-  const confirmDelete = (session: ResearchSession) => {
-    setMenuId(null)
-    const name = session.title || 'this chat'
-    // Spelled out because the two halves have different fates, and a user who
-    // thinks the write-up goes too will never press the button.
-    const message =
-      `Delete "${name}"?\n\n` +
-      'Its messages and tool calls are deleted permanently. ' +
-      'Notes generated from it are kept — they just stop linking back here.'
-    if (window.confirm(message)) {
-      onDelete(session.id)
-    }
   }
 
   return (
@@ -212,7 +205,14 @@ export default function HistoryDrawer({
                     >
                       {session.archived ? 'Unarchive' : 'Archive'}
                     </MenuItem>
-                    <MenuItem icon="trash" danger onClick={() => confirmDelete(session)}>
+                    <MenuItem
+                      icon="trash"
+                      danger
+                      onClick={() => {
+                        setMenuId(null)
+                        setPendingDelete(session)
+                      }}
+                    >
                       Delete
                     </MenuItem>
                   </div>
@@ -238,6 +238,30 @@ export default function HistoryDrawer({
           label={<span className="text-[11px] font-normal text-muted">Show archived</span>}
         />
       </div>
+
+      {pendingDelete ? (
+        <ConfirmDialog
+          title="Delete chat"
+          // Spelled out because the two halves have different fates, and a user
+          // who thinks the write-up goes too will never press the button.
+          message={
+            <>
+              “{pendingDelete.title || 'This chat'}” and every message and tool call in it will be
+              deleted permanently. Notes generated from it are kept — they just stop linking back
+              here.
+            </>
+          }
+          confirmLabel="Delete chat"
+          busy={busyId === pendingDelete.id}
+          onCancel={() => setPendingDelete(null)}
+          onConfirm={() => {
+            // The row greys out while the delete is in flight and leaves the
+            // list when it lands, which is the whole of the feedback needed.
+            onDelete(pendingDelete.id)
+            setPendingDelete(null)
+          }}
+        />
+      ) : null}
     </div>
   )
 }

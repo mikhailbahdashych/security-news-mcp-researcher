@@ -27,11 +27,12 @@ import ManageFeeds from '../components/inbox/ManageFeeds'
 import GenerateNotesDialog from '../components/notes/GenerateNotesDialog'
 import RefreshSummary from '../components/inbox/RefreshSummary'
 import StatusBadge from '../components/inbox/StatusBadge'
-import useDebouncedValue from '../components/inbox/useDebouncedValue'
 import Button from '../components/ui/Button'
+import Card from '../components/ui/Card'
 import EmptyState from '../components/ui/EmptyState'
 import PageHeader from '../components/ui/PageHeader'
-import { CARD, cx } from '../components/ui/classes'
+import { cx } from '../components/ui/classes'
+import useDebouncedValue from '../lib/useDebouncedValue'
 import Page from './Page'
 
 /** `?status=` from a deep link, if it names a filter we actually have. */
@@ -223,12 +224,10 @@ export default function InboxPage({ embedded = false }: EmbeddablePageProps) {
         onSearchChange={setSearch}
       />
 
-      {/*
-        Not a `Card`: the primitive clips its overflow, and a clipped ancestor is
-        its own scrollport — which would pin the bulk bar to the bottom of the
-        card instead of to the bottom of the viewport.
-      */}
-      <div className={CARD}>
+      {/* `overflow="visible"`: a clipped ancestor is its own scrollport, which
+          would pin the bulk bar to the bottom of the card rather than to the
+          bottom of the viewport. */}
+      <Card padded={false} overflow="visible">
         {itemsQuery.isPending || itemsQuery.isError ? null : (
           <div className="flex items-center gap-2.5 px-4 py-2">
             {items.length > 0 ? (
@@ -306,7 +305,7 @@ export default function InboxPage({ embedded = false }: EmbeddablePageProps) {
             onClear={() => setSelected(new Set())}
           />
         ) : null}
-      </div>
+      </Card>
 
       {itemsQuery.hasNextPage ? (
         <Button

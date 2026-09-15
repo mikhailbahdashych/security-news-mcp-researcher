@@ -38,8 +38,11 @@ export default function IconButton({
     <button
       {...rest}
       type={type}
-      title={label}
-      aria-label={label}
+      // `label` is the default, not the law: these come after the spread, so a
+      // caller passing a fuller tooltip (or a different accessible name) used to
+      // have it silently thrown away.
+      title={rest.title ?? label}
+      aria-label={rest['aria-label'] ?? label}
       aria-pressed={active ? true : undefined}
       className={cx(
         'inline-flex shrink-0 items-center justify-center rounded-[8px] p-1.5',

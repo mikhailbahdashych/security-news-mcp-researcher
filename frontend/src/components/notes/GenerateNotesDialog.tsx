@@ -15,7 +15,7 @@ import {
 import { fetchSettings, settingsQueryKey } from '../../api/settings'
 import { SSEHttpError, streamSSE } from '../../lib/sse'
 import TurnError from '../chat/TurnError'
-import useDebouncedValue from '../inbox/useDebouncedValue'
+import useDebouncedValue from '../../lib/useDebouncedValue'
 import Button from '../ui/Button'
 import Dialog from '../ui/Dialog'
 import Icon from '../ui/Icon'

@@ -1,5 +1,5 @@
 import { apiDelete, apiGet, apiPatch, apiPost } from './client'
-import { parseUtc } from './inbox'
+import { parseUtc } from '../lib/dates'
 
 export interface ResearchSession {
   id: number

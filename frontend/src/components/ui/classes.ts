@@ -55,8 +55,11 @@ export function controlClass(tone: ControlTone = 'panel', extra?: string): strin
   )
 }
 
-/** The page-level card every list, section and article sits in. */
-export const CARD = 'rounded-[12px] border border-line bg-panel'
+/** The page-level card every list, section and article sits in.
+ *  Shape only: the background belongs to the tone (see `Card`), because two
+ *  `bg-*` utilities on one element are resolved by the CSS order rather than by
+ *  the class list — which made `tone="panel2"` a coin toss. */
+export const CARD = 'rounded-[12px] border border-line'
 
 /** A row inside a card: pointer feedback without a colour change of its own. */
 export const HOVER_ROW = 'transition-colors duration-150 hover:bg-hover'

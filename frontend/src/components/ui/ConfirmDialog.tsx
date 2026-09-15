@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react'
 
-import Button from '../ui/Button'
-import Dialog from '../ui/Dialog'
+import Button from './Button'
+import Dialog from './Dialog'
 
 export interface ConfirmDialogProps {
   title: string

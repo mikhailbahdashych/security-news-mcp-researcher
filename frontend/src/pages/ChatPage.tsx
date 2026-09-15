@@ -28,12 +28,12 @@ import EmptyResearch from '../components/chat/EmptyResearch'
 import HistoryDrawer from '../components/chat/HistoryDrawer'
 import TurnError from '../components/chat/TurnError'
 import { emptyTurn, liveSteps, liveTurnReducer } from '../components/chat/liveTurn'
-import useDebouncedValue from '../components/inbox/useDebouncedValue'
 import GenerateNotesDialog from '../components/notes/GenerateNotesDialog'
 import Button from '../components/ui/Button'
 import IconButton from '../components/ui/IconButton'
 import type { EmbeddablePageProps } from '../components/ui/PageHost'
 import { SSEHttpError, streamSSE } from '../lib/sse'
+import useDebouncedValue from '../lib/useDebouncedValue'
 
 /** What the Inbox's "Research these" button hands over. */
 export interface ChatNavigationState {

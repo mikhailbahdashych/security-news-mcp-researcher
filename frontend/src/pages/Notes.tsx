@@ -9,18 +9,18 @@ import {
   notesQueryKey,
   type NoteSummary,
 } from '../api/notes'
-import useDebouncedValue from '../components/inbox/useDebouncedValue'
-import ConfirmDialog from '../components/notes/ConfirmDialog'
 import GenerateNotesDialog from '../components/notes/GenerateNotesDialog'
 import { formatNoteDate, formatNoteDay } from '../components/notes/noteDate'
 import Button from '../components/ui/Button'
 import Card from '../components/ui/Card'
+import ConfirmDialog from '../components/ui/ConfirmDialog'
 import EmptyState from '../components/ui/EmptyState'
 import IconButton from '../components/ui/IconButton'
 import Input from '../components/ui/Input'
 import PageHeader from '../components/ui/PageHeader'
 import { HOVER_ROW, cx } from '../components/ui/classes'
 import type { EmbeddablePageProps } from '../components/ui/PageHost'
+import useDebouncedValue from '../lib/useDebouncedValue'
 import NoteDetailPage from './NoteDetail'
 import Page from './Page'
 

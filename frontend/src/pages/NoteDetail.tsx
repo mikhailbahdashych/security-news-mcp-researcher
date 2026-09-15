@@ -12,11 +12,11 @@ import {
   type Note,
   type NoteSource,
 } from '../api/notes'
-import ConfirmDialog from '../components/notes/ConfirmDialog'
-import NoteArticle from '../components/notes/NoteArticle'
+import Markdown from '../components/chat/Markdown'
 import { formatNoteDate, formatNoteDay } from '../components/notes/noteDate'
 import Button from '../components/ui/Button'
 import Card from '../components/ui/Card'
+import ConfirmDialog from '../components/ui/ConfirmDialog'
 import EmptyState from '../components/ui/EmptyState'
 import Input from '../components/ui/Input'
 import PageHeader from '../components/ui/PageHeader'
@@ -160,7 +160,7 @@ export default function NoteDetailPage({
       {copied ? <p className="text-[11.5px] text-faint">{copied}</p> : null}
 
       {editing ? (
-        <div className={cx(CARD, 'flex flex-col gap-3 px-6 py-5')}>
+        <div className={cx(CARD, 'flex flex-col gap-3 bg-panel px-6 py-5')}>
           <label className="flex flex-col gap-1.5">
             <span className={FIELD_LABEL}>Title</span>
             <Input
@@ -202,8 +202,11 @@ export default function NoteDetailPage({
           </div>
         </div>
       ) : (
-        <article className={cx(CARD, 'px-6 py-5')}>
-          <NoteArticle>{data.body_md}</NoteArticle>
+        <article className={cx(CARD, 'bg-panel px-6 py-5')}>
+          {/* `Markdown` is already the design's article column — 14px/1.65 on
+              `text-ink`, serif headings, accent links. There is nothing left for
+              a note to override. */}
+          <Markdown>{data.body_md}</Markdown>
         </article>
       )}
 

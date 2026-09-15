@@ -6,12 +6,12 @@ import {
   deleteFeed,
   feedLabel,
   feedsQueryKey,
-  parseUtc,
   seedDefaultFeeds,
   updateFeed,
   type Feed,
 } from '../../api/inbox'
 import { ApiError } from '../../api/client'
+import { parseUtc } from '../../lib/dates'
 import Badge from '../ui/Badge'
 import Button from '../ui/Button'
 import Dialog from '../ui/Dialog'

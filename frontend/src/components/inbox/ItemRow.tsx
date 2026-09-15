@@ -1,4 +1,5 @@
-import { parseUtc, type FeedItem, type ItemStatus } from '../../api/inbox'
+import type { FeedItem, ItemStatus } from '../../api/inbox'
+import { parseUtc } from '../../lib/dates'
 import IconButton from '../ui/IconButton'
 import { HOVER_ROW, cx } from '../ui/classes'
 

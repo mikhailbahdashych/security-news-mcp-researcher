@@ -9,7 +9,7 @@ import {
   type SearchHit,
   type SearchResults,
 } from '../../api/search'
-import useDebouncedValue from '../inbox/useDebouncedValue'
+import useDebouncedValue from '../../lib/useDebouncedValue'
 import { formatNoteDate } from '../notes/noteDate'
 import { OVERLAY_BACKDROP, OVERLAY_PANEL, SECTION_LABEL, cx } from './classes'
 

@@ -5,7 +5,7 @@ import { fetchItems, type FeedItem } from '../../api/inbox'
 import Icon from '../ui/Icon'
 import Input from '../ui/Input'
 import { PILL_DASHED, cx } from '../ui/classes'
-import useDebouncedValue from '../inbox/useDebouncedValue'
+import useDebouncedValue from '../../lib/useDebouncedValue'
 
 interface AttachmentPickerProps {
   attached: FeedItem[]
