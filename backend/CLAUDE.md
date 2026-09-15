@@ -251,7 +251,7 @@ Three more ingest invariants worth not re-litigating (`app/services/feeds.py`):
 
 ## Tests (`backend/tests/`)
 
-`make test` → `uv run pytest` (**~540 tests** once the cleanup PRs are in, ~15 s) then the frontend's vitest. One
+`make test` → `uv run pytest` (**563 tests** with the cleanup PRs in, ~14 s) then the frontend's vitest. One
 `test_<area>.py` per area, `fakes/` for client stand-ins, `fixtures/` for XML/HTML.
 
 There is **no `tests/__init__.py`**, so pytest puts `tests/` on `sys.path`: helpers are
