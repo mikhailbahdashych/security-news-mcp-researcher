@@ -1,11 +1,17 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Route, Routes, useLocation, useNavigate } from 'react-router-dom'
 
 import GlobalSearch from './components/ui/GlobalSearch'
 import PageHost from './components/ui/PageHost'
 import Rail from './components/ui/Rail'
 import { cx } from './components/ui/classes'
-import { pageFromPath, routeForPage, useLayout, type PageKey } from './components/ui/layout'
+import {
+  pageFromPath,
+  paneAFromUrl,
+  routeForPage,
+  useLayout,
+  type PageKey,
+} from './components/ui/layout'
 import { useRail } from './components/ui/railState'
 import { useTheme } from './components/ui/theme'
 import ChatPage from './pages/ChatPage'
@@ -83,13 +89,14 @@ export default function App() {
 }
 
 /**
- * Keeps the stored left pane and the URL saying the same thing.
+ * Keeps the stored left pane saying what the left pane is showing.
  *
- * Two things can move: the rail or a link changes the URL, or the Settings page
- * changes `paneA`. Which one moved decides who follows, so the refs remember
- * the last values seen rather than guessing from the current ones — that is
- * also what stops a deep link being overwritten by a stale stored pane on the
- * very first render.
+ * One direction only: the URL moves the preference, never the other way round.
+ * Everything that wants to move the left pane — the rail, the Settings select —
+ * navigates, so a preference that disagrees with the URL is always the stale
+ * one. That is what makes a reload with the split already on adopt the page it
+ * is actually displaying, instead of leaving Settings on screen while the
+ * preference (and the select reading it) still said Inbox.
  */
 function usePaneASync(
   split: boolean,
@@ -97,51 +104,10 @@ function usePaneASync(
   urlPage: PageKey,
   setPaneA: (page: PageKey) => void,
 ) {
-  const navigate = useNavigate()
-  const lastSplit = useRef(split)
-  const lastPaneA = useRef(paneA)
-  const lastUrl = useRef(urlPage)
-
-  // No dependency list: `layout` is a fresh object every render, so the guards
-  // below are the real condition. Every branch is idempotent, and the render it
-  // may trigger settles on the next pass.
+  const adopt = paneAFromUrl(split, paneA, urlPage)
   useEffect(() => {
-    const splitChanged = split !== lastSplit.current
-    lastSplit.current = split
-
-    if (!split) {
-      lastPaneA.current = paneA
-      lastUrl.current = urlPage
-      return
+    if (adopt !== null) {
+      setPaneA(adopt)
     }
-
-    // Turning the split on adopts whatever is already on screen.
-    if (splitChanged) {
-      lastPaneA.current = urlPage
-      lastUrl.current = urlPage
-      if (paneA !== urlPage) {
-        setPaneA(urlPage)
-      }
-      return
-    }
-
-    // Settings moved the left pane: the URL follows it.
-    if (paneA !== lastPaneA.current) {
-      lastPaneA.current = paneA
-      lastUrl.current = urlPage
-      if (paneA !== urlPage) {
-        navigate(routeForPage(paneA))
-      }
-      return
-    }
-
-    // The rail or a link moved the URL: the stored pane follows it.
-    if (urlPage !== lastUrl.current) {
-      lastUrl.current = urlPage
-      if (paneA !== urlPage) {
-        lastPaneA.current = urlPage
-        setPaneA(urlPage)
-      }
-    }
-  })
+  }, [adopt, setPaneA])
 }

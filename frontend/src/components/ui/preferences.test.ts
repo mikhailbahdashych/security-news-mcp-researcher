@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { DEFAULT_LAYOUT, pageFromPath, parseLayout, routeForPage } from './layout'
+import { DEFAULT_LAYOUT, pageFromPath, paneAFromUrl, parseLayout, routeForPage } from './layout'
 import { parseRail } from './railState'
 import { parseStoredTheme, resolveTheme } from './theme'
 
@@ -90,5 +90,33 @@ describe('routes', () => {
   it('treats an unknown path as the inbox, which is what `/` shows', () => {
     expect(pageFromPath('/nope')).toBe('inbox')
     expect(pageFromPath('')).toBe('inbox')
+  })
+})
+
+describe('paneAFromUrl', () => {
+  it('adopts the URL when the stored pane disagrees with it', () => {
+    // The bug this exists for: the split already on, a reload on /settings, and
+    // a stored pane of "inbox" left Settings on screen while the preference —
+    // and the Settings select reading it — still said Inbox. Picking "Inbox"
+    // there then wrote the value it already had and moved nothing.
+    expect(paneAFromUrl(true, 'inbox', 'settings')).toBe('settings')
+  })
+
+  it('asks for nothing when they already agree', () => {
+    expect(paneAFromUrl(true, 'notes', 'notes')).toBeNull()
+  })
+
+  it('leaves the preference alone while there is only one pane', () => {
+    // Single pane, the URL is the whole window: the stored left pane is what the
+    // split will open with, not a claim about what is on screen now.
+    expect(paneAFromUrl(false, 'inbox', 'settings')).toBeNull()
+  })
+
+  it('settles: what it asks for is a state it no longer asks about', () => {
+    // The effect has no dependency list and React re-runs effects on mount in
+    // StrictMode, so anything it asks for has to be a fixed point.
+    const next = paneAFromUrl(true, 'inbox', 'notes')
+    expect(next).toBe('notes')
+    expect(paneAFromUrl(true, next as 'notes', 'notes')).toBeNull()
   })
 })

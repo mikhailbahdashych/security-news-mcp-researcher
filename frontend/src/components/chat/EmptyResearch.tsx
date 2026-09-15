@@ -4,6 +4,8 @@ import Composer from './Composer'
 
 interface EmptyResearchProps {
   streaming: boolean
+  /** The split view's right pane: it did not ask for the caret. */
+  embedded: boolean
   attached: FeedItem[]
   onAttach: (item: FeedItem) => void
   onDetach: (id: number) => void
@@ -23,6 +25,7 @@ const SUGGESTIONS = [
 /** The page before there is anything to read. */
 export default function EmptyResearch({
   streaming,
+  embedded,
   attached,
   onAttach,
   onDetach,
@@ -39,7 +42,10 @@ export default function EmptyResearch({
 
         <Composer
           variant="hero"
-          autoFocus
+          // Focusing on mount is right for the page the user navigated to and
+          // wrong for a pane that merely appeared beside it — the caret would
+          // jump out of whatever they were reading on the left.
+          autoFocus={!embedded}
           streaming={streaming}
           attached={attached}
           onAttach={onAttach}

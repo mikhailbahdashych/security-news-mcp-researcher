@@ -136,7 +136,7 @@ export default function NoteDetailPage({
       <PageHeader
         back={backLink}
         title={heading}
-        subtitle={<Meta note={data} />}
+        subtitle={<Meta note={data} embedded={embedded} />}
         actions={
           editing ? null : (
             <>
@@ -224,8 +224,14 @@ export default function NoteDetailPage({
   )
 }
 
-/** `<date> · edited <date> · research session` — the line under the title. */
-function Meta({ note }: { note: Note }) {
+/**
+ * `<date> · edited <date> · research session` — the line under the title.
+ *
+ * Embedded there is no route to link to: this note is the split view's RIGHT
+ * pane, and a router `<Link>` here changed the URL, which swapped the *left*
+ * pane out from under the reader while the note they were reading stayed put.
+ */
+function Meta({ note, embedded }: { note: Note; embedded: boolean }) {
   return (
     <span className="text-faint" title={formatNoteDate(note.created_at)}>
       {formatNoteDay(note.created_at)}
@@ -235,12 +241,16 @@ function Meta({ note }: { note: Note }) {
       {note.session_id !== null ? (
         <>
           {' · '}
-          <Link
-            to={`/chat/${note.session_id}`}
-            className="text-muted underline underline-offset-2 hover:text-ink"
-          >
-            research session
-          </Link>
+          {embedded ? (
+            <span className="text-muted">research session</span>
+          ) : (
+            <Link
+              to={`/chat/${note.session_id}`}
+              className="text-muted underline underline-offset-2 hover:text-ink"
+            >
+              research session
+            </Link>
+          )}
         </>
       ) : null}
     </span>

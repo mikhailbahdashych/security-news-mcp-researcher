@@ -79,6 +79,7 @@ export default function NotesPage({ embedded = false }: EmbeddablePageProps) {
           isError={notes.isError}
           isEmpty={rows.length === 0}
           searching={debouncedSearch.trim() !== ''}
+          embedded={embedded}
         />
 
         <ul>
@@ -194,10 +195,12 @@ interface ListStateProps {
   isError: boolean
   isEmpty: boolean
   searching: boolean
+  /** No route to point at: this list is the split view's right pane. */
+  embedded: boolean
 }
 
 /** The states the list can be in before it has rows to show. */
-function ListState({ isPending, isError, isEmpty, searching }: ListStateProps) {
+function ListState({ isPending, isError, isEmpty, searching, embedded }: ListStateProps) {
   if (isPending) {
     return <EmptyState icon="spinner" title="Loading notes…" />
   }
@@ -222,9 +225,15 @@ function ListState({ isPending, isError, isEmpty, searching }: ListStateProps) {
       icon="notes"
       title="No notes yet."
       description={
-        <>
-          Star a few items in the <Link to="/">Inbox</Link>, then generate notes from them.
-        </>
+        // Embedded, this link would navigate the *other* pane — so it is only a
+        // link where it can take the reader somewhere they asked to go.
+        embedded ? (
+          'Star a few items in the Inbox, then generate notes from them.'
+        ) : (
+          <>
+            Star a few items in the <Link to="/">Inbox</Link>, then generate notes from them.
+          </>
+        )
       }
     />
   )

@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useId, useState, type ReactNode } from 'react'
+import { useLocation, useNavigate } from 'react-router-dom'
 
 import {
   EFFORTS,
@@ -31,6 +32,8 @@ import { FIELD_HINT } from '../components/ui/classes'
 import {
   PAGE_KEYS,
   PAGE_LABELS,
+  pageFromPath,
+  routeForPage,
   useLayout,
   type PageKey,
 } from '../components/ui/layout'
@@ -322,7 +325,19 @@ function SettingsForm({ settings }: { settings: AppSettings }) {
  */
 function LayoutSection() {
   const layout = useLayout()
+  const location = useLocation()
+  const navigate = useNavigate()
   const uid = useId()
+
+  // The left pane is the router's pane, so the URL — not the stored preference —
+  // is what is actually on screen there. Reading the preference let the select
+  // name a page other than the one next to it, and picking that page back wrote
+  // the value it already had, moving nothing.
+  const leftPane = pageFromPath(location.pathname)
+  const openOnTheLeft = (page: PageKey) => {
+    layout.setPaneA(page)
+    navigate(routeForPage(page))
+  }
 
   return (
     <SettingsSection title="Layout" description="Show two pages side by side in one window.">
@@ -339,8 +354,8 @@ function LayoutSection() {
               <Select
                 id={`${uid}-pane-a`}
                 tone="bg"
-                value={layout.paneA}
-                onChange={(event) => layout.setPaneA(event.target.value as PageKey)}
+                value={leftPane}
+                onChange={(event) => openOnTheLeft(event.target.value as PageKey)}
               >
                 <PaneOptions />
               </Select>

@@ -340,6 +340,7 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
       {empty ? (
         <EmptyResearch
           streaming={live.streaming}
+          embedded={embedded}
           meta={model ? `${model} · inbox first, then web` : undefined}
           {...attachProps}
         />
