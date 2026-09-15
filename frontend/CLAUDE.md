@@ -33,15 +33,20 @@ right, `GlobalSearch` above everything.
 `pages/Page.tsx` is the container every page but Research sits in: it owns the scroll
 and the column width (`PAGE_WIDTH` in `ui/classes.ts`). Research fills its pane and
 scrolls its answer column itself. Components are grouped by feature:
-`components/{inbox,chat,notes,settings}/`, plus the shared `components/ui/` and
-`components/BackendStatus.tsx` (rendered at the foot of the rail).
+`components/{inbox,chat,notes,settings}/`, plus the shared `components/ui/` (the
+primitives `Card`, `Dialog`, `ConfirmDialog`, `GlobalSearch`, `Select`, `Input`, … and
+the preference modules `layout.ts`, `railState.ts`, `theme.ts`, `storage.ts`,
+`modal.ts`, `searchKeys.ts`) and `components/BackendStatus.tsx` (rendered at the foot
+of the rail). `lib/ids.ts` wraps `crypto.randomUUID` with a fallback for insecure
+contexts.
 
 ### Split view and the `embedded` contract
 
 `ui/layout.ts` holds the four `PAGE_KEYS` (`inbox` / `research` / `notes` /
 `settings`), `routeForPage`, `pageFromPath` and the stored `LayoutState`
-(`{split, paneA, paneB}`). With `split` on, the shell renders the router's `<Routes>`
-in the left pane and `<PageHost page={paneB} embedded />` in the right one.
+(`{split, paneB}`). With `split` on, the shell renders the router's `<Routes>`
+in the left pane and `<PageHost page={paneB} embedded />` in the right one. There is no
+stored left pane: the URL is the only statement of what the left pane shows.
 
 **Only the left pane is routable.** Two routable panes would need a URL scheme of
 their own. So every page accepts `EmbeddablePageProps` (`ui/PageHost.tsx`) and, when
@@ -53,11 +58,10 @@ identical in both modes. `Settings` is the sanctioned exception: it ignores `emb
 entirely, because it edits app state rather than a selection, and its Layout section
 navigates on purpose.
 
-`paneA` is written to storage but is never the source of truth: the URL is what the
-left pane shows. `paneAFromUrl(split, paneA, url)` returns the page to adopt or
-`null`, and the Settings "Left pane" select reads `pageFromPath(location.pathname)`,
-not the stored value. Do not reverse that direction — the earlier version compared
-against the last render and navigated a deep link back to the stale stored pane.
+Settings' "Left pane" select is the one sanctioned router use from an embedded page: it
+steers the *other*, routed pane, so it reads `pageFromPath(location.pathname)` via
+`useLocation` and navigates. Do not reintroduce a stored left pane — an earlier version
+compared against the last render and navigated a deep link back to a stale stored pane.
 
 ### Stored preferences (`ui/storage.ts`)
 
@@ -67,7 +71,8 @@ rail cannot disagree. `parse`/`serialize` must be module-level functions — the
 not effect dependencies. Three keys: **`snr.theme`** (`ui/theme.ts`; `light`/`dark`,
 unset = follow the OS via `resolveTheme`), **`snr.rail`** (`ui/railState.ts`;
 `collapsed` default / `expanded`, `RAIL_WIDTH` 58 / 198 px) and **`snr.layout`**
-(`ui/layout.ts`; JSON `{split, paneA, paneB}`, parsed field by field).
+(`ui/layout.ts`; JSON `{split, paneB}`, parsed field by field — a `paneA` written by an
+older build is dropped like any other unrecognised key).
 
 `index.html` carries a **blocking** pre-paint script that stamps `data-theme` on
 `<html>` from `snr.theme` before React boots, so a dark user never sees a white
@@ -247,12 +252,14 @@ hand-rolled `.prose-chat` block in `src/index.css`, deliberately instead of
 
 ## Tests
 
-`npx vitest run` — **4 files, 68 tests**, `environment: 'node'`, so only pure modules
+`npx vitest run` — **7 files, 83 tests**, `environment: 'node'`, so only pure modules
 are covered: `lib/sse.test.ts` (frames split across chunks, multi-line data,
 heartbeats ignored), `api/chat.test.ts` (`blocksToText`, `groupTurns`,
 `stepsFromMessage`, `toolCallStatus`, source extraction, the formatters),
-`components/ui/preferences.test.ts` (`parseStoredTheme`/`resolveTheme`, `parseRail`,
-`parseLayout`/`paneAFromUrl`/`pageFromPath`) and `components/notes/excerpt.test.ts`.
+`api/inbox.test.ts`, `components/ui/preferences.test.ts` (`parseStoredTheme`/
+`resolveTheme`, `parseRail`, `parseLayout`/`pageFromPath`),
+`components/ui/searchKeys.test.ts` (the shared overlay keyboard model),
+`components/notes/excerpt.test.ts` and `lib/ids.test.ts`.
 
 Component and E2E tests are deliberately out of scope — **do not add a jsdom
 environment**. The rule that keeps this workable: logic that deserves a test lives in

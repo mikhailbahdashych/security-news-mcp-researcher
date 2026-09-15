@@ -48,7 +48,7 @@ This project automates that workflow: a **local-only, single-user web app** (run
 
 ## Architecture (verified against current SDK/API docs)
 
-**Single container**: FastAPI serves the built React SPA. No CORS, no reverse proxy (avoids SSE buffering failure modes). Dev: `uvicorn --reload` :8000 + `vite dev` :5173 with `/api` proxy.
+**Single container**: FastAPI serves the built React SPA. No CORS, no reverse proxy (avoids SSE buffering failure modes). Dev: `python -m app --reload` on `$PORT` (default 8000) + `vite dev` :5173 with `/api` proxy to the same port.
 
 Key verified API facts baked into the design (cross-checked via the claude-api skill):
 - Web search/fetch server tools: `web_search_20260209` / `web_fetch_20260209` (dynamic filtering; do NOT also declare code_execution).
@@ -179,7 +179,7 @@ Search = `LIKE '%q%'` (single user, thousands of rows; no FTS5).
 - **MCP manager** — mcp 2.x `Client`; lazy connect on first use (never block boot), 10s connect / 60s call timeouts, failures isolated per server → `tool_result` with `is_error: true`. A connection is `async with`-only and cancel-scope-bound, so **enter and exit must happen in the same task**: each server gets an owner task that enters an `AsyncExitStack`, publishes the `Client` on a future and parks on an event; lifespan shutdown sets every event and awaits the owner tasks (bounded), which is what terminates the stdio subprocesses.
 - **Agent loop** — manual loop (not SDK tool runner: need pause_turn handling, mid-turn persistence, custom SSE mapping, cancellation). Persist each message as the turn progresses so browser refresh mid-turn keeps the transcript. Never hold a DB transaction across an LLM call.
 - **SSE** — `sse-starlette` (pinned `>=3.0`, the floor Task 5's `mcp` 2.x needs) EventSourceResponse; events: turn_start, thinking_delta, text_delta, tool_use_start/input, tool_result, server_tool_use/result, turn_end, error (refusal/rate_limit/turn_limit), done. 15s heartbeat; `X-Accel-Buffering: no`; NO GZipMiddleware.
-- **RSS ingestion** — feedparser in `anyio.to_thread.run_sync` (it's sync/CPU-bound), httpx2 fetch with real User-Agent (security blogs 403 default UA), Semaphore(8), per-feed timeout + error isolation, dedup guid→link→sha256(title+link), `ON CONFLICT DO NOTHING`. `bozo=1` ≠ unusable.
+- **RSS ingestion** — feedparser in `anyio.to_thread.run_sync` (it's sync/CPU-bound), httpx2 fetch with an honest robot `User-Agent` (a browser string over a non-browser TLS handshake trips Cloudflare; a `403` gets one retry through a `curl_cffi` browser-TLS transport, feeds and articles alike — see `backend/CLAUDE.md`), Semaphore(8), per-feed timeout + error isolation, dedup guid→link→sha256(title+link), `ON CONFLICT DO NOTHING`. `bozo=1` ≠ unusable.
 - **Extraction** — trafilatura (`output_format="markdown"`), thread-pooled, fallback to RSS summary on thin content, truncate to max_chars.
 
 > **Implementation notes.**
@@ -272,11 +272,11 @@ touched; what changed is everything around them.
   `data-theme` before React boots, so a dark user never sees a white flash.
 - **Three stored preferences**, all through `ui/storage.ts` (never throws, notifies
   every hook on the key): `snr.theme`, `snr.rail`, `snr.layout`.
-- **Split view.** `snr.layout` is `{split, paneA, paneB}`. With `split` on, the **left**
+- **Split view.** `snr.layout` is `{split, paneB}`. With `split` on, the **left**
   pane is the router — it has the URL, the back button and every deep link — and the
   right pane is an *embedded* second page with no route of its own. Two routable panes
-  would need a URL scheme nothing here justifies. `paneA` is stored but is never the
-  source of truth: the URL is, and the Settings "Left pane" select reads
+  would need a URL scheme nothing here justifies. There is no stored left pane: the URL
+  is the only statement of what it shows, and the Settings "Left pane" select reads
   `pageFromPath(location.pathname)`.
 - **The `embedded` contract.** Every top-level page takes `EmbeddablePageProps` and,
   when `embedded`, keeps its own selection in React state — no `useParams`, no
@@ -292,9 +292,9 @@ touched; what changed is everything around them.
 - Helpers: `lib/useDebouncedValue.ts` (every search box drives a query key),
   `lib/dates.ts`, `components/notes/excerpt.ts` (Markdown markers off a clamped
   two-line preview — deliberately not a parser).
-- **Tests grew with it**: vitest now covers 4 files / 68 tests — `lib/sse.test.ts`,
-  `api/chat.test.ts`, `components/ui/preferences.test.ts`,
-  `components/notes/excerpt.test.ts`. Still `environment: 'node'`, still no jsdom and
+- **Tests grew with it**: vitest now covers 7 files / 83 tests — `lib/sse.test.ts`,
+  `api/chat.test.ts`, `api/inbox.test.ts`, `components/ui/preferences.test.ts`,
+  `components/ui/searchKeys.test.ts`, `components/notes/excerpt.test.ts`, `lib/ids.test.ts`. Still `environment: 'node'`, still no jsdom and
   no component tests: logic that deserves a test lives in a `.ts` module.
 - `.playwright-mcp/` (browser artifacts from design review) is gitignored.
 

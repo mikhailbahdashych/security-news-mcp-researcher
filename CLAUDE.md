@@ -37,17 +37,17 @@ enrichment, ...). `docs/CLAUDE.md` is the doc map.
 | `backend/app/mcp/` | MCP client: config, connection manager, tool provider. See `backend/app/mcp/CLAUDE.md`. |
 | `frontend/` | Vite + React 19 + TS + Tailwind v4 SPA. See `frontend/CLAUDE.md`. |
 | `docs/` | `DESIGN.md` (design record), `ROADMAP.md` (backlog). See `docs/CLAUDE.md`. |
-| `Dockerfile` | Two stages: node builds the SPA, python runs it. Node binary is copied into the runtime so stdio MCP servers can `npx`. |
-| `docker-compose.yaml` | One service, port 8000, **named volume** `appdata` at `/data`. |
+| `Dockerfile` | Two stages: node builds the SPA, python runs it. Node binary is copied into the runtime so stdio MCP servers can `npx`. Wheels are hash-verified. `docker/entrypoint.sh` starts as root, chowns `/data` to the non-root user `app` only when an older root-owned volume needs it, then drops privileges with `setpriv`; `CMD` is `python -m app --host 0.0.0.0`. `PORT` must be ≥ 1024. |
+| `docker-compose.yaml` | One service, publishes `${PORT:-8000}`, **named volume** `appdata` at `/data`. |
 | `Makefile` | The only commands you need (below). |
 
 ## Running it
 
 | Command | What it does |
 |---|---|
-| `make dev-api` | `cd backend && uv run uvicorn app.main:app --reload --port 8000` |
-| `make dev-web` | `cd frontend && npm run dev` — Vite on **:5173**, proxies `/api` to `:8000` |
-| `make up` | `docker compose up --build` — whole app on **:8000** |
+| `make dev-api` | `cd backend && uv run python -m app --reload` — binds `127.0.0.1:$PORT` (default 8000) |
+| `make dev-web` | `cd frontend && npm run dev` — Vite on **:5173**, proxies `/api` to `:$PORT` (Vite reads the environment only, not `.env`) |
+| `make up` | `docker compose up --build` — whole app on **`$PORT`** (default 8000) |
 | `make test` | **both** suites: `cd backend && uv run pytest`, then `cd frontend && npx vitest run` |
 | `make lint` | **both** halves: `uv run ruff check .` (line-length 100, rules `E,F,I,B,UP`), then `npm run lint` (oxlint) |
 
@@ -64,7 +64,12 @@ startup, so **a schema change means deleting `backend/data/app.db`** in dev.
 **`.env`.** Copy `.env.example` → `.env`. `app.config.Settings` reads it via
 pydantic-settings (`env_file=("../.env", ".env")`, so it works whether you run from
 the repo root or from `backend/`). Fields: `DB_PATH`, `PORT`, `STATIC_DIR`,
-`CORS_ORIGINS`, `ANTHROPIC_API_KEY`, `LOG_LEVEL`.
+`CORS_ORIGINS`, `ANTHROPIC_API_KEY`, `LOG_LEVEL`. `PORT` is honoured by `make dev-api`,
+by the image's `CMD` and by `docker compose` (which publishes `${PORT:-8000}`), because
+both go through `python -m app` (`backend/app/__main__.py`), which reads `Settings.port`.
+`CORS_ORIGINS` accepts a comma-separated list as well as a JSON array; `*` is refused
+(a `ValidationError` at startup) and the middleware never allows credentials, because
+this API has no auth to protect.
 
 **API-key precedence: process environment → `.env` (i.e. `Settings.anthropic_api_key`)
 → the key stored in the DB.** `app/services/settings.py::external_api_key` reads
@@ -172,9 +177,14 @@ handler and was dropped.
   must not use `get_anthropic_client`; it builds its own client from `ChatClientFactory`
   and closes it in the stream's `finally`. Both streaming routes share
   `app/api/streaming.py` (`pump_agent_events`, `SSE_PING_S`, `SSE_HEADERS`).
-- Known limitation: BleepingComputer (Cloudflare) and CISA (Akamai) 403 non-browser TLS
-  clients regardless of User-Agent. The URLs are correct; those rows just record
-  `HTTP 403`. Do not "fix" them by changing the URLs.
+- **The outbound `User-Agent` must never claim to be a browser.** It is the honest
+  robot form `Mozilla/5.0 (compatible; SecurityNewsResearcher/0.1; +<repo>)`
+  (`app/services/http.py::USER_AGENT`). A Chrome string over an OpenSSL handshake is
+  what earned BleepingComputer's Cloudflare challenge (`HTTP 403`) in the first place.
+  CISA (Akamai) blocks on the TLS fingerprint alone, so a `403` on a feed or article
+  fetch gets **one** automatic retry through a browser-TLS transport (`curl_cffi`,
+  `impersonate="chrome"`), still driven by `fetch_guarded`. Re-run the probe table in
+  `backend/CLAUDE.md` before changing either. The default feed URLs are correct.
 
 ## Frontend shell (the redesign)
 

@@ -46,7 +46,8 @@ uvicorn's own loggers alone. Without it every `app.*` record had no handler at a
 
 | Module | Responsibility |
 |---|---|
-| `app/config.py` | `Settings` (pydantic-settings): `db_path`, `port`, `static_dir`, `cors_origins`, `anthropic_api_key`, `log_level`. Reads `../.env` then `.env`. |
+| `app/__main__.py` | `python -m app` — the one place uvicorn is told what to serve; reads `Settings.port`, `--host`/`--reload` stay flags. |
+| `app/config.py` | `Settings` (pydantic-settings): `db_path`, `port`, `static_dir`, `cors_origins`, `anthropic_api_key`, `log_level`. Reads `../.env` then `.env`. `cors_origins` is `Annotated[list[str], NoDecode]` with a validator, so a comma-separated `CORS_ORIGINS` no longer raises at import; `*` and non-http(s) entries are refused (`ValidationError`). `effort`/`thinking_display` are coerced to their allowed literals in `services/settings.py`, the one place both the API and the agent loop read them. |
 | `app/logging_config.py` | `configure_logging` / `installed_handler`, `LOG_FORMAT`, `HANDLER_NAME`. |
 | `app/static.py` | `mount_spa` — serves `frontend/dist` in Docker; a no-op when the dir is absent (dev). Path-traversal safe. |
 | `app/db/engine.py` | `create_db_engine` (WAL / `synchronous=NORMAL` / `busy_timeout=5000` / `foreign_keys=ON` pragmas on every connect), `create_session_factory`. No module-level engine. |
@@ -55,7 +56,7 @@ uvicorn's own loggers alone. Without it every `app.*` record had no handler at a
 | `app/db/util.py` | `matches(column, value)` / `escape_like` / `like_pattern` / `LIKE_ESCAPE_CHAR` — **the** substring-match rule for the whole app. |
 | `app/schemas/` | Pydantic request/response models, one module per domain, plus `common.py` for what genuinely crosses domains (`CancelResponse`). |
 | `app/api/` | Routers (`health`, `settings`, `models`, `feeds`, `items`, `sessions`, `notes`, `search`, `mcp`) wired in `app/api/__init__.py`; `deps.py`; `streaming.py` (shared SSE plumbing, **not** a router); `tasks.py` (**not** a router — the cancel registry). |
-| `app/services/` | Domain logic, no FastAPI imports: `settings` (kv store + key precedence), `feeds` (ingest), `extract` (trafilatura), `items` (inbox queries + keyset cursor + the public `sort_key()`), `notes` (context, sources, save), `search` (cross-entity queries), `http` (UA/timeout policy), `url_guard` (SSRF + body/time caps), `anthropic_models` (model list + key check, 1 h in-process cache keyed on a digest of the key). |
+| `app/services/` | Domain logic, no FastAPI imports: `settings` (kv store + key precedence), `feeds` (ingest), `extract` (trafilatura), `items` (inbox queries + keyset cursor + the public `sort_key()`), `notes` (context, sources, save), `search` (cross-entity queries), `http` (UA/timeout policy + the browser-TLS transport), `url_guard` (SSRF + body/time caps), `anthropic_models` (model list + key check, 1 h in-process cache keyed on a digest of the key). |
 | `app/agent/` | The agent loop and tool registry — see `app/agent/CLAUDE.md`. |
 | `app/mcp/` | The MCP client — see `app/mcp/CLAUDE.md`. |
 
@@ -203,9 +204,54 @@ used by `DELETE /sessions/{id}` so a running turn cannot write rows for a sessio
 deleted) · `unregister` · `clear`. Both cancel endpoints answer 200 with
 `CancelResponse(cancelled=False)` when nothing was running — Stop may lose the race.
 
+## Outbound fetching: the two clients (`app/services/http.py`)
+
+**`USER_AGENT` must not claim to be a browser.** It used to send a desktop Chrome UA;
+Cloudflare scores the *consistency* of a client, so claiming Chrome over an
+httpx/OpenSSL handshake reads as a spoofed browser and earns a managed challenge. That
+single header was why `bleepingcomputer.com` answered **403** for both its feed and
+every article page, while the same client with a Firefox, Safari, robot or empty UA
+got 200. The UA now names the application in the conventional
+`Mozilla/5.0 (compatible; ...)` robot form. The 40-row probe table (UA × TLS stack ×
+header set, per site) is summarised in PR #19 — **re-run it before changing this**.
+
+`build_client` is the ordinary client. `build_impersonating_client` returns one whose
+transport is `ImpersonatingTransport` (libcurl via `curl_cffi`, `impersonate="chrome"`),
+for sites that decide on the **TLS ClientHello** and that no header can reach — CISA's
+Akamai config is the live example, and it 403s CPython+OpenSSL 3.0 (which is what the
+Docker image has) while serving curl and browsers. It returns `None` when the wheel is
+absent, so a missing dependency degrades to an error message rather than a failed start.
+
+Two rules hold for it:
+
+- It is **an httpx transport, not a second fetching path**, so `fetch_guarded` still
+  drives every request: manual redirects, per-hop address validation, the byte ceiling,
+  the whole-fetch timeout. Anything that bypassed `fetch_guarded` would be a hole in the
+  SSRF guard.
+- `_CurlByteStream.aclose` **sets `quit_now` before closing**. curl_cffi's async
+  `aclose()` (unlike its sync `close()`) does not, and its write callback only aborts
+  when that flag is set — so without it, hitting the byte ceiling would still pull the
+  entire body into an unbounded queue.
+
+Both `feeds.refresh_feeds` and `extract.extract_article` retry **once, only on 403**,
+through that client. Each takes an `impersonate_transport=` seam alongside
+`transport=`; a caller that passes `transport` **alone gets no retry**, which is what
+keeps a 403 fixture in the test suite off the network.
+
+Three more ingest invariants worth not re-litigating (`app/services/feeds.py`):
+
+- A feed that parses cleanly with **zero entries is `last_status="ok"`**, not an error.
+  Only "no entries *and* the parser complained" is an error, and on that branch
+  feedparser's salvaged title is deliberately **not** adopted.
+- `feed_items` inserts go in chunks of `INSERT_CHUNK_ROWS` (500 × 10 bound
+  parameters), inside one transaction, so a feed of several thousand entries cannot
+  outrun SQLite's parameter ceiling.
+- A 403 surfaces as `BOT_PROTECTION_ERROR`, never the response body — a challenge page
+  is several KB of markup that helps nobody.
+
 ## Tests (`backend/tests/`)
 
-`make test` → `uv run pytest` (**461 tests**, ~13 s) then the frontend's vitest. One
+`make test` → `uv run pytest` (**~540 tests** once the cleanup PRs are in, ~15 s) then the frontend's vitest. One
 `test_<area>.py` per area, `fakes/` for client stand-ins, `fixtures/` for XML/HTML.
 
 There is **no `tests/__init__.py`**, so pytest puts `tests/` on `sys.path`: helpers are
@@ -237,6 +283,9 @@ Fakes:
   `routes_transport({url: Response|Exception|callable})` over `httpx2.MockTransport`,
   recording every outgoing request (UA assertions). `tests/sse_util.py` — `parse_sse`,
   `event_names`, `payloads_for` for asserting on a streamed body.
+- `tests/test_http_client.py` — the outbound header policy and the browser-TLS
+  transport, with a fake `curl_cffi` session. The fake models `quit_now` because that
+  flag is the whole point of the transport's `aclose` (see "Outbound fetching").
 
 ## How to add ...
 

@@ -11,21 +11,37 @@ make up          # docker compose up --build
 ```
 
 Then open <http://localhost:8000>. Data lives in the named `appdata` volume, so it
-survives `docker compose down`.
+survives `docker compose down`. The port is `PORT` from the repo-root `.env` (or the
+shell); `docker compose` publishes and passes the same number, so `PORT=9000 make up`
+serves on <http://localhost:9000>. `PORT` must be 1024 or above.
+
+The container runs as the non-root user `app` (uid 1000), which owns `/data`. The
+image's entrypoint (`docker/entrypoint.sh`) starts as root only long enough to check
+who owns `/data`; an `appdata` volume created by an earlier, root-running image is
+chowned once, then the entrypoint drops to `app` with `setpriv` and starts the server.
+An existing volume therefore keeps working with no manual step. If you run the image
+with `--user`, nothing is chowned and ownership is yours to manage
+(`docker compose run --rm --user root app chown -R app:app /data` fixes it by hand).
 
 ## Local development
 
 Two terminals:
 
 ```sh
-make dev-api     # FastAPI with reload on :8000
-make dev-web     # Vite dev server on :5173, proxying /api to :8000
+make dev-api     # uv run python -m app --reload — binds 127.0.0.1:$PORT (default 8000)
+make dev-web     # Vite dev server on :5173, proxying /api to $PORT
 ```
 
-Then open <http://localhost:5173>.
+Then open <http://localhost:5173>. The backend reads `PORT` from the environment or
+the repo-root `.env`; Vite reads only the environment, so a port set in `.env` alone
+needs `PORT=... make dev-web` as well.
 
 Prerequisites: [uv](https://docs.astral.sh/uv/) and Node 22+.
-Copy `.env.example` to `.env` if you want to override defaults.
+Copy `.env.example` to `.env` if you want to override defaults. `CORS_ORIGINS` takes a
+comma-separated list (`CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173`) as
+well as a JSON array; `*` is refused. Leave it empty unless a browser on some other
+origin has to call the API: Docker serves the SPA same-origin, and `make dev-web`
+proxies `/api` through Vite.
 
 ## The Anthropic API key
 
@@ -105,6 +121,13 @@ One exemption: the **first hop of a feed URL you typed yourself** is not checked
 Pointing this app at a FreshRSS or Miniflux instance on your own LAN is a legitimate
 setup, and you are the one who configured it. Everything that URL redirects to is
 still checked, and article URLs — which nobody typed — are checked from the first hop.
+
+The app identifies itself honestly (`SecurityNewsResearcher/0.1`, not a browser).
+Two of the default sources sit behind bot protection that refuses non-browser TLS
+clients: when a feed or article fetch comes back `403`, the app retries it once
+through a browser-TLS client (`curl_cffi`), with the same guard, redirect checks and
+size caps. A `403` that survives the retry is shown on the feed as
+"blocked by the site's bot protection".
 
 ## MCP servers
 

@@ -43,9 +43,17 @@ verbatim (single-user local app; hiding them would make the blob un-editable), b
 
 - `redact(mapping)` (keys kept, values `"***"`) is **the only shape they may take in a log
   line or an error message**;
-- `manager.describe_error` strips `scheme://user:pass@host` userinfo via `_USERINFO` and
-  truncates to `ERROR_CHARS = 300` before anything reaches the UI;
+- `redact_text(text)` takes out URL userinfo **and** query strings — a hosted server's
+  token lives in the query as often as in a header. Everything derived from a config or
+  an exception goes through it (`manager.describe_error`) before reaching a log, a
+  `repr` or the UI's error field, and it runs before the `ERROR_CHARS = 300` truncation;
+- a connect attempt logs, at DEBUG, the server name, transport, redacted target and the
+  **keys** of `env`/`headers` — never the values;
 - never put `env`/`headers` in a `repr`, an exception message or a log.
+
+A call failure is classified as a timeout **by exception type** — `TimeoutError`, or
+`MCPError` with code `-32001` (`mcp.types.REQUEST_TIMEOUT`) — never by message text. A
+timeout keeps the connection; anything else retires it.
 
 ## `McpManager` lifecycle (`manager.py`)
 
