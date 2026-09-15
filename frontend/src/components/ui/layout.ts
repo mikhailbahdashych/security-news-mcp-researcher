@@ -26,13 +26,18 @@ export const LAYOUT_STORAGE_KEY = 'snr.layout'
 export interface LayoutState {
   /** Two pages side by side. Off by default — one page is the normal app. */
   split: boolean
-  /** Left pane. Mirrors the URL: the rail navigates, and this follows. */
-  paneA: PageKey
   /** Right pane. Rendered embedded, with no route of its own. */
   paneB: PageKey
 }
 
-export const DEFAULT_LAYOUT: LayoutState = { split: false, paneA: 'inbox', paneB: 'research' }
+/**
+ * There is deliberately no `paneA`. The left pane is the router's pane, so the
+ * URL is the only statement of what it shows; storing a mirror of it meant two
+ * answers to one question, and the stale one won often enough to be a bug. A
+ * `paneA` left in storage by an older build parses away with every other
+ * unrecognised key.
+ */
+export const DEFAULT_LAYOUT: LayoutState = { split: false, paneB: 'research' }
 
 function asPageKey(value: unknown, fallback: PageKey): PageKey {
   return (PAGE_KEYS as readonly string[]).includes(value as string)
@@ -63,7 +68,6 @@ export function parseLayout(raw: string | null): LayoutState {
   const record = parsed as Record<string, unknown>
   return {
     split: record.split === true,
-    paneA: asPageKey(record.paneA, DEFAULT_LAYOUT.paneA),
     paneB: asPageKey(record.paneB, DEFAULT_LAYOUT.paneB),
   }
 }
@@ -94,26 +98,8 @@ export function pageFromPath(pathname: string): PageKey {
   return 'inbox'
 }
 
-/**
- * The page the stored left pane should be showing, or `null` if it already is.
- *
- * With the split on, the left pane *is* the router's pane: the URL is what is on
- * screen and the preference is only a mirror of it. So the URL always wins — a
- * reload with a stale stored pane, a deep link, a second tab — and anything that
- * wants to move the left pane (the rail, the Settings select) navigates.
- *
- * It used to compare against what the effect saw last time, which could not tell
- * "the user moved the pane" from "the pane we just asked for has not landed
- * yet": with the split already on, loading `/settings` stored `settings`, then
- * re-read the pre-update render and navigated back to the stored `inbox`.
- */
-export function paneAFromUrl(split: boolean, paneA: PageKey, url: PageKey): PageKey | null {
-  return split && paneA !== url ? url : null
-}
-
 export interface LayoutControls extends LayoutState {
   setSplit: (split: boolean) => void
-  setPaneA: (page: PageKey) => void
   setPaneB: (page: PageKey) => void
 }
 
@@ -133,14 +119,10 @@ export function useLayout(): LayoutControls {
     (split: boolean) => setLayout({ ...layout, split }),
     [layout, setLayout],
   )
-  const setPaneA = useCallback(
-    (paneA: PageKey) => setLayout({ ...layout, paneA }),
-    [layout, setLayout],
-  )
   const setPaneB = useCallback(
     (paneB: PageKey) => setLayout({ ...layout, paneB }),
     [layout, setLayout],
   )
 
-  return { ...layout, setSplit, setPaneA, setPaneB }
+  return { ...layout, setSplit, setPaneB }
 }

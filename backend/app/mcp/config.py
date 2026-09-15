@@ -108,7 +108,7 @@ class McpServerConfig(BaseModel):
 
     def __repr__(self) -> str:  # pragma: no cover - diagnostics only
         """Never render ``env``/``headers`` values: a repr ends up in tracebacks."""
-        target = self.command if self.transport == "stdio" else self.url
+        target = self.command if self.transport == "stdio" else redact_text(self.url or "")
         return (
             f"McpServerConfig(name={self.name!r}, transport={self.transport!r}, "
             f"target={target!r}, enabled={self.enabled!r})"
@@ -124,9 +124,28 @@ class SaveResult(BaseModel):
     removed: list[str]
 
 
+#: ``scheme://user:pass@host`` — a credential hiding in a URL rather than in a
+#: header, which is what httpx2 and transport error messages echo back.
+_USERINFO = re.compile(r"(?<=//)[^/@\s]+@")
+
+#: Everything after a URL's ``?``. Hosted MCP servers routinely authenticate with
+#: a token in the query string, so a URL that reaches a log or a UI error has to
+#: lose it — ``https://h/mcp?key=s3cret`` is as much a secret as a header is.
+_URL_QUERY = re.compile(r"(https?://[^\s\"\'<>]*\?)[^\s\"\'<>]*")
+
+
 def redact(mapping: dict[str, str]) -> dict[str, str]:
     """Keys kept, values replaced. The only shape ``env``/``headers`` may be logged in."""
     return dict.fromkeys(mapping, "***")
+
+
+def redact_text(text: str) -> str:
+    """Strip the credentials a free-text message can carry: userinfo and queries.
+
+    Used on anything derived from a config or an exception before it reaches a
+    log line, a ``repr`` or the UI's error field.
+    """
+    return _URL_QUERY.sub(r"\1***", _USERINFO.sub("***@", text))
 
 
 def _first_error(exc: ValidationError) -> str:
@@ -276,6 +295,7 @@ __all__ = [
     "load_servers",
     "parse_config",
     "redact",
+    "redact_text",
     "save_servers",
     "to_public_json",
 ]

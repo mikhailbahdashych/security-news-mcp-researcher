@@ -20,7 +20,7 @@ import {
   type ErrorPayload,
   type SessionFilters,
 } from '../api/chat'
-import { feedTitlesFromCache, type FeedItem } from '../api/inbox'
+import { useFeedTitlesFromCache, type FeedItem } from '../api/inbox'
 import { fetchSettings, settingsQueryKey } from '../api/settings'
 import AnswerTurn from '../components/chat/AnswerTurn'
 import Composer from '../components/chat/Composer'
@@ -126,14 +126,15 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
   }, [embedded, location.pathname, location.state, navigate])
 
   const messages = detail.data?.messages
-  // One lookup of "which feed is item N from", for the transcript and for the
-  // turn on the wire. The transcript states it for items the model searched for;
-  // the cache — the Inbox list, the attachment picker, the note generator — adds
-  // the ones it only opened, so a source card never falls back to a bare domain
-  // for an item the app can already name.
+  // One lookup of "which feed is item N from", built once and handed to both the
+  // transcript and the live turn. The transcript states it for items the model
+  // searched for; the cache — the Inbox list, the attachment picker, the note
+  // generator — adds the ones it only opened, so a source card never falls back
+  // to a bare domain for an item the app can already name.
+  const cachedTitles = useFeedTitlesFromCache()
   const feedTitles = useMemo(
-    () => collectFeedTitles(messages ?? [], feedTitlesFromCache(queryClient)),
-    [messages, queryClient],
+    () => collectFeedTitles(messages ?? [], cachedTitles),
+    [messages, cachedTitles],
   )
   const turns = useMemo(() => groupTurns(messages ?? [], feedTitles), [messages, feedTitles])
 
@@ -354,7 +355,7 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
           }}
           onRename={(id, title) => rename.mutate({ id, title })}
           onArchive={(id, archived) => archive.mutate({ id, archived })}
-          onDelete={(id) => remove.mutate(id)}
+          onDelete={(id) => remove.mutateAsync(id).then(() => undefined)}
           onLoadMore={() => void sessions.fetchNextPage()}
           onClose={() => setHistoryOpen(false)}
         />

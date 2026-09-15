@@ -1151,3 +1151,74 @@ def test_an_error_code_alone_is_enough_to_classify_a_failure():
 
     assert is_error is True
     assert payload["error_code"] == "max_uses_exceeded"
+
+
+async def test_a_web_search_result_list_reaches_the_stream_as_results(
+    session_factory, session_id
+):
+    """The success branch of the same fork, driven through the real runner.
+
+    A successful server-tool result puts a *list* in ``content`` where a failure
+    puts an object, and this is the only shape the UI renders as source cards —
+    a dict-level unit test cannot tell whether the SDK still spells it this way.
+    """
+    from fakes.anthropic import turn_web_search
+
+    collected = await drive(
+        ScriptedAnthropic(
+            [
+                turn_web_search(
+                    tool_use_id="srvtoolu_ws",
+                    results=[
+                        ("AcmeVPN advisory", "https://acme.test/advisory"),
+                        ("Write-up", "https://blog.test/acmevpn"),
+                    ],
+                    text="Two sources.",
+                )
+            ]
+        ),
+        session_factory,
+        session_id,
+    )
+
+    result = next(e for e in collected if e.type == "server_tool_result")
+    assert result.is_error is False
+    assert result.name == "web_search"
+    assert result.results == [
+        {"title": "AcmeVPN advisory", "url": "https://acme.test/advisory"},
+        {"title": "Write-up", "url": "https://blog.test/acmevpn"},
+    ]
+
+    async with session_factory() as session:
+        row = (await session.execute(select(ToolCall))).scalars().one()
+    assert row.is_error is False
+    assert [entry["url"] for entry in row.result_json["content"]] == [
+        "https://acme.test/advisory",
+        "https://blog.test/acmevpn",
+    ]
+
+
+async def test_a_web_search_error_object_reaches_the_stream_as_an_error(
+    session_factory, session_id
+):
+    """The failure branch: HTTP 200, no exception, an object instead of a list."""
+    from fakes.anthropic import turn_web_search
+
+    collected = await drive(
+        ScriptedAnthropic(
+            [turn_web_search(tool_use_id="srvtoolu_ws", error_code="max_uses_exceeded")]
+        ),
+        session_factory,
+        session_id,
+    )
+
+    result = next(e for e in collected if e.type == "server_tool_result")
+    assert result.is_error is True
+    assert result.results["error_code"] == "max_uses_exceeded"
+    assert result.results["type"] == "web_search_tool_result_error"
+    assert result.to_sse()[1]["is_error"] is True
+
+    async with session_factory() as session:
+        row = (await session.execute(select(ToolCall))).scalars().one()
+    assert row.is_error is True
+    assert row.result_json["content"]["error_code"] == "max_uses_exceeded"

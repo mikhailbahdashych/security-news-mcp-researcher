@@ -1,17 +1,11 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { Route, Routes, useLocation, useNavigate } from 'react-router-dom'
 
 import GlobalSearch from './components/ui/GlobalSearch'
 import PageHost from './components/ui/PageHost'
 import Rail from './components/ui/Rail'
 import { cx } from './components/ui/classes'
-import {
-  pageFromPath,
-  paneAFromUrl,
-  routeForPage,
-  useLayout,
-  type PageKey,
-} from './components/ui/layout'
+import { pageFromPath, routeForPage, useLayout, type PageKey } from './components/ui/layout'
 import { useRail } from './components/ui/railState'
 import { useTheme } from './components/ui/theme'
 import ChatPage from './pages/ChatPage'
@@ -38,14 +32,10 @@ export default function App() {
   const [searchOpen, setSearchOpen] = useState(false)
 
   const urlPage = pageFromPath(location.pathname)
-  usePaneASync(layout.split, layout.paneA, urlPage, layout.setPaneA)
 
-  const goTo = (page: PageKey) => {
-    if (layout.split) {
-      layout.setPaneA(page)
-    }
-    navigate(routeForPage(page))
-  }
+  // The left pane is the router's pane, so moving it *is* navigating: there is
+  // no stored copy of which page it shows, and nothing to keep in step.
+  const goTo = (page: PageKey) => navigate(routeForPage(page))
 
   return (
     <div className="flex h-screen overflow-hidden bg-bg text-ink">
@@ -89,28 +79,4 @@ export default function App() {
       <GlobalSearch open={searchOpen} onOpenChange={setSearchOpen} />
     </div>
   )
-}
-
-/**
- * Keeps the stored left pane saying what the left pane is showing.
- *
- * One direction only: the URL moves the preference, never the other way round.
- * Everything that wants to move the left pane — the rail, the Settings select —
- * navigates, so a preference that disagrees with the URL is always the stale
- * one. That is what makes a reload with the split already on adopt the page it
- * is actually displaying, instead of leaving Settings on screen while the
- * preference (and the select reading it) still said Inbox.
- */
-function usePaneASync(
-  split: boolean,
-  paneA: PageKey,
-  urlPage: PageKey,
-  setPaneA: (page: PageKey) => void,
-) {
-  const adopt = paneAFromUrl(split, paneA, urlPage)
-  useEffect(() => {
-    if (adopt !== null) {
-      setPaneA(adopt)
-    }
-  }, [adopt, setPaneA])
 }

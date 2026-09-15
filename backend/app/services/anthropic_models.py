@@ -67,6 +67,13 @@ async def check_api_key(client: AnthropicLike | None) -> TestKeyResult:
         return TestKeyResult(ok=False, error=f"Anthropic API error (HTTP {error.status_code})")
     except anthropic.APIConnectionError:
         return TestKeyResult(ok=False, error="could not reach the Anthropic API")
+    except anthropic.APIError as error:
+        # The base class, so this is last and catches the rest of the family —
+        # a malformed response (``APIResponseValidationError``) is not a status
+        # error and is not a connection error, and letting it out would turn the
+        # Test key button into a 500 that says nothing about the key.
+        logger.warning("Key check failed with %s", type(error).__name__)
+        return TestKeyResult(ok=False, error="the Anthropic API returned an unexpected error")
 
     return TestKeyResult(ok=True, error=None)
 

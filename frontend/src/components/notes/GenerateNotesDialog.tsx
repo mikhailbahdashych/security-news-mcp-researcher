@@ -13,6 +13,7 @@ import {
   type NoteDonePayload,
 } from '../../api/notes'
 import { fetchSettings, settingsQueryKey } from '../../api/settings'
+import { generationId as newGenerationId } from '../../lib/ids'
 import { SSEHttpError, streamSSE } from '../../lib/sse'
 import TurnError from '../chat/TurnError'
 import useDebouncedValue from '../../lib/useDebouncedValue'
@@ -92,7 +93,7 @@ export default function GenerateNotesDialog({
       }),
   })
 
-  // Its own key on purpose: the Chat sidebar caches `sessionsQueryKey` as an
+  // Its own key on purpose: the chat's history drawer caches `sessionsQueryKey` as an
   // *infinite* query, and a plain useQuery sharing that key reads back
   // `{pages: [...]}` — the dropdown would silently come up empty, and whichever
   // of the two loaded second would find the wrong shape in the cache.
@@ -124,7 +125,7 @@ export default function GenerateNotesDialog({
     const body: GenerateNotesBody = {
       item_ids: [...selected.keys()],
       session_id: sessionId,
-      generation_id: crypto.randomUUID(),
+      generation_id: newGenerationId(),
     }
     if (title.trim()) {
       body.title = title.trim()

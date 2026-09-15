@@ -89,7 +89,7 @@ export const DEFAULT_SESSION_FILTERS: SessionFilters = { q: '', archived: 'false
  *
  * Invalidating this one key refreshes every filtered variant below it, which is
  * what a rename, an archive or a delete needs — it cannot know which filter the
- * sidebar is showing.
+ * history drawer is showing.
  */
 export const sessionsQueryKey = ['sessions'] as const
 export const sessionsListKey = (filters: SessionFilters) =>
@@ -896,11 +896,13 @@ export function collectFeedTitles(
  * rows of the assistant turn that asked for them, which is where the design
  * shows it.
  */
-export function groupTurns(messages: ChatMessage[], knownFeedTitles?: FeedTitles): Turn[] {
-  // Scanned across the whole transcript before any turn is built: a later turn
-  // that merely opens an item must name it the same way as the earlier turn that
-  // searched it up.
-  const feedTitles = collectFeedTitles(messages, knownFeedTitles)
+export function groupTurns(messages: ChatMessage[], knownTitles?: FeedTitles): Turn[] {
+  // `knownTitles` is taken as complete when it is given: the page already has to
+  // build the map for the live turn, and scanning the same transcript a second
+  // time here produced the same answer at twice the cost. Omitted, the scan
+  // happens here — a later turn that merely opens an item must name it the same
+  // way as the earlier turn that searched it up.
+  const feedTitles = knownTitles ?? collectFeedTitles(messages)
   const turns: Turn[] = []
   for (const message of messages) {
     if (message.kind === 'tool_result') {

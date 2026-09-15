@@ -32,19 +32,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 from collections.abc import Callable, Sequence
 from contextlib import AbstractAsyncContextManager, AsyncExitStack
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
 import httpx2
-from mcp import Client, StdioServerParameters, Tool
+from mcp import Client, MCPError, StdioServerParameters, Tool
 from mcp.client.streamable_http import streamable_http_client
-from mcp.types import TextContent
+from mcp.types import REQUEST_TIMEOUT, TextContent
 from pydantic import BaseModel
 
-from app.mcp.config import McpServerConfig
+from app.mcp.config import McpServerConfig, redact, redact_text
 
 logger = logging.getLogger(__name__)
 
@@ -75,10 +74,6 @@ HTTP_READ_TIMEOUT_S = 300.0
 ERROR_CHARS = 300
 
 ServerStatus = Literal["connected", "error", "disabled", "not_connected"]
-
-#: ``scheme://user:pass@host`` — the one place a credential can hide in an httpx2
-#: or transport error message.
-_USERINFO = re.compile(r"(?<=//)[^/@\s]+@")
 
 
 class ServerSnapshot(BaseModel):
@@ -133,14 +128,15 @@ def default_target(config: McpServerConfig) -> TargetSpec:
     )
 
 
-def _redact(text: str) -> str:
-    return _USERINFO.sub("***@", text)
-
-
 def describe_error(exc: BaseException) -> str:
-    """A short, credential-free one-liner for the UI."""
+    """A short, credential-free one-liner for the UI.
+
+    Everything here is shown to the user and written to the log, and the strings
+    come from httpx2, the transport or the server itself — so it goes through
+    ``redact_text``, which takes out userinfo and URL query strings.
+    """
     message = f"{type(exc).__name__}: {exc}".strip().rstrip(":").strip()
-    return _redact(message)[:ERROR_CHARS]
+    return redact_text(message)[:ERROR_CHARS]
 
 
 def result_text(blocks: Sequence[Any]) -> str:
@@ -366,6 +362,19 @@ class McpManager:
 
     async def _run_connection(self, config: McpServerConfig, connection: _Connection) -> None:
         """The owner task. Enters and exits the client in one task, as required."""
+        # The one place the connection details are logged. `env`/`headers` are
+        # credentials the user typed, so they are reduced to their keys, and the
+        # URL loses its query string — a hosted MCP server's token often lives
+        # there. DEBUG, because this exists for "why will this server not
+        # connect", not for every request.
+        logger.debug(
+            "Connecting MCP server %s (%s): target=%s env=%s headers=%s",
+            config.name,
+            config.transport,
+            redact_text(config.command or config.url or ""),
+            redact(config.env),
+            redact(config.headers),
+        )
         try:
             async with AsyncExitStack() as stack:
                 target = self._target_factory(config)
@@ -595,17 +604,14 @@ class McpManager:
                 )
         except asyncio.CancelledError:
             raise
-        except TimeoutError:
-            return (
-                f"MCP error calling {server}/{tool_name}: "
-                f"timed out after {self._call_timeout_s:g}s.",
-                True,
-            )
         except BaseException as exc:  # noqa: BLE001 - MCPError, OSError, httpx2, ...
-            message = describe_error(exc)
-            if _is_timeout(message):
+            # One classification point for every way a call can fail, including
+            # the ``asyncio.timeout`` above: a timeout is the *request* giving
+            # up, so the connection is left alone and the next call reuses it.
+            if _is_timeout(exc):
                 message = f"timed out after {self._call_timeout_s:g}s"
             else:
+                message = describe_error(exc)
                 # A raise here is connection-level, not a tool saying "no". The owner
                 # task is still parked with the client entered, so this has to tear
                 # the connection down — dropping the reference alone would strand the
@@ -621,10 +627,19 @@ def _retrieve_exception(future: asyncio.Future[Any]) -> None:
         future.exception()
 
 
-def _is_timeout(message: str) -> bool:
-    """JSON-RPC ``-32001`` is how the SDK reports a request timeout."""
-    lowered = message.lower()
-    return "-32001" in lowered or "timed out" in lowered or "timeout" in lowered
+def _is_timeout(exc: BaseException) -> bool:
+    """Did the *request* time out, as opposed to the connection failing?
+
+    By type, never by message text. The old substring match read whatever the
+    server had written into its error — a tool reporting "the upstream request
+    timed out" was classified as a transport timeout and its connection left in
+    place, while a genuine timeout phrased any other way tore the connection
+    down. Two types count: ``TimeoutError`` (anyio/asyncio) and the SDK's
+    JSON-RPC ``-32001``.
+    """
+    return isinstance(exc, TimeoutError) or (
+        isinstance(exc, MCPError) and exc.code == REQUEST_TIMEOUT
+    )
 
 
 __all__ = [

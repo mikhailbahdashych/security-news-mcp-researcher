@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 
 import { whenLabel, type ResearchSession } from '../../api/chat'
+import { ApiError } from '../../api/client'
 import Button from '../ui/Button'
 import Checkbox from '../ui/Checkbox'
 import ConfirmDialog from '../ui/ConfirmDialog'
@@ -25,7 +26,8 @@ interface HistoryDrawerProps {
   onOpen: (id: number) => void
   onRename: (id: number, title: string) => void
   onArchive: (id: number, archived: boolean) => void
-  onDelete: (id: number) => void
+  /** Rejects if the delete failed — the confirm dialog stays open and says so. */
+  onDelete: (id: number) => Promise<void>
   onLoadMore: () => void
   onClose: () => void
 }
@@ -60,6 +62,8 @@ export default function HistoryDrawer({
   const [menuId, setMenuId] = useState<number | null>(null)
   const [draft, setDraft] = useState('')
   const [pendingDelete, setPendingDelete] = useState<ResearchSession | null>(null)
+  const [deleting, setDeleting] = useState(false)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
 
   // Escape unwinds one layer at a time: the confirm dialog, the row menu, then a
   // rename in progress, then the drawer. Closing everything at once loses the
@@ -97,6 +101,32 @@ export default function HistoryDrawer({
     setDraft(session.title ?? '')
     setEditingId(session.id)
     setMenuId(null)
+  }
+
+  /**
+   * Delete, then close — not the other way round.
+   *
+   * Closing first meant the dialog's `busy` and `error` props could never be
+   * true: a delete that failed closed the dialog, left the row in the list and
+   * said nothing at all, so the user's next move was to press Delete again.
+   */
+  const confirmDelete = async (session: ResearchSession) => {
+    setDeleting(true)
+    setDeleteError(null)
+    try {
+      await onDelete(session.id)
+      setPendingDelete(null)
+    } catch (cause) {
+      // The server's own reason, when there is one: "is the backend running?" is
+      // misleading for a 409 or a 500, and it is the only thing the dialog says.
+      setDeleteError(
+        cause instanceof ApiError
+          ? cause.detail
+          : 'Could not delete this chat. Is the backend running?',
+      )
+    } finally {
+      setDeleting(false)
+    }
   }
 
   return (
@@ -252,14 +282,16 @@ export default function HistoryDrawer({
             </>
           }
           confirmLabel="Delete chat"
-          busy={busyId === pendingDelete.id}
-          onCancel={() => setPendingDelete(null)}
-          onConfirm={() => {
-            // The row greys out while the delete is in flight and leaves the
-            // list when it lands, which is the whole of the feedback needed.
-            onDelete(pendingDelete.id)
+          busy={deleting}
+          error={deleteError}
+          onCancel={() => {
+            if (deleting) {
+              return
+            }
             setPendingDelete(null)
+            setDeleteError(null)
           }}
+          onConfirm={() => void confirmDelete(pendingDelete)}
         />
       ) : null}
     </div>

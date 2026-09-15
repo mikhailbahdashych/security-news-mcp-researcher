@@ -228,10 +228,22 @@ class BuiltinToolProvider:
             web_search_on = await self._web_search_on(session)
             items = list(page.items)
 
+        # `page.next_cursor` answers the *un-dated* query, so it is re-measured
+        # below once the window has been applied.
+        beyond_the_page = page.next_cursor is not None
+
         if since_days:
             cutoff = utcnow() - timedelta(days=_clamp(since_days, 7, 1, 365))
-            items = [item for item in items if _sort_date(item) >= cutoff]
+            in_window = [item for item in items if _sort_date(item) >= cutoff]
+            # Items come back newest-first. If the window cut into this page at
+            # all, everything beyond the page is older still and outside the
+            # window too — so "narrow it with since_days" would be advice the
+            # model has already taken.
+            if len(in_window) < len(items):
+                beyond_the_page = False
+            items = in_window
 
+        matched = items
         items = items[:limit]
         if not items:
             nudge = (
@@ -241,7 +253,23 @@ class BuiltinToolProvider:
             )
             return ToolResult(content=f'No items in the local inbox match "{q}".{nudge}')
 
-        return ToolResult(content=_render_items(items, titles), raw={"count": len(items)})
+        # Two different ways matches go unreported, and the model can act on
+        # both: it asked for fewer than it matched (raise `limit`), or the query
+        # is broader than one page (narrow it, or bound it with `since_days`).
+        dropped = len(matched) - len(items)
+        # `shown`, not `len(items)`: the renderer has its own character budget,
+        # so `count` has to describe what the model was actually handed.
+        rendered, shown = _render_items(items, titles)
+        return ToolResult(
+            content=rendered + _more_matches_note(dropped, beyond_the_page),
+            raw={
+                "count": shown,
+                "has_more": beyond_the_page or dropped > 0 or shown < len(items),
+                # Recorded rather than rendered: the tool takes no cursor, so this
+                # is for the stored tool_call row, not for the model to act on.
+                "next_cursor": page.next_cursor,
+            },
+        )
 
     # ---- get_feed_item ----------------------------------------------------
 
@@ -394,7 +422,34 @@ def _item_header(item: FeedItem) -> str:
     )
 
 
-def _render_items(items: Sequence[FeedItem], titles: dict[int, str | None]) -> str:
+def _more_matches_note(dropped: int, beyond_the_page: bool) -> str:
+    """What to tell the model when the answer is not the whole answer.
+
+    Silence here reads as "that is everything in the inbox", which is how a
+    search that really matched hundreds of items became a confident summary of
+    the first twenty.
+    """
+    if dropped > 0 and beyond_the_page:
+        return (
+            f"\n\n[{dropped} further matches were cut by limit, and more than "
+            f"{MAX_SEARCH_LIMIT} items match in total. Narrow the query, or raise limit "
+            f"(max {MAX_SEARCH_LIMIT}).]"
+        )
+    if dropped > 0:
+        return (
+            f"\n\n[{dropped} further matches were cut by limit. Raise limit "
+            f"(max {MAX_SEARCH_LIMIT}) to see them.]"
+        )
+    if beyond_the_page:
+        return (
+            f"\n\n[More than {MAX_SEARCH_LIMIT} items match. Narrow the query, or bound it "
+            "with since_days, to be sure of seeing the relevant ones.]"
+        )
+    return ""
+
+
+def _render_items(items: Sequence[FeedItem], titles: dict[int, str | None]) -> tuple[str, int]:
+    """The rendered list, and how many items fitted in :data:`MAX_SEARCH_CHARS`."""
     lines: list[str] = []
     used = 0
     shown = 0
@@ -414,7 +469,7 @@ def _render_items(items: Sequence[FeedItem], titles: dict[int, str | None]) -> s
     rendered = "\n".join(lines)
     if shown < len(items):
         rendered += f"\n\n[{len(items) - shown} further matches omitted to save space.]"
-    return rendered
+    return rendered, shown
 
 
 __all__ = [
