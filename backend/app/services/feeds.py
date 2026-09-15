@@ -53,10 +53,10 @@ MAX_CONCURRENT_FEEDS = 8
 
 #: How many rows go into one multi-VALUES ``INSERT``. Each row binds ten
 #: parameters, so an unchunked insert of a large feed multiplies straight into
-#: SQLite's ``SQLITE_MAX_VARIABLE_NUMBER`` ceiling — 32766 on current builds, but
-#: only 999 on anything built before 3.32, which is still what some distributions
-#: ship. Feeds of several thousand entries are real (an archive page, or a feed
-#: being ingested for the first time), so the ceiling is not hypothetical.
+#: SQLite's ``SQLITE_MAX_VARIABLE_NUMBER`` ceiling. That ceiling is 32766 on every
+#: SQLite this runs on (3.32+, 2020), which 500 rows x 10 parameters clears with
+#: room to spare. Feeds of several thousand entries are real — an archive page, or
+#: any feed being ingested for the first time — so the ceiling is not hypothetical.
 INSERT_CHUNK_ROWS = 500
 
 #: What a 403 on a feed actually means, in words the inbox can show. It is almost
@@ -65,7 +65,8 @@ INSERT_CHUNK_ROWS = 500
 #: was correct. The response body is deliberately not included: a challenge page is
 #: several KB of markup and scripts, and none of it helps.
 BOT_PROTECTION_ERROR = (
-    "HTTP 403 (blocked by the site's bot protection — this feed needs a browser-like client)"
+    "HTTP 403 (blocked by the site's bot protection, and a browser-TLS retry did not "
+    "get through either)"
 )
 
 #: Seeded by ``POST /api/feeds/seed-defaults``. Every URL was fetched and confirmed
@@ -210,6 +211,14 @@ async def parse_feed(raw: bytes) -> Any:
     return await anyio.to_thread.run_sync(feedparser.parse, raw)
 
 
+def _feed_metadata(parsed: Any) -> tuple[str | None, str | None]:
+    """The feed's own title and site link, if it gave usable ones."""
+    return (
+        (parsed.feed.get("title") or "").strip() or None,
+        (parsed.feed.get("link") or "").strip() or None,
+    )
+
+
 def _bozo_message(parsed: Any) -> str:
     exception = getattr(parsed, "bozo_exception", None)
     return str(exception) if exception else "the feed contained no entries"
@@ -279,6 +288,7 @@ class _BrowserRetry:
         self._transport = transport
         self._enabled = enabled
         self._client: httpx2.AsyncClient | None = None
+        self._retired: list[httpx2.AsyncClient] = []
         self._lock = asyncio.Lock()
 
     async def client(self) -> httpx2.AsyncClient | None:
@@ -294,10 +304,27 @@ class _BrowserRetry:
                     self._enabled = False
             return self._client
 
+    async def discard(self, client: httpx2.AsyncClient) -> None:
+        """Stop handing out ``client`` after it failed, so the next 403 rebuilds.
+
+        A libcurl session that has just errored may be unusable, and every
+        remaining feed in the batch would inherit the failure. It is *retired*
+        rather than closed here: another feed may be mid-request on it right now,
+        and closing that out from under them would turn one feed's problem into
+        everybody's. They are all closed together in :meth:`aclose`.
+        """
+        async with self._lock:
+            if self._client is client:
+                self._retired.append(client)
+                self._client = None
+
     async def aclose(self) -> None:
-        if self._client is not None:
-            await self._client.aclose()
+        async with self._lock:
+            clients = [c for c in (self._client, *self._retired) if c is not None]
             self._client = None
+            self._retired.clear()
+        for client in clients:
+            await client.aclose()
 
 
 async def _fetch_feed(
@@ -323,7 +350,14 @@ async def _fetch_feed(
     if browser is None:
         return response
     logger.info("Feed %s answered 403; retrying with a browser TLS fingerprint", url)
-    return await fetch_guarded(browser, url, max_bytes=MAX_FEED_BYTES, validate_first_hop=False)
+    try:
+        return await fetch_guarded(browser, url, max_bytes=MAX_FEED_BYTES, validate_first_hop=False)
+    except Exception:
+        # Includes the guard refusing a redirect hop, which says nothing about the
+        # client's health — but a session that raised is not worth trusting for the
+        # rest of the batch, and rebuilding one is cheap next to a wrong answer.
+        await retry.discard(browser)
+        raise
 
 
 async def _refresh_one(
@@ -346,17 +380,21 @@ async def _refresh_one(
         response.raise_for_status()
         parsed = await parse_feed(response.content)
 
-        feed_title = (parsed.feed.get("title") or "").strip() or None
-        site_url = (parsed.feed.get("link") or "").strip() or None
         if parsed.entries:
             # bozo is tolerated here on purpose: the entries parsed fine.
+            feed_title, site_url = _feed_metadata(parsed)
             rows = _entry_rows(feed_id, parsed, fetched_at)
         elif getattr(parsed, "bozo", 0) and getattr(parsed, "bozo_exception", None):
             # Nothing parsed *and* the parser complained: that is a broken feed.
+            # Whatever feedparser salvaged from it is not trustworthy enough to
+            # adopt as the feed's name, so the metadata is deliberately left alone.
             error = _bozo_message(parsed)
-        # Otherwise the document was well-formed and simply has no entries yet — a
-        # new advisory feed in a quiet week, say. That is a successful fetch, not an
-        # error, and reporting it as one trains people to ignore the error column.
+        else:
+            # A well-formed document that simply has no entries yet — a new advisory
+            # feed in a quiet week, say. That is a successful fetch, not an error,
+            # and reporting it as one trains people to ignore the error column. Its
+            # title is still worth having.
+            feed_title, site_url = _feed_metadata(parsed)
     except GuardError as exc:
         error = str(exc)
     except httpx2.HTTPStatusError as exc:

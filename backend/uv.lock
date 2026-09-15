@@ -1538,7 +1538,7 @@ requires-dist = [
     { name = "aiosqlite", specifier = ">=0.22.1" },
     { name = "anthropic", specifier = ">=1.5.0" },
     { name = "anyio", specifier = ">=4.0" },
-    { name = "curl-cffi", specifier = ">=0.13" },
+    { name = "curl-cffi", specifier = ">=0.13,<1" },
     { name = "fastapi" },
     { name = "feedparser", specifier = ">=6.0.11" },
     { name = "greenlet", specifier = ">=3.5.5" },

@@ -147,3 +147,96 @@ async def test_an_item_without_a_link_cannot_be_extracted(db_session: AsyncSessi
 async def test_a_missing_item_raises_lookup_error(db_session: AsyncSession) -> None:
     with pytest.raises(LookupError):
         await extract_service.extract_item(db_session, 9999, transport=routes_transport({}))
+
+
+async def test_a_403_article_is_retried_with_a_browser_fingerprint() -> None:
+    """Without this the inbox ingests CISA's advisories and then cannot read any of them.
+
+    The feed retry gets the items in; the sites that refuse a non-browser client
+    refuse it for their article pages too, so extraction needs the same fallback.
+    """
+    blocked = routes_transport({ARTICLE_URL: httpx2.Response(403, text="denied")})
+    browser = routes_transport({ARTICLE_URL: html_response("article.html")})
+
+    result = await extract_service.extract_article(
+        ARTICLE_URL, 20_000, 10, transport=blocked, impersonate_transport=browser
+    )
+
+    assert result.ok is True
+    assert result.text
+    assert len(browser.requests) == 1
+
+
+async def test_a_403_article_the_browser_retry_cannot_fix_is_reported() -> None:
+    blocked = routes_transport({ARTICLE_URL: httpx2.Response(403, text="denied")})
+    also_blocked = routes_transport({ARTICLE_URL: httpx2.Response(403, text="denied")})
+
+    result = await extract_service.extract_article(
+        ARTICLE_URL, 20_000, 10, transport=blocked, impersonate_transport=also_blocked
+    )
+
+    assert result.ok is False
+    assert result.reason == "HTTP 403"
+    assert len(also_blocked.requests) == 1
+
+
+@pytest.mark.parametrize("status", [401, 404, 429, 500])
+async def test_no_status_but_403_retries_an_article(status: int) -> None:
+    failing = routes_transport({ARTICLE_URL: httpx2.Response(status, text="nope")})
+    browser = routes_transport({ARTICLE_URL: html_response("article.html")})
+
+    result = await extract_service.extract_article(
+        ARTICLE_URL, 20_000, 10, transport=failing, impersonate_transport=browser
+    )
+
+    assert result.ok is False
+    assert result.reason == f"HTTP {status}"
+    assert browser.requests == []
+
+
+async def test_the_article_browser_retry_is_never_built_behind_a_mock_transport(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same rule as the feed path: a 403 fixture must never reach the network."""
+    built: list[object] = []
+    monkeypatch.setattr(
+        extract_service,
+        "build_impersonating_client",
+        lambda *args, **kwargs: built.append(args) or None,
+    )
+    transport = routes_transport({ARTICLE_URL: httpx2.Response(403, text="denied")})
+
+    result = await extract_service.extract_article(ARTICLE_URL, 20_000, 10, transport=transport)
+
+    assert result.reason == "HTTP 403"
+    assert built == []
+
+
+async def test_the_guard_validates_every_hop_on_the_article_browser_retry() -> None:
+    """An article URL is untrusted from the first hop, and the retry keeps it that way."""
+    blocked = routes_transport({ARTICLE_URL: httpx2.Response(403, text="denied")})
+    browser = routes_transport(
+        {ARTICLE_URL: httpx2.Response(302, headers={"location": "http://169.254.169.254/"})}
+    )
+
+    result = await extract_service.extract_article(
+        ARTICLE_URL, 20_000, 10, transport=blocked, impersonate_transport=browser
+    )
+
+    assert result.ok is False
+    assert "not a public address" in result.reason
+
+
+async def test_extract_item_passes_the_browser_seam_through(db_session: AsyncSession) -> None:
+    item = await make_item(db_session, url=ARTICLE_URL, summary="A short RSS blurb.")
+    blocked = routes_transport({ARTICLE_URL: httpx2.Response(403, text="denied")})
+    browser = routes_transport({ARTICLE_URL: html_response("article.html")})
+
+    result = await extract_service.extract_item(
+        db_session, item.id, transport=blocked, impersonate_transport=browser
+    )
+    await db_session.commit()
+
+    assert result.extracted is True
+    assert result.fallback is False
+    assert result.item.content_text

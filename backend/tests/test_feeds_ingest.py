@@ -470,3 +470,77 @@ async def test_the_feed_byte_ceiling_is_enforced(
     await db_session.refresh(feed)
     assert feed.last_status == "error"
     assert await items_of(db_session, feed.id) == []
+
+
+async def test_the_guard_still_validates_every_hop_on_the_browser_retry(
+    db_session: AsyncSession, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """The impersonated path is not a way around the SSRF guard.
+
+    It is a different TLS stack, not a different policy: fetch_guarded still drives
+    it, so a redirect towards the link-local metadata service is refused there
+    exactly as it is on the ordinary client.
+    """
+    feed = await add_feed(db_session, BROKEN_URL)
+    blocked = routes_transport({BROKEN_URL: httpx2.Response(403, text="denied")})
+    browser = routes_transport(
+        {
+            BROKEN_URL: httpx2.Response(
+                302, headers={"location": "http://169.254.169.254/latest/meta-data/"}
+            )
+        }
+    )
+
+    result = await feeds_service.refresh_feeds(
+        session_factory, None, transport=blocked, impersonate_transport=browser
+    )
+
+    assert "not a public address" in result.results[0].error
+    # The redirect was never followed: only the first hop was ever requested.
+    assert [str(r.url) for r in browser.requests] == [BROKEN_URL]
+    await db_session.refresh(feed)
+    assert feed.last_status == "error"
+
+
+@pytest.mark.parametrize("status", [401, 404, 429, 500, 503])
+async def test_no_status_but_403_triggers_the_browser_retry(
+    db_session: AsyncSession,
+    session_factory: async_sessionmaker[AsyncSession],
+    status: int,
+) -> None:
+    """403 is "we refuse this client"; the rest are answers about the resource."""
+    await add_feed(db_session, BROKEN_URL)
+    failing = routes_transport({BROKEN_URL: httpx2.Response(status, text="nope")})
+    browser = routes_transport({BROKEN_URL: xml_response("sample_rss.xml")})
+
+    result = await feeds_service.refresh_feeds(
+        session_factory, None, transport=failing, impersonate_transport=browser
+    )
+
+    assert result.results[0].error == f"HTTP {status}"
+    assert browser.requests == []
+
+
+async def test_a_broken_feeds_salvaged_metadata_is_not_adopted(
+    db_session: AsyncSession, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Whatever feedparser scrapes out of a document it could not parse is not a name."""
+    feed = await add_feed(db_session, BROKEN_URL)
+    # Well-formed enough for feedparser to find a title, malformed enough to bozo
+    # out with no entries at all.
+    half_broken = b"<?xml version='1.0'?><rss><channel><title>Salvaged</title></rss"
+    transport = routes_transport(
+        {
+            BROKEN_URL: httpx2.Response(
+                200, content=half_broken, headers={"content-type": "text/xml"}
+            )
+        }
+    )
+
+    result = await feeds_service.refresh_feeds(session_factory, None, transport=transport)
+
+    assert result.results[0].error
+    await db_session.refresh(feed)
+    assert feed.last_status == "error"
+    assert feed.title is None
+    assert feed.site_url is None

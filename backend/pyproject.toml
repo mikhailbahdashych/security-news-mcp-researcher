@@ -27,7 +27,7 @@ dependencies = [
     # aarch64, so the Docker image needs no build toolchain or system package.
     # app.services.http imports it defensively: an installation without the wheel
     # reports the block instead of failing to start.
-    "curl-cffi>=0.13",
+    "curl-cffi>=0.13,<1",
 ]
 
 [dependency-groups]
