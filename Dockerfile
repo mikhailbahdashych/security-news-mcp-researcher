@@ -82,10 +82,17 @@ RUN useradd --create-home --home-dir /data --shell /usr/sbin/nologin app \
     && chown -R app:app /data
 
 VOLUME /data
-USER app
+
+# No `USER app`: the entrypoint starts as root, repairs the ownership of a /data
+# volume created by an older root-running image (fresh volumes already come up
+# owned by app, and are left alone), and then drops to app with setpriv before
+# exec-ing the CMD. The server still runs as app — check with `docker top`.
+COPY --chmod=0755 docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
 # Documentation only, and only correct for the default: the app binds $PORT, and
-# a published port is what actually decides reachability.
+# a published port is what actually decides reachability. PORT must be >= 1024:
+# the server runs as the unprivileged `app` user and cannot bind a lower one.
 EXPOSE 8000
 
 # `python -m app`, not `uvicorn`: it is the one entrypoint that reads PORT off
