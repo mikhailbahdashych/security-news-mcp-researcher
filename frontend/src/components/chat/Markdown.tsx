@@ -30,6 +30,14 @@ export default function Markdown({ children, sources = [], className }: Markdown
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
+          // A table of CVEs is wider than a 720px answer column and wider still
+          // in a split pane, and a table cannot scroll on its own — so it gets a
+          // scrollport of its own rather than pushing the page sideways.
+          table: ({ children: rows, ...props }) => (
+            <div className="overflow-x-auto">
+              <table {...props}>{rows}</table>
+            </div>
+          ),
           a: ({ href, children: label, ...props }) => {
             const cited = citationFor(sources, href)
             if (cited) {

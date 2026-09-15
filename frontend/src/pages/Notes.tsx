@@ -9,6 +9,7 @@ import {
   notesQueryKey,
   type NoteSummary,
 } from '../api/notes'
+import { excerptFromMarkdown } from '../components/notes/excerpt'
 import GenerateNotesDialog from '../components/notes/GenerateNotesDialog'
 import { formatNoteDate, formatNoteDay } from '../components/notes/noteDate'
 import Button from '../components/ui/Button'
@@ -153,9 +154,10 @@ function NoteRow({ note, busy, onDelete, onOpen }: NoteRowProps) {
         {formatNoteDay(note.created_at)} · {sources}
         {note.session_id !== null ? ' · from a research session' : ''}
       </span>
-      {/* Plain text: the excerpt is raw Markdown and is shown as such. */}
+      {/* The API's excerpt is the head of the Markdown source, so the hashes,
+          arrows and asterisks come off before the two-line clamp. */}
       <span className="mt-[5px] line-clamp-2 block text-[12px] leading-[1.55] text-muted">
-        {note.excerpt}
+        {excerptFromMarkdown(note.excerpt)}
       </span>
     </>
   )

@@ -18,6 +18,7 @@ import Button from '../components/ui/Button'
 import Card from '../components/ui/Card'
 import ConfirmDialog from '../components/ui/ConfirmDialog'
 import EmptyState from '../components/ui/EmptyState'
+import Icon from '../components/ui/Icon'
 import Input from '../components/ui/Input'
 import PageHeader from '../components/ui/PageHeader'
 import SectionLabel from '../components/ui/SectionLabel'
@@ -140,10 +141,15 @@ export default function NoteDetailPage({
         actions={
           editing ? null : (
             <>
-              <Button onClick={startEditing}>Edit</Button>
-              <Button onClick={() => void copy()}>Copy</Button>
+              <Button icon="edit" onClick={startEditing}>
+                Edit
+              </Button>
+              <Button icon="copy" onClick={() => void copy()}>
+                Copy
+              </Button>
               {/* A plain link, so the browser honours the attachment header. */}
               <a href={exportUrl(data.id)} download className={buttonClass('secondary')}>
+                <Icon name="download" size={14} />
                 Download
               </a>
               <Button

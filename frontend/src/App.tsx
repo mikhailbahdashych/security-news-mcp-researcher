@@ -60,9 +60,12 @@ export default function App() {
       />
 
       <main className="flex min-w-0 flex-1">
+        {/* The pane clips; the page inside it scrolls (`PAGE_SCROLL`, or the
+            research view's own column). Two nested scrollports meant two
+            scrollbars and a wheel that sometimes moved the wrong one. */}
         <div
           className={cx(
-            'h-full min-w-0 flex-1 overflow-y-auto',
+            'h-full min-w-0 flex-1 overflow-hidden',
             layout.split && 'border-r border-line',
           )}
         >
@@ -77,7 +80,7 @@ export default function App() {
         </div>
 
         {layout.split ? (
-          <div className="h-full min-w-0 flex-1 overflow-y-auto">
+          <div className="h-full min-w-0 flex-1 overflow-hidden">
             <PageHost page={layout.paneB} embedded />
           </div>
         ) : null}

@@ -146,11 +146,17 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
     }
   }, [sessionId, turns.length])
 
-  // While a turn is running, follow it.
+  // While a turn is running, follow it — once a frame, and without animating.
+  // Deltas arrive many times a second, and each one restarted a smooth scroll
+  // that never had time to finish: the column crawled behind the text.
   useEffect(() => {
-    if (live.prompt !== null) {
-      bottom.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
+    if (live.prompt === null) {
+      return
     }
+    const frame = requestAnimationFrame(() => {
+      bottom.current?.scrollIntoView({ behavior: 'auto', block: 'end' })
+    })
+    return () => cancelAnimationFrame(frame)
   }, [live.prompt, live.text, live.steps.length])
 
   const rename = useMutation({

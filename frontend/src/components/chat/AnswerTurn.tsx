@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { memo, useMemo } from 'react'
 
 import { collectSources, type ErrorPayload, type TurnAttachment, type TurnStep } from '../../api/chat'
 import Icon from '../ui/Icon'
@@ -53,8 +53,13 @@ function AttachedChip({ attachment }: { attachment: TurnAttachment }) {
  * The same component renders a stored turn and the one streaming right now —
  * they differ only in where the steps came from, which is the whole point of
  * deriving both through `api/chat`.
+ *
+ * Memoized: a streaming turn re-renders the page on every chunk of text, and
+ * without this every stored turn above it re-parsed its whole markdown answer
+ * each time. The props are the fields of a `Turn`, which `groupTurns` only
+ * rebuilds when the transcript changes, so the shallow compare is exact.
  */
-export default function AnswerTurn({
+function AnswerTurn({
   question,
   attachments,
   steps,
@@ -103,3 +108,5 @@ export default function AnswerTurn({
     </article>
   )
 }
+
+export default memo(AnswerTurn)
