@@ -25,8 +25,10 @@ def fixture_text(name: str) -> str:
 class RecordingTransport(httpx2.MockTransport):
     """A ``MockTransport`` that keeps every request it was handed.
 
-    The feed and article fetchers have to send a browser-like ``User-Agent``, and the
-    only honest way to assert that is to look at the request that actually went out.
+    The outgoing ``User-Agent`` is load-bearing — it must name this application
+    rather than claim to be a browser, because a browser claim the TLS handshake
+    contradicts is what bot-management rules block — and the only honest way to
+    assert what went out is to look at the request that actually went out.
     """
 
     def __init__(self, handler: Callable[[httpx2.Request], httpx2.Response]) -> None:
