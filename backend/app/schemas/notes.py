@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.services.notes import MAX_NOTE_ITEMS, TITLE_MAX_CHARS
 
@@ -64,6 +64,22 @@ class NoteUpdate(BaseModel):
 
     title: str | None = Field(default=None, min_length=1, max_length=TITLE_MAX_CHARS)
     body_md: str | None = Field(default=None, min_length=1)
+
+    @field_validator("title")
+    @classmethod
+    def _strip_title(cls, value: str | None) -> str | None:
+        """Validate what will be *stored*, not what was typed.
+
+        ``min_length`` ran against the raw string, so ``"   "`` passed the schema
+        and the route then stored the stripped value: a blank title, which is the
+        one thing this field refuses to accept.
+        """
+        if value is None:
+            return None
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("title cannot be blank")
+        return stripped
 
     @model_validator(mode="after")
     def _at_least_one_field(self) -> NoteUpdate:

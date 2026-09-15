@@ -533,7 +533,8 @@ def turn_text_editor(
 
 def turn_web_search(
     *,
-    results: list[tuple[str, str]],
+    results: list[tuple[str, str]] | None = None,
+    error_code: str | None = None,
     tool_use_id: str = "srvtoolu_ws",
     query: str = "acmevpn rce",
     text: str | None = None,
@@ -544,16 +545,29 @@ def turn_web_search(
     The result blocks are what note generation harvests extra source URLs from,
     so the titles and URLs here are real ``BetaWebSearchResultBlock`` fields
     rather than a hand-rolled dict.
+
+    ``error_code`` swaps the whole list for a ``BetaWebSearchToolResultError``
+    object — the shape a *failed* server tool comes back as, since server-tool
+    errors are an HTTP 200 and never raise. It is the other half of the branch
+    ``_server_tool_result_payload`` has to get right: list means results, object
+    means "look at the type before assuming anything".
     """
-    from anthropic.types.beta import BetaWebSearchResultBlock, BetaWebSearchToolResultBlock
+    from anthropic.types.beta import (
+        BetaWebSearchResultBlock,
+        BetaWebSearchToolResultBlock,
+        BetaWebSearchToolResultError,
+    )
 
     use = BetaServerToolUseBlock(
         type="server_tool_use", id=tool_use_id, name="web_search", input={"query": query}
     )
-    result = BetaWebSearchToolResultBlock(
-        type="web_search_tool_result",
-        tool_use_id=tool_use_id,
-        content=[
+    payload: Any
+    if error_code is not None:
+        payload = BetaWebSearchToolResultError(
+            type="web_search_tool_result_error", error_code=error_code
+        )
+    else:
+        payload = [
             BetaWebSearchResultBlock(
                 type="web_search_result",
                 encrypted_content="enc",
@@ -561,8 +575,12 @@ def turn_web_search(
                 title=title,
                 url=url,
             )
-            for title, url in results
-        ],
+            for title, url in results or []
+        ]
+    result = BetaWebSearchToolResultBlock(
+        type="web_search_tool_result",
+        tool_use_id=tool_use_id,
+        content=payload,
     )
     content: list[Any] = [use, result]
     events: list[Any] = [

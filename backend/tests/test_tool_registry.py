@@ -8,7 +8,7 @@ from dataclasses import dataclass
 import pytest
 from sqlalchemy import select
 
-from app.agent.builtin import BuiltinToolProvider, ServerToolProvider
+from app.agent.builtin import MAX_SEARCH_LIMIT, BuiltinToolProvider, ServerToolProvider
 from app.agent.registry import (
     TOOL_NAME_PATTERN,
     RegisteredTool,
@@ -278,6 +278,55 @@ async def test_search_feed_items_maps_any_to_all(session_factory, seeded):
 
     assert result.is_error is False
     assert "AcmeVPN" in result.content
+
+
+async def test_search_feed_items_says_nothing_about_more_when_it_returned_everything(
+    session_factory, seeded
+):
+    result = await BuiltinToolProvider(session_factory).search_feed_items(q="AcmeVPN")
+
+    assert "further matches" not in result.content
+    assert "match in total" not in result.content
+    assert result.raw == {"count": 1, "has_more": False, "next_cursor": None}
+
+
+async def test_search_feed_items_admits_the_matches_the_limit_cut(session_factory, seeded):
+    """Silence read as "that is the whole inbox", which is how a search that
+    matched far more than it showed became a confident summary of the first few."""
+    result = await BuiltinToolProvider(session_factory).search_feed_items(q="e", limit=1)
+
+    assert result.is_error is False
+    assert "further matches were cut by limit" in result.content
+    assert result.raw["has_more"] is True
+    assert result.raw["count"] == 1
+
+
+async def test_search_feed_items_admits_a_full_page(session_factory, db_session, seeded):
+    """More matches than one page holds: the tool takes no cursor, so the model
+    is told to narrow the query rather than handed one it cannot use."""
+    feed_id = seeded.id
+    db_session.add_all(
+        [
+            FeedItem(
+                feed_id=feed_id,
+                guid=f"bulk-{index}",
+                url=f"https://example.test/bulk-{index}",
+                title=f"AcmeVPN follow-up {index}",
+                summary="More AcmeVPN coverage.",
+                published_at=utcnow(),
+            )
+            for index in range(MAX_SEARCH_LIMIT)
+        ]
+    )
+    await db_session.commit()
+
+    result = await BuiltinToolProvider(session_factory).search_feed_items(
+        q="AcmeVPN", limit=MAX_SEARCH_LIMIT
+    )
+
+    assert f"More than {MAX_SEARCH_LIMIT} items match" in result.content
+    assert result.raw["has_more"] is True
+    assert result.raw["next_cursor"]
 
 
 async def test_search_feed_items_empty_result_is_not_an_error(session_factory, seeded):

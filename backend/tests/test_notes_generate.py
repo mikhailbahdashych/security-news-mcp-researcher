@@ -367,6 +367,53 @@ async def test_session_transcript_is_text_only(app, client, with_key, session_fa
     assert await _count(session_factory, ResearchSession) == 1
 
 
+async def test_a_session_only_note_has_no_sources_at_all(
+    app, client, with_key, session_factory
+):
+    """Sources are citations, not provenance.
+
+    A note generated from a chat links to the chat through ``notes.session_id``;
+    the transcript's own text is not a source row, and inventing one per message
+    would fill the detail page's Sources block with links to nothing. Only items
+    attached to the generation and URLs the model actually read become rows.
+    """
+    async with session_factory() as session:
+        research = ResearchSession(title="AcmeVPN", model="claude-opus-5")
+        session.add(research)
+        await session.flush()
+        session.add_all(
+            [
+                Message(
+                    session_id=research.id,
+                    seq=1,
+                    role="user",
+                    kind="user",
+                    content_json=[{"type": "text", "text": "what happened with acmevpn"}],
+                ),
+                Message(
+                    session_id=research.id,
+                    seq=2,
+                    role="assistant",
+                    kind="assistant",
+                    content_json=[{"type": "text", "text": "A pre-auth RCE, patched in 3.2.1."}],
+                    stop_reason="end_turn",
+                ),
+            ]
+        )
+        await session.commit()
+        session_id = research.id
+
+    use_script(app, turn_text("## AcmeVPN\n**What happened** — a pre-auth RCE."))
+
+    response = await generate(client, session_id=session_id)
+
+    assert event_names(response.text)[-1] == "done"
+    notes = await note_rows(session_factory)
+    assert len(notes) == 1
+    assert notes[0].session_id == session_id
+    assert await source_rows(session_factory) == []
+
+
 async def _count(session_factory, model) -> int:
     async with session_factory() as session:
         return await session.scalar(select(func.count()).select_from(model))

@@ -232,6 +232,7 @@ class BuiltinToolProvider:
             cutoff = utcnow() - timedelta(days=_clamp(since_days, 7, 1, 365))
             items = [item for item in items if _sort_date(item) >= cutoff]
 
+        matched = items
         items = items[:limit]
         if not items:
             nudge = (
@@ -241,7 +242,21 @@ class BuiltinToolProvider:
             )
             return ToolResult(content=f'No items in the local inbox match "{q}".{nudge}')
 
-        return ToolResult(content=_render_items(items, titles), raw={"count": len(items)})
+        # Two different ways matches go unreported, and the model can act on
+        # both: it asked for fewer than it matched (raise `limit`), or the query
+        # is broader than one page (narrow it, or bound it with `since_days`).
+        beyond_the_page = page.next_cursor is not None
+        dropped = len(matched) - len(items)
+        return ToolResult(
+            content=_render_items(items, titles) + _more_matches_note(dropped, beyond_the_page),
+            raw={
+                "count": len(items),
+                "has_more": beyond_the_page or dropped > 0,
+                # Recorded rather than rendered: the tool takes no cursor, so this
+                # is for the stored tool_call row, not for the model to act on.
+                "next_cursor": page.next_cursor,
+            },
+        )
 
     # ---- get_feed_item ----------------------------------------------------
 
@@ -392,6 +407,32 @@ def _item_header(item: FeedItem) -> str:
         f"id: {item.id} · url: {item.url or '(none)'} · "
         f"published: {published:%Y-%m-%d}"
     )
+
+
+def _more_matches_note(dropped: int, beyond_the_page: bool) -> str:
+    """What to tell the model when the answer is not the whole answer.
+
+    Silence here reads as "that is everything in the inbox", which is how a
+    search that really matched hundreds of items became a confident summary of
+    the first twenty.
+    """
+    if dropped > 0 and beyond_the_page:
+        return (
+            f"\n\n[{dropped} further matches were cut by limit, and more than "
+            f"{MAX_SEARCH_LIMIT} items match in total. Narrow the query, or raise limit "
+            f"(max {MAX_SEARCH_LIMIT}).]"
+        )
+    if dropped > 0:
+        return (
+            f"\n\n[{dropped} further matches were cut by limit. Raise limit "
+            f"(max {MAX_SEARCH_LIMIT}) to see them.]"
+        )
+    if beyond_the_page:
+        return (
+            f"\n\n[More than {MAX_SEARCH_LIMIT} items match. Narrow the query, or bound it "
+            "with since_days, to be sure of seeing the relevant ones.]"
+        )
+    return ""
 
 
 def _render_items(items: Sequence[FeedItem], titles: dict[int, str | None]) -> str:
