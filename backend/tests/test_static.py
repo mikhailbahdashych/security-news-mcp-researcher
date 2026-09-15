@@ -77,7 +77,7 @@ async def test_path_traversal_is_not_served(spa_client: httpx2.AsyncClient) -> N
     [
         "/%2e%2e/secrets.txt",
         "/%2E%2E/secrets.txt",
-        "/assets/%2e%2e/%2e%2e/secrets.txt",
+        "/docs/%2e%2e/%2e%2e/secrets.txt",
         "/%2e%2e%2fsecrets.txt",
     ],
 )
@@ -87,9 +87,25 @@ async def test_percent_encoded_traversal_is_not_served(
     """The plain `/../x` case is near-tautological: httpx2 normalises the dots out
     of the URL before the request is ever made, so the app never sees them. These
     reach the resolver with `..` intact — an unquoted path is what ASGI hands the
-    route — which is the case `_resolve_static_file` actually has to refuse."""
+    route — which is the case `_resolve_static_file` actually has to refuse.
+
+    Every path here must stay off `/assets`, which is a separate mount with a
+    guard of its own (below) and never reaches the resolver at all."""
     async with spa_client as client:
         response = await client.get(path)
 
     assert response.status_code in (200, 404)
+    assert SECRET not in response.text
+
+
+async def test_the_assets_mount_refuses_traversal_of_its_own(
+    spa_client: httpx2.AsyncClient,
+) -> None:
+    """`/assets` is a `StaticFiles` mount, not the SPA catch-all: it answers 404
+    before `_resolve_static_file` is called. Pinned separately so that the
+    resolver's own cases above are not quietly testing this instead."""
+    async with spa_client as client:
+        response = await client.get("/assets/%2e%2e/%2e%2e/secrets.txt")
+
+    assert response.status_code == 404
     assert SECRET not in response.text
