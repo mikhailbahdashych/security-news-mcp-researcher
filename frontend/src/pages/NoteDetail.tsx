@@ -293,7 +293,12 @@ function SourceList({ label, sources }: { label: string; sources: NoteSource[] }
       <p className="text-[11px] font-medium text-faint">{label}</p>
       <ul className="mt-1 space-y-[3px]">
         {sources.map((source) => (
-          <li key={source.id} className="text-[12px]">
+          // `break-words`, not a clipping card: a source with no title shows its
+          // raw URL, and one long unbroken tracking URL would otherwise paint
+          // straight out through the rounded edge. Clipping the card instead
+          // would make it a scrollport again, which is what the padded default
+          // exists to avoid.
+          <li key={source.id} className="text-[12px] break-words">
             {source.url ? (
               <a
                 href={source.url}

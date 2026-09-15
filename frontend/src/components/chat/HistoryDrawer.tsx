@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 
 import { whenLabel, type ResearchSession } from '../../api/chat'
+import { ApiError } from '../../api/client'
 import Button from '../ui/Button'
 import Checkbox from '../ui/Checkbox'
 import ConfirmDialog from '../ui/ConfirmDialog'
@@ -115,8 +116,14 @@ export default function HistoryDrawer({
     try {
       await onDelete(session.id)
       setPendingDelete(null)
-    } catch {
-      setDeleteError('Could not delete this chat. Is the backend running?')
+    } catch (cause) {
+      // The server's own reason, when there is one: "is the backend running?" is
+      // misleading for a 409 or a 500, and it is the only thing the dialog says.
+      setDeleteError(
+        cause instanceof ApiError
+          ? cause.detail
+          : 'Could not delete this chat. Is the backend running?',
+      )
     } finally {
       setDeleting(false)
     }
