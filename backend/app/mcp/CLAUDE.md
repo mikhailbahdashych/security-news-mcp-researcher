@@ -43,9 +43,17 @@ verbatim (single-user local app; hiding them would make the blob un-editable), b
 
 - `redact(mapping)` (keys kept, values `"***"`) is **the only shape they may take in a log
   line or an error message**;
-- `manager.describe_error` strips `scheme://user:pass@host` userinfo via `_USERINFO` and
-  truncates to `ERROR_CHARS = 300` before anything reaches the UI;
+- `redact_text(text)` takes out URL userinfo **and** query strings — a hosted server's
+  token lives in the query as often as in a header. Everything derived from a config or
+  an exception goes through it (`manager.describe_error`) before reaching a log, a
+  `repr` or the UI's error field, and it runs before the `ERROR_CHARS = 300` truncation;
+- a connect attempt logs, at DEBUG, the server name, transport, redacted target and the
+  **keys** of `env`/`headers` — never the values;
 - never put `env`/`headers` in a `repr`, an exception message or a log.
+
+A call failure is classified as a timeout **by exception type** — `TimeoutError`, or
+`MCPError` with code `-32001` (`mcp.types.REQUEST_TIMEOUT`) — never by message text. A
+timeout keeps the connection; anything else retires it.
 
 ## `McpManager` lifecycle (`manager.py`)
 
@@ -85,7 +93,7 @@ Two invariants:
 | `_acquire(name, force=False)` | Borrow the live connection, connecting on first use. Returns `None` for disabled / cooling-down / failed. Raises only a cancellation of the **caller's own** task. |
 | `list_tools(name)` | Tools cached **per connection** (dropping the connection drops the list, so a reconnect really re-enumerates). Pages `list_tools(cursor=...)` to exhaustion. `[]` on any failure. |
 | `call_tool(server, tool, args)` | Returns `(text, is_error)` and **never raises**. A tool saying "no" comes back `is_error=True` from the SDK; a dead transport / JSON-RPC error / timeout is flattened into the same shape. A connection-level raise calls `_retire`. |
-| `reload(configs)` | Adopt a new set. Idempotent (value equality), so every route can cheaply re-sync. |
+| `reload(configs)` | Adopt a new set. Idempotent (value equality), so every route can cheaply re-sync. Stale servers are dropped **concurrently** (`asyncio.gather` over `_drop_server`) — sequentially, editing a config with three wedged servers in it meant three timeouts in a row on a request the user is watching. |
 | `reconnect(name)` | The one deliberate eager connect. Drops the connection, clears the error and cooldown, connects now, re-lists. Still bounded, still non-raising. |
 | `aclose()` | Sets every `close_event`, awaits the owner tasks (bounded by `CLOSE_TIMEOUT_S`, then cancels). **Run on lifespan shutdown — this is what kills stdio subprocesses.** |
 
@@ -121,7 +129,13 @@ Satisfies the agent's `ToolProvider` protocol: `source = ToolSource.MCP` +
   deterministic because the input is sorted by `(server, tool)` first, and a name that
   moves invalidates the conversation's prompt cache.
 - **Listing is where the lazy connect happens** — building the tool array is the model's
-  first use of a server.
+  first use of a server — and it fans out: `list_tools()` gathers
+  `manager.list_tools(server)` over **every server at once**. This runs before the first
+  token of every chat turn and every note generation, so three dead servers used to cost
+  three 10 s connect budgets in a row. Each server has its own lock, so concurrent
+  listing is already safe, and `list_tools` never raises. The *output* order is
+  unchanged — results are zipped back onto the name-sorted `server_names`, because the
+  array is the head of the prompt-cache prefix.
 - Per-tool prefs (`mcp_tool_prefs`, keyed `(server_name, original_tool_name)`; absent =
   enabled) are applied *here*, by simply not returning a disabled tool. The registry then
   has nothing to dispatch to, so a cached model turn that still remembers a disabled tool
@@ -141,7 +155,7 @@ Satisfies the agent's `ToolProvider` protocol: `source = ToolSource.MCP` +
 | `GET /api/mcp/servers` | **No.** Status board from cache + the stored blob, so Settings opens instantly with a wedged server configured. |
 | `PUT /api/mcp/servers` | **No.** Persists (422 with a per-server message on invalid JSON) then `sync_manager`: drops removed/changed connections, keeps untouched ones. |
 | `POST /api/mcp/servers/{name}/reconnect` | **Yes** — the deliberate eager connect. 200 with `status="error"` on failure, never a 500. 404 for an unknown name. |
-| `GET /api/mcp/tools` | **Yes** — this *is* the user asking to see tools. Lazy, per server, tolerating per-server failure. Also returns `enabled_count` across **all three** tool sources and `warn_threshold` (`schemas/mcp.py::WARN_THRESHOLD = 40`, advisory only). Known cost: cold servers connect **sequentially**, up to 10 s each — the UI hides it behind "Show tools". |
+| `GET /api/mcp/tools` | **Yes** — this *is* the user asking to see tools. Lazy, per server, tolerating per-server failure. Also returns `enabled_count` across **all three** tool sources and `warn_threshold` (`schemas/mcp.py::WARN_THRESHOLD = 40`, advisory only). Known cost: this route's own listing loop is **sequential**, so cold servers connect one at a time, up to 10 s each — the UI hides it behind "Show tools". (Its second pass, `ToolRegistry(await build_tool_providers(...))` for `enabled_count`, is free: the connections are warm and the tool list is cached per connection.) The *turn* path does not pay this — `McpToolProvider.list_tools` fans out. |
 | `PATCH /api/mcp/tools/{namespaced}` | Resolves the namespaced name against what servers currently expose, so a stale browser tab 404s instead of writing a pref row for a tool that no longer exists. |
 
 ## Testing (`tests/fakes/mcp.py`, `test_mcp_*.py`)
