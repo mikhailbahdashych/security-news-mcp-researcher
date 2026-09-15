@@ -1,3 +1,5 @@
+import type { QueryClient } from '@tanstack/react-query'
+
 import { apiDelete, apiGet, apiPatch, apiPost } from './client'
 
 export const ITEM_STATUSES = ['unread', 'starred', 'dismissed'] as const
@@ -124,6 +126,53 @@ export const extractItem = (id: number): Promise<ExtractResponse> =>
  */
 export function parseUtc(value: string): Date {
   return new Date(/[Z+]|-\d\d:\d\d$/.test(value) ? value : `${value}Z`)
+}
+
+function isFeedItem(value: unknown): value is FeedItem {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof (value as FeedItem).id === 'number' &&
+    typeof (value as FeedItem).feed_id === 'number'
+  )
+}
+
+/** Feed items inside one cached query's data: a page, or pages of them. */
+function itemsIn(data: unknown): FeedItem[] {
+  if (typeof data !== 'object' || data === null) {
+    return []
+  }
+  const record = data as { items?: unknown; pages?: unknown }
+  if (Array.isArray(record.items)) {
+    return record.items.filter(isFeedItem)
+  }
+  if (Array.isArray(record.pages)) {
+    return record.pages.flatMap(itemsIn)
+  }
+  return []
+}
+
+/**
+ * Feed titles by item id, read off whatever feed items the cache already holds.
+ *
+ * The Inbox list, the attachment picker and the note generator all fetch items,
+ * and every one of them carries its feed's own title. The chat transcript does
+ * not — a tool answer has an id and a URL — so this is what lets the answer view
+ * call item 85 "SANS Internet Storm Center" rather than "isc.sans.edu".
+ *
+ * Shaped by hand rather than keyed by query, because those three all store feed
+ * items under keys of their own and every one of them is worth reading.
+ */
+export function feedTitlesFromCache(client: QueryClient): Map<number, string> {
+  const titles = new Map<number, string>()
+  for (const [, data] of client.getQueriesData({ queryKey: [] })) {
+    for (const item of itemsIn(data)) {
+      if (item.feed_title) {
+        titles.set(item.id, item.feed_title)
+      }
+    }
+  }
+  return titles
 }
 
 /** The feed's own name, falling back to its URL's host, then the raw URL. */

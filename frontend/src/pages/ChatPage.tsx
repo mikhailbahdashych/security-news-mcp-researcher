@@ -4,6 +4,7 @@ import { useLocation, useNavigate, useParams } from 'react-router-dom'
 
 import {
   cancelTurn,
+  collectFeedTitles,
   createSession,
   deleteSession,
   fetchSession,
@@ -19,7 +20,7 @@ import {
   type ErrorPayload,
   type SessionFilters,
 } from '../api/chat'
-import type { FeedItem } from '../api/inbox'
+import { feedTitlesFromCache, type FeedItem } from '../api/inbox'
 import { fetchSettings, settingsQueryKey } from '../api/settings'
 import AnswerTurn from '../components/chat/AnswerTurn'
 import Composer from '../components/chat/Composer'
@@ -125,7 +126,16 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
   }, [embedded, location.pathname, location.state, navigate])
 
   const messages = detail.data?.messages
-  const turns = useMemo(() => groupTurns(messages ?? []), [messages])
+  // One lookup of "which feed is item N from", for the transcript and for the
+  // turn on the wire. The transcript states it for items the model searched for;
+  // the cache — the Inbox list, the attachment picker, the note generator — adds
+  // the ones it only opened, so a source card never falls back to a bare domain
+  // for an item the app can already name.
+  const feedTitles = useMemo(
+    () => collectFeedTitles(messages ?? [], feedTitlesFromCache(queryClient)),
+    [messages, queryClient],
+  )
+  const turns = useMemo(() => groupTurns(messages ?? [], feedTitles), [messages, feedTitles])
 
   // Opening a conversation lands at its latest answer, without animating
   // through the whole history to get there.
@@ -255,7 +265,14 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
 
   const session = detail.data?.session
   const model = session?.model ?? settings.data?.model ?? null
-  const steps = useMemo(() => liveSteps(live), [live])
+  // Keyed on what the steps are actually derived from, not on `live`: the turn
+  // object is replaced on every delta, so a memo on it re-parsed every step's
+  // JSON, links and sources for every chunk of streamed text.
+  const answered = live.text !== ''
+  const steps = useMemo(
+    () => liveSteps(live.steps, { streaming: live.streaming, answered, feedTitles }),
+    [live.steps, live.streaming, answered, feedTitles],
+  )
   // `settle` clears the prompt but keeps a terminal error, so once the stream is
   // over the notice belongs under the last answer — not in a turn of its own
   // with a divider above it and no question to explain it.

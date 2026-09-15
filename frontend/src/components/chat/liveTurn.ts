@@ -4,6 +4,7 @@ import {
   type DeltaPayload,
   type DonePayload,
   type ErrorPayload,
+  type FeedTitles,
   type ServerToolResultPayload,
   type ServerToolUsePayload,
   type StepStatus,
@@ -70,6 +71,15 @@ export interface LiveTurn {
    */
   steps: LiveStep[]
   text: string
+  /**
+   * Whether something non-text has landed since the last text delta.
+   *
+   * The stored transcript breaks a paragraph wherever a tool call or a block of
+   * reasoning interrupts the answer (`blocksToText`), so the live text has to
+   * break in the same places — otherwise the answer visibly reflows the moment
+   * the turn settles and the transcript takes over.
+   */
+  interrupted: boolean
   error: ErrorPayload | null
   turn: number
   usage: { input_tokens?: number; output_tokens?: number } | null
@@ -81,6 +91,7 @@ export const emptyTurn: LiveTurn = {
   streaming: false,
   steps: [],
   text: '',
+  interrupted: false,
   error: null,
   turn: 0,
   usage: null,
@@ -141,6 +152,7 @@ export function liveTurnReducer(state: LiveTurn, action: LiveAction): LiveTurn {
         // them with a blank line, so the live text has to break here too —
         // otherwise the answer visibly reflows the moment the turn settles.
         text: state.text === '' ? '' : `${state.text}\n\n`,
+        interrupted: false,
       }
     case 'thinking_delta': {
       // Deltas are contiguous within a block, so appending to a trailing
@@ -151,20 +163,30 @@ export function liveTurnReducer(state: LiveTurn, action: LiveAction): LiveTurn {
       if (last?.kind === 'thinking') {
         return {
           ...state,
+          interrupted: true,
           steps: [...state.steps.slice(0, -1), { ...last, text: last.text + text }],
         }
       }
       return {
         ...state,
+        interrupted: true,
         steps: [...state.steps, { kind: 'thinking', key: `think-${state.steps.length}`, text }],
       }
     }
-    case 'text_delta':
-      return { ...state, text: state.text + (payload as DeltaPayload).text }
+    case 'text_delta': {
+      // The same rule `blocksToText` applies to the stored blocks: contiguous
+      // fragments are concatenated (the API splits a sentence at every citation
+      // boundary), but text resuming after a tool call or a thought starts a new
+      // paragraph.
+      const delta = (payload as DeltaPayload).text
+      const gap = state.interrupted && state.text !== '' && !state.text.endsWith('\n\n')
+      return { ...state, text: gap ? `${state.text}\n\n${delta}` : state.text + delta, interrupted: false }
+    }
     case 'tool_use_start': {
       const start = payload as ToolUseStartPayload
       return {
         ...state,
+        interrupted: true,
         steps: [
           ...state.steps,
           {
@@ -207,6 +229,7 @@ export function liveTurnReducer(state: LiveTurn, action: LiveAction): LiveTurn {
       const use = payload as ServerToolUsePayload
       return {
         ...state,
+        interrupted: true,
         steps: [
           ...state.steps,
           {
@@ -257,18 +280,30 @@ function parseObject(raw: string): Record<string, unknown> | null {
   }
 }
 
+/** What the live steps need to know about the turn around them. */
+export interface LiveStepsContext {
+  streaming: boolean
+  /** Whether any answer text has arrived yet. */
+  answered: boolean
+  feedTitles?: FeedTitles
+}
+
 /**
  * The live turn as the same steps the stored transcript produces.
  *
  * Going through `toolStep`/`thinkingStep` is what stops a turn re-rendering
  * differently the instant it is refetched — one derivation, two sources.
+ *
+ * Takes the steps and the two facts about the turn rather than the whole
+ * `LiveTurn`: the turn object is replaced on every delta, so a memo keyed on it
+ * would re-derive every step for every chunk of text.
  */
-export function liveSteps(live: LiveTurn): TurnStep[] {
-  return live.steps.map((step, index) => {
+export function liveSteps(steps: LiveStep[], context: LiveStepsContext): TurnStep[] {
+  return steps.map((step, index) => {
     if (step.kind === 'thinking') {
       // A trailing thinking block with no answer under it yet is the model still
       // working; that is what puts the spinner on the row the user is watching.
-      const running = live.streaming && index === live.steps.length - 1 && live.text === ''
+      const running = context.streaming && index === steps.length - 1 && !context.answered
       return thinkingStep(step.key, step.text, running ? 'running' : 'ok')
     }
     return toolStep({
@@ -281,6 +316,7 @@ export function liveSteps(live: LiveTurn): TurnStep[] {
       durationMs: step.durationMs ?? null,
       result: step.results,
       preview: step.preview ?? null,
+      feedTitles: context.feedTitles,
     })
   })
 }

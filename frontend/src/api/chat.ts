@@ -195,32 +195,56 @@ export interface DonePayload {
 /**
  * Flatten a stored content-block list into the text a reader should see.
  *
- * Joined with nothing between the blocks. When the model cites a web result the
- * API splits its answer at every citation boundary, so a single sentence can
- * arrive as three text blocks — anything inserted between them lands mid-word,
- * and a paragraph break turns one list item into four stray paragraphs.
+ * Adjacent text blocks are joined with nothing at all: when the model cites a
+ * web result the API splits its answer at every citation boundary, so a single
+ * sentence can arrive as three text blocks — anything inserted between them
+ * lands mid-word, and a paragraph break turns one list item into four stray
+ * paragraphs.
+ *
+ * A text block that follows a *non*-text one is the opposite case. The model
+ * said something, called a tool, and then said something else; running the two
+ * together produced "Searching the web now.The sandbox clock says…". So the
+ * break goes exactly there, and nowhere else.
  */
 export function blocksToText(blocks: ContentBlock[] | null | undefined): string {
   if (!blocks) {
     return ''
   }
-  return blocks
-    .filter((block) => block.type === 'text' && typeof block.text === 'string')
-    .map((block) => block.text as string)
-    .join('')
+  let text = ''
+  let interrupted = false
+  for (const block of blocks) {
+    if (block.type !== 'text' || typeof block.text !== 'string') {
+      interrupted = true
+      continue
+    }
+    if (block.text === '') {
+      continue
+    }
+    if (interrupted && text !== '' && !text.endsWith('\n\n')) {
+      text += '\n\n'
+    }
+    text += block.text
+    interrupted = false
+  }
+  return text
 }
 
 /**
  * How a stored tool call is doing, for the transcript's card.
  *
- * A null `result_json` means the call had not come back when the row was
- * written, which is exactly what a mid-turn reload reads. Deciding on `is_error`
- * alone rendered that as a tick — a call still running shown as one that
- * succeeded.
+ * A null `result_json` is "no result was ever written": deciding on `is_error`
+ * alone rendered that as a tick — a call that never came back shown as one that
+ * succeeded. It is not progress either, though. Settled server-tool rows
+ * legitimately persist with no result (a `bash_code_execution` wrapped by the
+ * code interpreter is the common one), and calling that `running` left a
+ * finished transcript spinning for ever, with no duration beside it.
+ *
+ * The live turn says "running" for itself — the stream says so, step by step.
+ * Anything read back off a row is either done, failed, or unknown.
  */
-export function toolCallStatus(row: ToolCallRow): 'running' | 'ok' | 'error' {
+export function toolCallStatus(row: ToolCallRow): 'unknown' | 'ok' | 'error' {
   if (row.result_json == null) {
-    return 'running'
+    return 'unknown'
   }
   return row.is_error ? 'error' : 'ok'
 }
@@ -259,7 +283,11 @@ export function errorFromStopReason(message: ChatMessage): ErrorPayload | null {
 // through the same functions, which is the only reason a turn does not visibly
 // change shape the moment it finishes.
 
-export type StepStatus = 'running' | 'ok' | 'error'
+/**
+ * `running` belongs to the live stream alone. `unknown` is a stored call whose
+ * result was never written — neither a tick nor a spinner would be true.
+ */
+export type StepStatus = 'running' | 'ok' | 'error' | 'unknown'
 
 /** A link a tool handed back — `web_search` results, mostly. */
 export interface StepLink {
@@ -274,6 +302,16 @@ export interface SourceRef {
   name: string
   url: string | null
 }
+
+/**
+ * Feed titles by feed-item id.
+ *
+ * "The Hacker News" rather than "thehackernews.com" — the brief names inbox
+ * items by their feed. Only `search_feed_items` answers carry the pairing, so it
+ * is collected once per transcript and handed to every step that needs it; the
+ * Inbox's own loaded items can top it up (see `feedTitlesFromItems`).
+ */
+export type FeedTitles = ReadonlyMap<number, string>
 
 /** A `SourceRef` once it has a place in the turn's grid; `n` is its citation. */
 export interface TurnSource extends SourceRef {
@@ -523,40 +561,60 @@ function previewFromResult(result: unknown): string | null {
   return summary ? truncate(summary) : null
 }
 
+/** One row of a `search_feed_items` answer, with the id it announced. */
+interface InboxSearchHit {
+  itemId: number
+  source: SourceRef
+}
+
 /**
  * The items a `search_feed_items` call turned up.
  *
  * The tool answers in the rendered text the model reads, so this parses that
- * back out — three lines per item, the second carrying the feed title and link.
+ * back out — three lines per item, the first carrying the id, the second the
+ * feed title and the link.
  */
-function inboxSearchSources(content: string): SourceRef[] {
+function inboxSearchHits(content: string): InboxSearchHit[] {
   const lines = content.split('\n')
-  const sources: SourceRef[] = []
+  const hits: InboxSearchHit[] = []
   for (let index = 0; index < lines.length; index += 1) {
-    const head = /^\s*\d+\.\s+\[id \d+\]\s+(.+?)\s*$/.exec(lines[index])
+    const head = /^\s*\d+\.\s+\[id (\d+)\]\s+(.+?)\s*$/.exec(lines[index])
     if (!head) {
       continue
     }
     const meta = /^\s+(.+?)\s·\s\S+\s·\s(.+?)\s*$/.exec(lines[index + 1] ?? '')
     const url = meta ? str(meta[2]) : null
-    sources.push({
-      title: head[1],
-      name: meta ? meta[1] : 'inbox',
-      url: url && url.startsWith('http') ? url : null,
+    hits.push({
+      itemId: Number(head[1]),
+      source: {
+        title: head[2],
+        name: meta ? meta[1] : 'inbox',
+        url: url && url.startsWith('http') ? url : null,
+      },
     })
   }
-  return sources
+  return hits
 }
 
-/** `get_feed_item` answers with a two-line header before the article body. */
-function feedItemSource(content: string): SourceRef[] {
+/**
+ * `get_feed_item` answers with a two-line header before the article body.
+ *
+ * An inbox item is named by its feed — "The Hacker News", not
+ * "thehackernews.com". The tool's own answer does not carry the feed title, so
+ * it comes from `feedTitles`; without that the same item was a publication in
+ * the turn that searched for it and a domain in the turn that opened it.
+ */
+function feedItemSource(content: string, feedTitles?: FeedTitles): SourceRef[] {
   const title = /^#\s+(.+)$/m.exec(content)?.[1]
-  const url = /^id:\s+\d+\s·\surl:\s+(\S+)/m.exec(content)?.[1]
+  const header = /^id:\s+(\d+)\s·\surl:\s+(\S+)/m.exec(content)
   if (!title) {
     return []
   }
+  const url = header?.[2]
   const link = url && url.startsWith('http') ? url : null
-  return [{ title, name: hostOf(link) ?? 'inbox', url: link }]
+  const itemId = header ? Number(header[1]) : Number.NaN
+  const feed = Number.isFinite(itemId) ? feedTitles?.get(itemId) : undefined
+  return [{ title, name: feed ?? hostOf(link) ?? 'inbox', url: link }]
 }
 
 /** `fetch_article` answers with the URL as a heading, then the page's own. */
@@ -601,12 +659,13 @@ function sourcesFromTool(
   result: unknown,
   text: string | null,
   links: StepLink[],
+  feedTitles?: FeedTitles,
 ): SourceRef[] {
   if (name === 'search_feed_items') {
-    return text ? inboxSearchSources(text) : []
+    return text ? inboxSearchHits(text).map((hit) => hit.source) : []
   }
   if (name === 'get_feed_item') {
-    return text ? feedItemSource(text) : []
+    return text ? feedItemSource(text, feedTitles) : []
   }
   if (name === 'fetch_article') {
     return text ? fetchedArticleSource(text, input ? str(input.url) : null) : []
@@ -637,6 +696,8 @@ export interface ToolStepSpec {
   result?: unknown
   /** A local tool's output as the stream reported it, ahead of the row. */
   preview?: string | null
+  /** Feed titles by item id, so an inbox item is named by its publication. */
+  feedTitles?: FeedTitles
 }
 
 /** One tool call as a step, from either the stored row or the live stream. */
@@ -659,7 +720,9 @@ export function toolStep(spec: ToolStepSpec): TurnStep {
       ? truncate(spec.preview)
       : previewFromResult(spec.result),
     // A failed call proves nothing, so it contributes no source.
-    sources: failed ? [] : sourcesFromTool(spec.name, spec.input, spec.result, text, links),
+    sources: failed
+      ? []
+      : sourcesFromTool(spec.name, spec.input, spec.result, text, links, spec.feedTitles),
   }
 }
 
@@ -681,7 +744,7 @@ export function thinkingStep(key: string, text: string, status: StepStatus = 'ok
   }
 }
 
-function stepFromRow(row: ToolCallRow): TurnStep {
+function stepFromRow(row: ToolCallRow, feedTitles?: FeedTitles): TurnStep {
   return toolStep({
     key: `row-${row.id}`,
     name: row.name,
@@ -691,6 +754,7 @@ function stepFromRow(row: ToolCallRow): TurnStep {
     status: toolCallStatus(row),
     durationMs: row.duration_ms,
     result: row.result_json,
+    feedTitles,
   })
 }
 
@@ -702,7 +766,7 @@ function stepFromRow(row: ToolCallRow): TurnStep {
  * put reasoning and tool calls in the wrong order on every turn that interleaves
  * them — which is most of them.
  */
-export function stepsFromMessage(message: ChatMessage): TurnStep[] {
+export function stepsFromMessage(message: ChatMessage, feedTitles?: FeedTitles): TurnStep[] {
   const rows = new Map<string, ToolCallRow>()
   for (const row of message.tool_calls) {
     rows.set(row.tool_use_id ?? `row-${row.id}`, row)
@@ -728,24 +792,26 @@ export function stepsFromMessage(message: ChatMessage): TurnStep[] {
     const row = id ? rows.get(id) : undefined
     if (row) {
       used.add(id as string)
-      steps.push(stepFromRow(row))
+      steps.push(stepFromRow(row, feedTitles))
       continue
     }
     // No audit row: the turn died between persisting the message and the rows.
+    // Nothing here is in flight — this is a transcript — so it reads as unknown.
     steps.push(
       toolStep({
         key: `m${message.id}-${id ?? steps.length}`,
         name: block.name ?? 'tool',
         source: block.type === 'server_tool_use' ? 'server' : 'builtin',
         input: isRecord(block.input) ? block.input : null,
-        status: 'running',
+        status: 'unknown',
+        feedTitles,
       }),
     )
   }
 
   for (const [id, row] of rows) {
     if (!used.has(id)) {
-      steps.push(stepFromRow(row))
+      steps.push(stepFromRow(row, feedTitles))
     }
   }
   return steps
@@ -792,13 +858,49 @@ export function attachmentsFromMessage(message: ChatMessage): TurnAttachment[] {
 }
 
 /**
+ * Every feed title the transcript has already stated, by item id.
+ *
+ * `search_feed_items` prints the feed under each hit; `get_feed_item` does not.
+ * Reading the pairings out of the search answers is what lets both turns call
+ * the same item "The Hacker News".
+ */
+export function collectFeedTitles(
+  messages: ChatMessage[],
+  known?: FeedTitles,
+): Map<number, string> {
+  const titles = new Map<number, string>(known)
+  for (const message of messages) {
+    for (const row of message.tool_calls) {
+      if (row.name !== 'search_feed_items') {
+        continue
+      }
+      const text = contentText(row.result_json)
+      if (text === null) {
+        continue
+      }
+      for (const hit of inboxSearchHits(text)) {
+        // `inbox` is the parser's own fallback, not a feed anyone named.
+        if (hit.source.name !== 'inbox') {
+          titles.set(hit.itemId, hit.source.name)
+        }
+      }
+    }
+  }
+  return titles
+}
+
+/**
  * Regroup the stored alternation into one entry per question.
  *
  * `tool_result` messages are skipped: their content is already on the tool-call
  * rows of the assistant turn that asked for them, which is where the design
  * shows it.
  */
-export function groupTurns(messages: ChatMessage[]): Turn[] {
+export function groupTurns(messages: ChatMessage[], knownFeedTitles?: FeedTitles): Turn[] {
+  // Scanned across the whole transcript before any turn is built: a later turn
+  // that merely opens an item must name it the same way as the earlier turn that
+  // searched it up.
+  const feedTitles = collectFeedTitles(messages, knownFeedTitles)
   const turns: Turn[] = []
   for (const message of messages) {
     if (message.kind === 'tool_result') {
@@ -821,7 +923,7 @@ export function groupTurns(messages: ChatMessage[]): Turn[] {
       // API, but a hand-edited database should not crash the page.
       continue
     }
-    turn.steps.push(...stepsFromMessage(message))
+    turn.steps.push(...stepsFromMessage(message, feedTitles))
     const text = blocksToText(message.content_json).trim()
     if (text) {
       turn.answer = turn.answer ? `${turn.answer}\n\n${text}` : text

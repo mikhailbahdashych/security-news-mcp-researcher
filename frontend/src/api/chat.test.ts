@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  blocksToText,
   citationFor,
   collectSources,
   formatMs,
@@ -32,10 +33,12 @@ function row(overrides: Partial<ToolCallRow> = {}): ToolCallRow {
 }
 
 describe('toolCallStatus', () => {
-  it('reports a call with no result yet as running', () => {
-    // What a mid-turn reload reads: the row is written when the call starts and
-    // filled in when it comes back. `is_error` alone rendered this as a tick.
-    expect(toolCallStatus(row({ result_json: null }))).toBe('running')
+  it('never claims a stored call is still running', () => {
+    // A settled `bash_code_execution` row really does persist with no result and
+    // no error, so "no result" cannot mean progress: the transcript spun for
+    // ever on a turn that had finished minutes earlier. Progress is the live
+    // stream's word, and only while it is on the wire.
+    expect(toolCallStatus(row({ result_json: null }))).toBe('unknown')
   })
 
   it('reports a finished call as ok', () => {
@@ -48,18 +51,68 @@ describe('toolCallStatus', () => {
     )
   })
 
-  it('does not call an unfinished error row a failure', () => {
-    // `is_error` defaults to false on the row, but a row that has not come back
-    // is not a success either — the null result is what decides.
-    expect(toolCallStatus(row({ result_json: null, is_error: true }))).toBe('running')
+  it('does not call a resultless error row a failure', () => {
+    // `is_error` defaults to false on the row, but a row that never came back is
+    // not a success either — the null result is what decides.
+    expect(toolCallStatus(row({ result_json: null, is_error: true }))).toBe('unknown')
   })
 
-  it('treats an explicit null JSON result as finished, not running', () => {
+  it('treats an explicit null JSON result as finished, not unknown', () => {
     // A tool that legitimately returned JSON `null` writes 0/false-y values, so
     // the check has to be for null/undefined rather than falsiness.
     expect(toolCallStatus(row({ result_json: 0 }))).toBe('ok')
     expect(toolCallStatus(row({ result_json: '' }))).toBe('ok')
     expect(toolCallStatus(row({ result_json: false }))).toBe('ok')
+  })
+})
+
+describe('blocksToText', () => {
+  const text = (value: string) => ({ type: 'text', text: value })
+
+  it('joins citation fragments with nothing at all', () => {
+    // One sentence, split by the API at every citation boundary. Anything
+    // inserted between these lands mid-word.
+    expect(
+      blocksToText([
+        text('The loader accepts an installed '),
+        text('`bun` or downloads Bun v1.3.13'),
+        text(', so the second stage runs unsandboxed.'),
+      ]),
+    ).toBe('The loader accepts an installed `bun` or downloads Bun v1.3.13, so the second stage runs unsandboxed.')
+  })
+
+  it('starts a new paragraph where a tool call interrupted the answer', () => {
+    expect(
+      blocksToText([
+        text('Searching the web now.'),
+        { type: 'server_tool_use', name: 'web_search' },
+        { type: 'web_search_tool_result' },
+        text('The sandbox clock says September 2026.'),
+      ]),
+    ).toBe('Searching the web now.\n\nThe sandbox clock says September 2026.')
+  })
+
+  it('breaks after a block of reasoning too, but never before the first word', () => {
+    expect(
+      blocksToText([
+        { type: 'thinking', thinking: 'Check the inbox first.' },
+        text('Looking now.'),
+        { type: 'thinking', thinking: 'Nothing there.' },
+        text('Nothing in the inbox.'),
+      ]),
+    ).toBe('Looking now.\n\nNothing in the inbox.')
+  })
+
+  it('does not double a break the model already wrote', () => {
+    expect(
+      blocksToText([text('One.\n\n'), { type: 'tool_use', name: 'fetch_article' }, text('Two.')]),
+    ).toBe('One.\n\nTwo.')
+  })
+
+  it('has nothing to say about a turn with no text in it', () => {
+    expect(blocksToText([{ type: 'tool_use', name: 'search_feed_items' }])).toBe('')
+    expect(blocksToText(null)).toBe('')
+    expect(blocksToText(undefined)).toBe('')
   })
 })
 
@@ -168,7 +221,7 @@ describe('stepsFromMessage', () => {
       }),
     )
     expect(steps).toHaveLength(1)
-    expect(steps[0].status).toBe('running')
+    expect(steps[0].status).toBe('unknown')
     expect(steps[0].hint).toBe('item #4')
   })
 })
@@ -217,6 +270,24 @@ describe('groupTurns', () => {
 
   it('joins every assistant message in the turn into one answer', () => {
     expect(turns()[0].answer).toBe('Looking now.\n\nTwo items.')
+  })
+
+  it('breaks the answer where the model stopped to call a tool', () => {
+    // Message 2 says one thing, calls a tool, then says another; without the
+    // break the two ran together into "Looking now.Found two."
+    const [turn] = groupTurns([
+      message({ id: 1, role: 'user', kind: 'user', content_json: [{ type: 'text', text: 'Hi' }] }),
+      message({
+        id: 2,
+        content_json: [
+          { type: 'text', text: 'Looking now.' },
+          { type: 'tool_use', id: 'toolu_1', name: 'search_feed_items', input: { q: 'kev' } },
+          { type: 'text', text: 'Found two.' },
+        ],
+        tool_calls: [row({ id: 5, tool_use_id: 'toolu_1', result_json: { content: INBOX_RESULT } })],
+      }),
+    ])
+    expect(turn.answer).toBe('Looking now.\n\nFound two.')
   })
 
   it('drops tool_result messages, whose content is already on the rows', () => {
@@ -294,6 +365,81 @@ describe('collectSources', () => {
     expect(collectSources(steps)).toEqual([
       { n: 1, title: 'Talos on FMC', name: 'talos.com', url: 'https://talos.com/fmc' },
     ])
+  })
+
+  it('names an inbox item by its feed, in every turn that touches it', () => {
+    // The bug: turn one searched and called it "The Hacker News", turn two
+    // opened the same item and called it "thehackernews.com". `get_feed_item`
+    // does not print the feed, so the pairing has to come from the search
+    // answer earlier in the transcript.
+    const turns = groupTurns([
+      message({ id: 1, role: 'user', kind: 'user', content_json: [{ type: 'text', text: 'What is new?' }] }),
+      message({
+        id: 2,
+        content_json: [{ type: 'tool_use', id: 't1', name: 'search_feed_items', input: { q: '' } }],
+        tool_calls: [row({ id: 1, tool_use_id: 't1', result_json: { content: INBOX_RESULT } })],
+      }),
+      message({ id: 3, role: 'user', kind: 'user', content_json: [{ type: 'text', text: 'Tell me more.' }] }),
+      message({
+        id: 4,
+        content_json: [{ type: 'tool_use', id: 't2', name: 'get_feed_item', input: { item_id: 16 } }],
+        tool_calls: [
+          row({
+            id: 2,
+            tool_use_id: 't2',
+            name: 'get_feed_item',
+            result_json: {
+              content:
+                '# GitLab CVSS 10 File-Read Flaw Draws In-the-Wild Probes\n' +
+                'id: 16 · url: https://thehackernews.com/2026/09/gitlab.html · published: 2026-09-11\n\n' +
+                'GitLab has released patches…',
+            },
+          }),
+        ],
+      }),
+    ])
+    expect(collectSources(turns[1].steps)[0].name).toBe('The Hacker News')
+    expect(collectSources(turns[0].steps)[0].name).toBe('The Hacker News')
+  })
+
+  it('takes a feed title the app already knows over the domain', () => {
+    // What the Inbox, the attachment picker and the note generator have loaded:
+    // the item was opened without ever being searched for in this transcript.
+    const steps = stepsFromMessage(
+      message({
+        content_json: [{ type: 'tool_use', id: 't1', name: 'get_feed_item', input: { item_id: 85 } }],
+        tool_calls: [
+          row({
+            id: 1,
+            tool_use_id: 't1',
+            name: 'get_feed_item',
+            result_json: {
+              content:
+                '# Apple Updates Everything\nid: 85 · url: https://isc.sans.edu/diary/rss/33336\n\nToday…',
+            },
+          }),
+        ],
+      }),
+      new Map([[85, 'SANS Internet Storm Center']]),
+    )
+    expect(collectSources(steps)[0].name).toBe('SANS Internet Storm Center')
+  })
+
+  it('falls back to the domain when nothing can name the feed', () => {
+    const steps = stepsFromMessage(
+      message({
+        content_json: [{ type: 'tool_use', id: 't1', name: 'get_feed_item', input: { item_id: 99 } }],
+        tool_calls: [
+          row({
+            id: 1,
+            tool_use_id: 't1',
+            name: 'get_feed_item',
+            result_json: { content: '# Some advisory\nid: 99 · url: https://example.test/a\n\nbody' },
+          }),
+        ],
+      }),
+    )
+    expect(collectSources(steps)[0].name).toBe('example.test')
   })
 
   it('does not credit a failed call with a source', () => {

@@ -5,13 +5,26 @@ import Badge from '../ui/Badge'
 import Icon from '../ui/Icon'
 import { cx } from '../ui/classes'
 
-/** ✓ / spinner / ✗ — how the row reports what the step did. */
+/** ✓ / spinner / ✗ / – — how the row reports what the step did. */
 function StatusGlyph({ status }: { status: TurnStep['status'] }) {
   if (status === 'running') {
     return <Icon name="spinner" size={12} className="text-faint" />
   }
   if (status === 'error') {
     return <Icon name="close" size={12} className="text-red" strokeWidth={2} />
+  }
+  if (status === 'unknown') {
+    // A stored call whose result was never written: a turn that died, or a
+    // server tool the API settles without one. A tick would be a lie and a
+    // spinner would be a promise, so the row simply says nothing happened here.
+    return (
+      <span
+        className="w-3 text-center text-[12px] leading-none text-faint"
+        title="No result was recorded for this call."
+      >
+        –
+      </span>
+    )
   }
   return <Icon name="check" size={12} className="text-green" strokeWidth={2} />
 }
