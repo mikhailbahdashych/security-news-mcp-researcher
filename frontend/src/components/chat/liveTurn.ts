@@ -37,7 +37,7 @@ export interface LiveTool {
   status: StepStatus
   preview?: string
   durationMs?: number
-  /** web_search results, or the raw error object when a server tool failed. */
+  /** web_search results, or the error summary (`type`/`error_code`) on a failure. */
   results?: unknown
 }
 
