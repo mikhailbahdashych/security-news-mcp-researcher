@@ -43,8 +43,13 @@ import httpx2
 
 try:  # pragma: no cover - exercised by whether the wheel is installed
     from curl_cffi.requests import AsyncSession as _CurlAsyncSession
+    from curl_cffi.requests.errors import RequestsError as _CurlRequestsError
 except ImportError:  # pragma: no cover - keeps the app importable without the wheel
     _CurlAsyncSession = None
+
+    class _CurlRequestsError(Exception):
+        """Never raised without the wheel; keeps the ``except`` clauses valid."""
+
 
 #: Honest, stable, and — unlike a browser UA — not contradicted by the TLS
 #: handshake underneath it. See the module docstring before changing it.
@@ -92,22 +97,74 @@ def impersonation_available() -> bool:
     return _CurlAsyncSession is not None
 
 
+#: libcurl error codes that mean "the transfer ran out of time" rather than
+#: "the transfer failed". ``CURLE_OPERATION_TIMEDOUT``.
+_CURL_TIMEOUT_CODES = frozenset({28})
+
+
+def _as_httpx_error(exc: Exception, request: httpx2.Request) -> httpx2.HTTPError:
+    """Re-raise a libcurl failure as the httpx error the callers already handle.
+
+    ``feeds`` and ``extract`` both branch on ``httpx2`` exception types to decide
+    what to write on the row. A raw ``RequestsError`` would fall through to their
+    catch-all and surface as a class name and a traceback instead of "timed out".
+    """
+    code = int(getattr(exc, "code", 0) or 0)
+    if code in _CURL_TIMEOUT_CODES:
+        return httpx2.ConnectTimeout(str(exc), request=request)
+    return httpx2.ConnectError(str(exc), request=request)
+
+
+def _request_timeout(request: httpx2.Request, fallback: float) -> float:
+    """The budget httpx attached to this request, falling back to the client's.
+
+    httpx puts the per-request timeout in ``extensions``; honouring it means a
+    caller that overrides the timeout for one fetch gets what it asked for rather
+    than whatever the transport was constructed with.
+    """
+    timeout = request.extensions.get("timeout")
+    if isinstance(timeout, dict):
+        numbers = [value for value in timeout.values() if isinstance(value, int | float)]
+        if numbers:
+            return max(numbers)
+    return fallback
+
+
 class _CurlByteStream(httpx2.AsyncByteStream):
     """Adapts a streamed ``curl_cffi`` response to httpx's byte-stream protocol.
 
     Streaming rather than buffering is the point: it is what lets
     ``url_guard._read_capped`` abandon an oversized body partway through instead of
-    holding all of it in memory first.
+    holding all of it in memory first — but only because :meth:`aclose` sets the
+    abort flag. See there.
     """
 
-    def __init__(self, response: Any) -> None:
+    def __init__(self, response: Any, request: httpx2.Request) -> None:
         self._response = response
+        self._request = request
 
     async def __aiter__(self) -> AsyncIterator[bytes]:
-        async for chunk in self._response.aiter_content():
-            yield chunk
+        try:
+            async for chunk in self._response.aiter_content():
+                yield chunk
+        except _CurlRequestsError as exc:
+            raise _as_httpx_error(exc, self._request) from exc
 
     async def aclose(self) -> None:
+        """Abandon the transfer, then wait for libcurl to stop.
+
+        ``quit_now`` is the flag libcurl's write callback checks: with it set the
+        callback returns ``CURL_WRITEFUNC_ERROR`` and the transfer aborts. Without
+        it, ``curl_cffi``'s async ``aclose()`` only awaits the streaming task — and
+        that task happily pulls the *entire* remaining body into an unbounded queue
+        first. So closing early on a body that busted the byte ceiling would
+        download the whole thing anyway, which is exactly the denial of service the
+        ceiling exists to prevent. (The synchronous ``close()`` sets the flag; the
+        async one does not, which is why this is done by hand.)
+        """
+        quit_now = getattr(self._response, "quit_now", None)
+        if quit_now is not None:
+            quit_now.set()
         await self._response.aclose()
 
 
@@ -144,30 +201,49 @@ class ImpersonatingTransport(httpx2.AsyncBaseTransport):
         return self._session
 
     async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
-        response = await self._get_session().request(
-            request.method,
-            str(request.url),
-            # No headers are forwarded on purpose. The impersonation profile ships
-            # the full header set of the browser it imitates, in that browser's
-            # order; injecting this app's UA on top would recreate exactly the
-            # UA/fingerprint contradiction that gets a client challenged.
-            stream=True,
-            allow_redirects=False,
-            impersonate=self._impersonate,
-            timeout=self._timeout_s,
-        )
-        # libcurl has already decompressed the body, but the wire headers still
-        # advertise the encoding and the *compressed* length. Passing those on
-        # would make httpx try to decode the plaintext a second time.
+        # libcurl speaks far more than the web. The guard already refuses anything
+        # but http(s), so this only matters if a future caller reaches the transport
+        # another way, but a transport that could be talked into file:// or gopher://
+        # is not one to leave unguarded.
+        if request.url.scheme not in ("http", "https"):
+            raise httpx2.UnsupportedProtocol(
+                f"only http and https are fetched, not {request.url.scheme!r}",
+                request=request,
+            )
+
+        try:
+            response = await self._get_session().request(
+                request.method,
+                str(request.url),
+                # No headers are forwarded on purpose. The impersonation profile
+                # ships the full header set of the browser it imitates, in that
+                # browser's order; injecting this app's UA on top would recreate
+                # exactly the UA/fingerprint contradiction that gets a client
+                # challenged.
+                stream=True,
+                allow_redirects=False,
+                impersonate=self._impersonate,
+                timeout=_request_timeout(request, self._timeout_s),
+            )
+        except _CurlRequestsError as exc:
+            raise _as_httpx_error(exc, request) from exc
+
+        # libcurl has already decompressed the body, so a `content-encoding` from
+        # the wire would make httpx try to decode the plaintext a second time — and
+        # the `content-length` that came with it counts *compressed* bytes. When
+        # nothing was compressed the length is accurate and worth keeping: it is
+        # what lets the guard reject an oversized body before reading any of it.
+        compressed = "content-encoding" in response.headers
+        dropped = ("content-encoding", "content-length") if compressed else ()
         headers = [
             (name, value)
             for name, value in response.headers.multi_items()
-            if name.lower() not in ("content-encoding", "content-length")
+            if name.lower() not in dropped
         ]
         return httpx2.Response(
             response.status_code,
             headers=headers,
-            stream=_CurlByteStream(response),
+            stream=_CurlByteStream(response, request),
             request=request,
         )
 

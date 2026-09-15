@@ -9,6 +9,7 @@ than saying plainly what the client is.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import httpx2
@@ -60,30 +61,50 @@ async def test_the_client_sends_the_declared_headers() -> None:
 
 
 class _FakeCurlResponse:
+    """Models the part of ``curl_cffi``'s streamed response that matters here.
+
+    Specifically ``quit_now``: the real write callback checks that flag on every
+    chunk and aborts the transfer when it is set, and the async ``aclose()`` does
+    *not* set it. ``produced`` therefore counts what libcurl would have pulled off
+    the wire, which is what makes "the ceiling actually stops the download" testable.
+    """
+
     def __init__(self, status_code: int, headers: dict[str, str], chunks: list[bytes]) -> None:
         self.status_code = status_code
         self.headers = httpx2.Headers(headers)
         self._chunks = chunks
+        self.quit_now = asyncio.Event()
+        self.produced = 0
         self.closed = False
 
     async def aiter_content(self):  # noqa: ANN201 - mirrors curl_cffi's own signature
         for chunk in self._chunks:
+            if self.quit_now.is_set():
+                return
+            self.produced += 1
             yield chunk
 
     async def aclose(self) -> None:
+        # The real async aclose() drains the rest of the body into an unbounded
+        # queue unless quit_now was set first; this mirrors that.
+        async for _ in self.aiter_content():
+            pass
         self.closed = True
 
 
 class _FakeCurlSession:
     """Stands in for ``curl_cffi.requests.AsyncSession``."""
 
-    def __init__(self, response: _FakeCurlResponse) -> None:
+    def __init__(self, response: _FakeCurlResponse, raises: Exception | None = None) -> None:
         self.response = response
+        self.raises = raises
         self.calls: list[dict[str, Any]] = []
         self.closed = False
 
     async def request(self, method: str, url: str, **kwargs: Any) -> _FakeCurlResponse:
         self.calls.append({"method": method, "url": url, **kwargs})
+        if self.raises is not None:
+            raise self.raises
         return self.response
 
     async def close(self) -> None:
@@ -94,8 +115,8 @@ class _FakeCurlSession:
 def fake_curl(monkeypatch: pytest.MonkeyPatch):  # noqa: ANN201
     """Install a fake curl_cffi session and hand the test the session object."""
 
-    def install(response: _FakeCurlResponse) -> _FakeCurlSession:
-        session = _FakeCurlSession(response)
+    def install(response: _FakeCurlResponse, raises: Exception | None = None) -> _FakeCurlSession:
+        session = _FakeCurlSession(response, raises)
         monkeypatch.setattr(http_service, "_CurlAsyncSession", lambda: session)
         return session
 
@@ -175,3 +196,81 @@ async def test_no_browser_client_when_curl_cffi_is_missing(
     assert build_impersonating_client(10) is None
     with pytest.raises(RuntimeError):
         ImpersonatingTransport(timeout_s=10)
+
+
+async def test_the_byte_ceiling_stops_the_download(fake_curl) -> None:  # noqa: ANN001
+    """Hitting the ceiling must ABORT the transfer, not merely stop reading it.
+
+    curl_cffi's async ``aclose()`` does not set the abort flag, so without the
+    transport setting it by hand libcurl would go on pulling the whole body into an
+    unbounded queue — the ceiling would cap memory *handed to the caller* while the
+    download it exists to prevent ran to completion anyway.
+    """
+    response = fake_curl(_FakeCurlResponse(200, {}, [b"x" * 100 for _ in range(200)])).response
+
+    async with build_impersonating_client(10) as client:
+        with pytest.raises(ResponseTooLarge):
+            await fetch_guarded(client, URL, max_bytes=250, validate_first_hop=False)
+
+    assert response.quit_now.is_set()
+    # Four chunks is what it takes to notice; 200 is what a silent drain would cost.
+    assert response.produced <= 4
+
+
+async def test_a_declared_length_over_the_ceiling_is_refused_before_reading(
+    fake_curl,  # noqa: ANN001
+) -> None:
+    """An uncompressed content-length is accurate, so it is kept and short-circuits."""
+    response = fake_curl(_FakeCurlResponse(200, {"content-length": "5000"}, [b"x" * 100])).response
+
+    async with build_impersonating_client(10) as client:
+        with pytest.raises(ResponseTooLarge):
+            await fetch_guarded(client, URL, max_bytes=250, validate_first_hop=False)
+
+    assert response.produced == 0
+
+
+async def test_the_transport_refuses_a_non_web_scheme(fake_curl) -> None:  # noqa: ANN001
+    """libcurl speaks file://, gopher:// and more; this transport must not."""
+    session = fake_curl(_FakeCurlResponse(200, {}, [b"data"]))
+    transport = ImpersonatingTransport(timeout_s=10)
+    request = httpx2.Request("GET", "file:///etc/passwd")
+
+    with pytest.raises(httpx2.UnsupportedProtocol):
+        await transport.handle_async_request(request)
+
+    assert session.calls == []
+
+
+async def test_the_per_request_timeout_wins_over_the_transport_default(
+    fake_curl,  # noqa: ANN001
+) -> None:
+    session = fake_curl(_FakeCurlResponse(200, {}, [b"<rss/>"]))
+    transport = ImpersonatingTransport(timeout_s=30)
+    request = httpx2.Request(
+        "GET", URL, extensions={"timeout": {"connect": 4.0, "read": 7.0, "pool": None}}
+    )
+
+    await transport.handle_async_request(request)
+
+    assert session.calls[0]["timeout"] == 7.0
+
+
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [(28, httpx2.TimeoutException), (7, httpx2.ConnectError), (0, httpx2.ConnectError)],
+    ids=["timed-out", "could-not-connect", "unknown"],
+)
+async def test_libcurl_failures_arrive_as_httpx_errors(
+    fake_curl,  # noqa: ANN001
+    code: int,
+    expected: type[Exception],
+) -> None:
+    """Callers branch on httpx exception types; a raw RequestsError would not match."""
+    from curl_cffi.requests.errors import RequestsError
+
+    fake_curl(_FakeCurlResponse(200, {}, [b""]), raises=RequestsError("boom", code))
+
+    async with build_impersonating_client(10) as client:
+        with pytest.raises(expected):
+            await fetch_guarded(client, URL, validate_first_hop=False)
