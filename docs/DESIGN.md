@@ -1,5 +1,13 @@
 # Security News MCP Researcher — Design & Implementation Plan
 
+> **Status: the seven-PR core build is complete and merged.** This document is the
+> **design record** — why the product is shaped the way it is — not a description of
+> the current code. Where the implementation went another way, the section carries an
+> **Implementation notes** block; those blocks are authoritative over the prose above
+> them. For current signatures and contracts, read the code and the `CLAUDE.md` files
+> (root, `backend/`, `backend/app/agent/`, `backend/app/mcp/`, `frontend/`). Anything
+> beyond the seven PRs is backlog: `ROADMAP.md`.
+
 ## Context
 
 Mikhail is a security engineer who leads weekly security meetings with team leads. A key part of each meeting is presenting security news: what happened, root cause of breaches, lessons learned, and what teams should do about it. Today this research and note-writing is fully manual.
@@ -29,6 +37,15 @@ This project automates that workflow: a **local-only, single-user web app** (run
 3. **Notes** (`/notes`, `/notes/:id`) — list + markdown viewer/editor; Copy + Download export.
 4. **Settings** (`/settings`) — API key (masked, never returned raw), model picker (from `/api/models`), web search/fetch toggles, feed list editor, notes template editor, MCP servers JSON editor + per-tool enable toggles.
 
+> **Implementation notes.** The four views are as designed, plus a fifth surface the
+> design did not have: a **global search overlay** on `Cmd/Ctrl+K`, over items,
+> sessions and notes at once (`GET /api/search`). The shell around them was rebuilt in
+> a later redesign — see "Frontend redesign" below — so the Research view is a
+> transcript of *turns* (answer + a STEPS card + a SOURCES grid) rather than a message
+> list with tool-call cards, and Settings gained a Layout section. A feed item has no
+> page of its own: a search hit for one deep-links into the Inbox pre-filtered
+> (`/?q=…&item=…&status=all`).
+
 ## Architecture (verified against current SDK/API docs)
 
 **Single container**: FastAPI serves the built React SPA. No CORS, no reverse proxy (avoids SSE buffering failure modes). Dev: `uvicorn --reload` :8000 + `vite dev` :5173 with `/api` proxy.
@@ -46,24 +63,78 @@ Key verified API facts baked into the design (cross-checked via the claude-api s
 - Server-tool errors don't raise: result block `content` is a list on success, error object on failure — branch before indexing.
 - Stable tool ordering across requests (prompt-cache prefix).
 
+> **Implementation notes.** Four corrections and two additions from live testing:
+>
+> - **The server-tool error rule above is half-right and was a real bug.** A
+>   *successful* `code_execution` or `text_editor_code_execution` result is **also** an
+>   object, and `text_editor_code_execution_tool_result_error` starts with the success
+>   type's prefix. Failure is decided by `type.endswith("_tool_result_error")` **or** a
+>   non-null `error_code`, checked *before* any success branch — never by shape, never
+>   by matching success prefixes. See `runner.py::_is_server_tool_error`.
+> - **Containers.** `web_search_20260209` / `web_fetch_20260209` run code execution
+>   server-side, so a turn emits `*_code_execution_tool_result` blocks and allocates a
+>   **container**. Its id is turn-scoped: captured off `final.container.id` and threaded
+>   through every continuation request of that turn, or the API 400s with "container_id
+>   is required when there are pending tool uses". Never carried across user turns.
+>   `_SERVER_RESULT_TYPES` therefore has to include the code-execution, bash and
+>   text-editor result types as well as the web ones — they are server tools we never
+>   declared, and dropping them orphans their `server_tool_use`.
+> - **Prompt caching** is not in the design at all. A top-level
+>   `cache_control={"type":"ephemeral"}` goes on **every** request; it was added after
+>   live testing showed the cache was never hit. Consequences: the tools array and the
+>   system prompt are the cache prefix and must be **byte-stable** (no timestamp in the
+>   prompt, fixed provider and tool ordering), and session token totals must add
+>   `cache_read_input_tokens` + `cache_creation_input_tokens`, because `input_tokens` is
+>   only the uncached remainder.
+> - **`sanitize_for_replay` is the identity in the normal case.** It only does anything
+>   after a *mid-output* fallback; the database always keeps the unsanitised content.
+> - **SSE drift.** `turn_end.usage` also carries the two cache counters, and `error`
+>   gains an optional `status` on an HTTP status error. The table in `backend/CLAUDE.md`
+>   is the current contract.
+
 ### Repo layout
+
+The layout **as built** (the planned one is corrected below):
 
 ```
 backend/
   pyproject.toml, uv.lock
   app/
-    main.py config.py errors.py static.py        # SPA catch-all must 404-JSON unmatched /api/*
-    db/ engine.py models.py init.py              # SQLAlchemy 2 async + aiosqlite, WAL, create_all (no Alembic)
-    schemas/ feeds.py items.py sessions.py notes.py settings.py mcp.py
-    api/ deps.py health.py feeds.py items.py sessions.py notes.py settings.py mcp.py search.py
-    services/ feeds.py extract.py settings.py notes.py
-    agent/ runner.py events.py registry.py builtin.py prompts.py persistence.py
-    mcp/ config.py manager.py
-  tests/ conftest.py fakes/anthropic.py fixtures/*.xml test_*.py
+    main.py config.py logging_config.py static.py   # SPA catch-all 404-JSONs unmatched /api/*
+    db/ engine.py models.py init.py util.py         # SQLAlchemy 2 async + aiosqlite, WAL, create_all (no Alembic)
+    schemas/ common.py feeds.py items.py sessions.py notes.py search.py settings.py mcp.py
+    api/ deps.py streaming.py tasks.py health.py models.py feeds.py items.py
+         sessions.py notes.py search.py settings.py mcp.py
+    services/ feeds.py extract.py items.py settings.py notes.py search.py http.py
+              url_guard.py anthropic_models.py
+    agent/ runner.py events.py registry.py builtin.py providers.py prompts.py persistence.py
+    mcp/ config.py manager.py provider.py
+  tests/ conftest.py fakes/{anthropic,mcp}.py feed_fixtures.py sse_util.py fixtures/* test_*.py
 frontend/
-  src/ api/ lib/sse.ts lib/markdown.tsx pages/ components/{inbox,chat,notes,settings,ui}/
+  index.html                                        # blocking pre-paint theme script
+  src/ index.css App.tsx main.tsx
+       api/{client,inbox,chat,notes,search,settings,mcp}.ts
+       lib/{sse,dates,useDebouncedValue}.ts
+       pages/{Inbox,ChatPage,Notes,NoteDetail,Settings,Page}.tsx
+       components/{inbox,chat,notes,settings,ui}/
 Dockerfile docker-compose.yaml Makefile .env.example
 ```
+
+> **Implementation notes — where this differs from the plan.**
+>
+> - `app/errors.py` was never created; errors are `HTTPException` in the routes and
+>   typed exceptions in the services.
+> - Added since: `app/logging_config.py` (`LOG_LEVEL`; without it every `app.*` record
+>   had no handler), `app/db/util.py` (`matches`/`escape_like` — the single `LIKE` rule
+>   for the whole app), `app/api/streaming.py` (the SSE plumbing both streaming routes
+>   share), `app/api/tasks.py` (the cancel registry — **not** a router),
+>   `app/schemas/common.py` (`CancelResponse`), `app/agent/providers.py`
+>   (`build_tool_providers` + `turn_settings`) and `app/mcp/provider.py`.
+> - `frontend/src/lib/markdown.tsx` does not exist; the renderer is
+>   `components/chat/Markdown.tsx`. Anything pointing at `lib/markdown.tsx` is pointing
+>   at a file that was never written.
+> - `frontend/src/components/ui/` *was* eventually built, by the redesign rather than by
+>   the original plan — see "Frontend redesign".
 
 ### Data model (SQLite, all tables land in PR 2 → no Alembic; delete data/app.db on dev schema change)
 
@@ -78,6 +149,29 @@ Dockerfile docker-compose.yaml Makefile .env.example
 
 Search = `LIKE '%q%'` (single user, thousands of rows; no FTS5).
 
+> **Implementation notes.**
+>
+> - **`feed_items.published_at` is nullable** (a later ruling — plenty of real entries
+>   carry no date). Every ordering over items therefore uses
+>   `COALESCE(published_at, fetched_at)`, exposed once as
+>   `app/services/items.py::sort_key()` so the inbox, the keyset cursor and the global
+>   search cannot disagree about "newest".
+> - Extra columns the list above omits: `feeds` also has `title`, `site_url` and
+>   `last_status`; `feed_items` also has `author`, `extracted_at`, `fetched_at` and
+>   `created_at`; `tool_calls` also has `server_name`.
+> - Cascades as built: deleting a session takes its `messages` and `tool_calls` but
+>   **sets `notes.session_id` to NULL**; deleting a note takes its `note_sources`;
+>   deleting a feed item leaves the `note_sources` row with a NULL `feed_item_id` and
+>   its stored `url`/`title`, so a note never loses a citation.
+> - **No Alembic, still.** `Base.metadata.create_all` at startup; a schema change means
+>   deleting `backend/data/app.db` in dev.
+> - The `LIKE` rule is centralised in `app/db/util.py`: `matches(column, value)` builds
+>   `column LIKE '%value%' ESCAPE '\'` with `%`, `_` and `\` escaped, so a search for
+>   `100%` or `log4j_rce` means what it says. Plain `LIKE`, not `ilike()` — SQLite's
+>   `LIKE` is already ASCII-case-insensitive and `ilike()` would only add two
+>   ASCII-only `lower()` calls. Non-ASCII text is matched case-sensitively; that is an
+>   accepted SQLite limitation.
+
 ### Backend key pieces
 
 - **Endpoints**: REST per domain (feeds/items/sessions/notes/settings/mcp CRUD as designed) + two SSE streams: `POST /api/sessions/{id}/messages` (chat) and `POST /api/notes/generate` (notes reuse the same agent runner with restricted tools + note template). `POST /api/sessions/{id}/cancel` + asyncio.Task registry (SSE disconnect alone doesn't stop billing). `GET /api/notes/{id}/export.md` as attachment. Raw API key never in any response body (masked `sk-ant-…a1b2`).
@@ -88,11 +182,121 @@ Search = `LIKE '%q%'` (single user, thousands of rows; no FTS5).
 - **RSS ingestion** — feedparser in `anyio.to_thread.run_sync` (it's sync/CPU-bound), httpx2 fetch with real User-Agent (security blogs 403 default UA), Semaphore(8), per-feed timeout + error isolation, dedup guid→link→sha256(title+link), `ON CONFLICT DO NOTHING`. `bozo=1` ≠ unusable.
 - **Extraction** — trafilatura (`output_format="markdown"`), thread-pooled, fallback to RSS summary on thin content, truncate to max_chars.
 
+> **Implementation notes.**
+>
+> - **The two streaming routes share `app/api/streaming.py`**: `SSE_PING_S = 15`,
+>   `SSE_HEADERS` (`Cache-Control: no-cache`, `X-Accel-Buffering: no`) and
+>   `pump_agent_events`, which drives the runner inside a registered `asyncio.Task`,
+>   polls `request.is_disconnected()` every second, emits a terminal `cancelled` error
+>   and closes the client. The headers and the ping are set **per route**, not globally.
+> - **The terminal contracts differ.** A chat turn always ends on `done`. A note
+>   generation ends on `done` **only when the note was saved** (and it carries
+>   `{"note_id": …}`); a refusal, a cap, a Stop or a failure ends on `error` with **no
+>   `done` at all**. There is no partial note. Cancellation is by a client-minted
+>   `generation_id` through `POST /api/notes/generate/cancel`, registered as
+>   `note:{generation_id}` in the same task registry; both cancel endpoints share
+>   `schemas/common.py::CancelResponse` and answer 200/`false` when nothing was running.
+> - **Notes context** (`app/services/notes.py`): items with no stored text are extracted
+>   **concurrently** (`MAX_CONCURRENT_EXTRACTIONS = 6`), each in its own short
+>   transaction — serially, a 25-item note held a SQLite write transaction for
+>   `25 × feed_timeout_s` before the stream even opened. Caps: 12 000 chars per item,
+>   40 000 for the transcript (the most recent characters), 25 items. The run is
+>   `persist=False` with `tool_subset={get_feed_item, fetch_article}` ± `web_search`.
+>   `SourceCollector` records the input items, every **successful** `fetch_article` URL
+>   and any `web_search` result the finished note actually cites. `save_note` writes in
+>   one transaction and **degrades on `IntegrityError`**: a feed item or session deleted
+>   during a multi-minute generation must not destroy the note, so the insert is retried
+>   once with the vanished references dropped.
+> - **Global search** (`app/services/search.py`, `GET /api/search`): three statements,
+>   not a `UNION` — different sort keys, different snippet sources. `types=` is a
+>   comma list and an unknown value is a 422, not a silent "search everything";
+>   `limit` is **per group**; `q` must be ≥ 2 characters. A session matches on its title
+>   **or** on `EXISTS` over its messages' `text_preview` **and** `content_json` (`text_preview`
+>   is only the first 300 characters, so a CVE in the middle of a long answer was
+>   unfindable) — which also means a session can match on a URL the model fetched.
+>   `GET /api/sessions?q=` reuses the same `session_match` predicate, and `archived` is
+>   a `"false"`/`"true"`/`"all"` enum. Hits carry a server-built `link` and a plain-text
+>   snippet the client highlights by splitting — never markup.
+> - **API-key precedence**: process environment → `.env` (via
+>   `Settings.anthropic_api_key`) → the stored row. pydantic-settings reads `.env` into
+>   its own fields and never exports it to `os.environ`, so a service reading the
+>   environment alone silently ignored a key written into `.env` — which is what the
+>   `Settings` field exists to fix. `GET /api/settings` reports the winner as
+>   `key_source` (`env`/`stored`/`none`); `has_api_key` means only "stored in this DB".
+> - **`url_guard`**: the design says "response bodies are capped" — there are **two**
+>   caps, `MAX_FETCH_BYTES` 5 MiB for articles and `MAX_FEED_BYTES` 20 MiB for feeds
+>   (several real feeds ship every post in full). The timeout bounds the **whole fetch**,
+>   not one hop: `_client_budget` reads the client's own `httpx2.Timeout` and
+>   `anyio.fail_after` wraps the redirect loop, because httpx's timeout is per operation
+>   and `MAX_REDIRECTS` hops each stalling just under it is several multiples of it.
+>   The **first hop of a user-typed feed URL** is the only exemption.
+> - **MCP lifecycle** additions: `McpServerConfig` has value equality so `reload` can
+>   tell a changed server from an untouched one; stale servers are dropped
+>   **concurrently** and each under its own lock; a connect failure sets a 30 s
+>   `ERROR_RETRY_COOLDOWN_S` so a broken server does not cost every turn 10 s, while a
+>   failure on an already-working connection retries at once; `_retire` signals and
+>   awaits an owner task whose transport died, so the stdio subprocess cannot outlive
+>   `aclose()`. `McpToolProvider.list_tools` lists **every server in parallel**.
+> - `httpx2` is a declared **runtime** dependency, not a test helper.
+
 ### Frontend key pieces
 
 - TanStack Query for all server state; streaming turn in a `useReducer` in ChatPage, folded into Query cache on `done`. Tailwind v4, ~8 hand-built primitives, react-router v7.
 - `src/lib/sse.ts` — hand-rolled POST-SSE parser over `fetch` + ReadableStream (EventSource is GET-only; fetch-event-source is unmaintained and its auto-retry would re-run/double-bill LLM turns). AbortController wired to Stop.
 - `react-markdown` + remark-gfm; no rehype-raw (model output stays untrusted).
+
+> **Implementation notes.** All three held. Two refinements: the streaming turn's
+> reducer is `components/chat/liveTurn.ts` and keeps reasoning and tool calls in **one
+> flat `steps` list** in arrival order (a turn thinks, calls a tool, thinks again);
+> and `parseUtc` — the backend stores naive UTC, so `new Date(...)` would read it as
+> local time — moved to `src/lib/dates.ts`. Everything else about this layer was
+> reshaped by the redesign, below.
+
+### Frontend redesign (after PR 7)
+
+The SPA was rebuilt on a shared shell. The data layer and the SSE reader were not
+touched; what changed is everything around them.
+
+- **Shell.** `App.tsx` renders `ui/Rail` (collapsed to 58 px icons by default, 198 px
+  expanded), one or two page panes, and `ui/GlobalSearch` above everything on
+  `Cmd/Ctrl+K` (not `/` — the composer and the note editor are text fields).
+- **`components/ui/` is now a real shared layer**: `PageHost`, `Rail`, `GlobalSearch`,
+  `Icon` (the icon set as inline paths — no icon library), `Dialog`/`ConfirmDialog`
+  over `modal.ts::useModalPanel` (focus in/out, Escape, Tab cycling — the promise
+  `aria-modal` makes), `classes.ts` (the class vocabulary), `layout.ts`, `theme.ts`,
+  `railState.ts`, `storage.ts`, and the form/display primitives.
+- **Design tokens** live in `src/index.css`: light on `:root`, dark on
+  `[data-theme="dark"]`, mapped through `@theme inline` so `bg-panel` reads
+  `var(--panel)` at use time and follows the toggle without a reload. Raw hexes exist
+  nowhere else. `index.html` carries a **blocking** pre-paint script that stamps
+  `data-theme` before React boots, so a dark user never sees a white flash.
+- **Three stored preferences**, all through `ui/storage.ts` (never throws, notifies
+  every hook on the key): `snr.theme`, `snr.rail`, `snr.layout`.
+- **Split view.** `snr.layout` is `{split, paneA, paneB}`. With `split` on, the **left**
+  pane is the router — it has the URL, the back button and every deep link — and the
+  right pane is an *embedded* second page with no route of its own. Two routable panes
+  would need a URL scheme nothing here justifies. `paneA` is stored but is never the
+  source of truth: the URL is, and the Settings "Left pane" select reads
+  `pageFromPath(location.pathname)`.
+- **The `embedded` contract.** Every top-level page takes `EmbeddablePageProps` and,
+  when `embedded`, keeps its own selection in React state — no `useParams`, no
+  `useSearchParams`, no navigation. `Settings` is the sanctioned exception, because it
+  edits app state rather than a selection and its Layout section navigates on purpose.
+- **The Research view is a transcript of turns.** `api/chat.ts` regroups the stored
+  `user`/`assistant`/`tool_result` alternation into `Turn`s (`groupTurns`), each
+  rendering an answer (`blocksToText`), a STEPS card (`stepsFromMessage`, ordered from
+  `content_json` — the `tool_calls` rows carry no sequence) and a SOURCES grid
+  (`sourcesFromTool`, `feedItemSource`, `citationFor`). Tool-call status is
+  `running`/`ok`/`error`/`unknown`: `running` belongs to the live stream alone, and a
+  stored row with no `result_json` is `unknown` rather than a tick or a forever-spinner.
+- Helpers: `lib/useDebouncedValue.ts` (every search box drives a query key),
+  `lib/dates.ts`, `components/notes/excerpt.ts` (Markdown markers off a clamped
+  two-line preview — deliberately not a parser).
+- **Tests grew with it**: vitest now covers 4 files / 68 tests — `lib/sse.test.ts`,
+  `api/chat.test.ts`, `components/ui/preferences.test.ts`,
+  `components/notes/excerpt.test.ts`. Still `environment: 'node'`, still no jsdom and
+  no component tests: logic that deserves a test lives in a `.ts` module.
+- `.playwright-mcp/` (browser artifacts from design review) is gitignored.
 
 ### Docker
 
@@ -104,7 +308,21 @@ Multi-stage: node:22-bookworm-slim builds SPA → python:3.13-slim-bookworm runt
 - **Frontend vitest** for `lib/sse.ts` only (frame split across chunk boundaries, multi-line data, heartbeats ignored). No component/E2E tests.
 - TDD per superpowers where practical; every PR ends with `superpowers:verification-before-completion` + full test run.
 
-## PR-by-PR build sequence
+> **Implementation notes.** As built: **461 backend tests** (~13 s) and **68 frontend
+> tests across 4 files** (~0.2 s). `make test` runs both, `make lint` lints both
+> (ruff, then oxlint). The frontend suite grew past `lib/sse.ts` to cover the other
+> pure modules — `api/chat.ts`, `ui/layout.ts`/`theme.ts`/`railState.ts`,
+> `notes/excerpt.ts` — but the "no jsdom, no component tests, no E2E" rule stands.
+> Backend tests use a real temp-file SQLite DB per test (not `:memory:`, so WAL and the
+> FK pragma behave as in production), and two autouse fixtures keep the suite honest:
+> one deletes `ANTHROPIC_API_KEY` from the environment, the other stubs
+> `socket.getaddrinfo`.
+
+## PR-by-PR build sequence — **complete**
+
+All seven shipped, plus a fix wave and a UI redesign on top. Kept here as the record of
+how the app was built and in what order; it is not a plan any more. The backlog is
+`ROADMAP.md`, and nothing in it is scheduled.
 
 Since PRs won't be merged immediately, **branches stack**: each branch is cut from the previous one; PR base = previous branch (GitHub shows clean per-PR diffs; if/when user merges in order, bases retarget automatically).
 
@@ -118,6 +336,17 @@ Since PRs won't be merged immediately, **branches stack**: each branch is cut fr
 
 Each PR: branch → TDD implement → verification skill → commit → push → `gh pr create` (base = previous branch; PR 1 base = main). Do not merge.
 
+**After PR 7**, two more landed and are part of the app as it stands:
+
+8. **Fix wave** — API-key precedence + `key_source`, `logging_config.py` /
+   `LOG_LEVEL`, `content_text` in the inbox filter and `search_feed_items`, a no-key
+   chat turn persisting the question, the whole-fetch timeout budget in `url_guard`,
+   concurrent note extraction, parallel MCP listing and reload, shared
+   `CancelResponse` + `turn_settings`, search ordering by `COALESCE`, tool-call
+   `running`/`unknown` status, `httpx2` as a declared runtime dependency.
+9. **UI redesign** — the shell, tokens, themes, split view and the Research
+   transcript model. See "Frontend redesign" above and `frontend/CLAUDE.md`.
+
 ## Execution notes for implementation sessions
 
 - Invoke `claude-api` skill (Python: `python/claude-api/README.md`, `streaming.md`, `tool-use.md`) before writing Anthropic SDK code — never from memory.
@@ -126,6 +355,8 @@ Each PR: branch → TDD implement → verification skill → commit → push →
 - `data/` in .gitignore AND .dockerignore; key never logged.
 
 ## Verification (end-to-end, after PR 6)
+
+Still the right smoke test to run by hand after touching any of this.
 
 1. `docker compose up` → open :8000 → Settings → enter API key → test-key passes.
 2. Seed default feeds → Refresh → headlines appear → star 3-4 items.

@@ -53,6 +53,41 @@ summary stays as the fallback. **Seed defaults** adds a starter set of security
 sources (The Hacker News, BleepingComputer, Krebs on Security, CISA advisories, SANS
 ISC, Google Project Zero).
 
+## Research chat
+
+**Research** streams an answer and shows its working: a STEPS card with the reasoning
+and every tool call in the order they happened, and a SOURCES grid of what the answer
+can be traced back to. The model can search and read your inbox, use Anthropic's
+server-side web search and fetch (both toggleable in Settings), and call any tool from
+a configured MCP server. Attach inbox items to a question from the composer, or send a
+multi-select straight from the Inbox with **Research these**. **Stop** both aborts the
+browser's read and tells the server to stop the turn, so it stops billing too. Refresh
+mid-turn and the transcript is still there — it is written as the turn progresses.
+
+## Meeting notes
+
+**Notes** turns starred items and/or a research session into one Markdown document,
+following the template in Settings (five headings per item by default). Generation is
+streamed and can be stopped; it writes **nothing** unless it finishes, so a refusal or
+a stop leaves no half-note behind. A saved note records its sources — the items it was
+asked about, plus any page the model deliberately fetched or actually cited. Edit it in
+place, **Copy** it, or **Download** it as `.md`.
+
+## Search and history
+
+`Cmd/Ctrl+K` searches your feed items, research sessions and notes at once, and a hit
+opens that entity — an item deep-links into the Inbox filtered to the same query.
+A session matches on anything said inside it, not just its title, so a CVE mentioned in
+the middle of a long answer is findable. Sessions can be renamed, archived (hidden from
+the sidebar by default) and deleted; deleting one keeps any notes generated from it.
+
+## The window
+
+The left rail collapses to icons or expands to labels, and the theme follows your OS
+until you pick one — both remembered. **Settings → Layout** turns on **split screen**,
+which puts two of the four pages side by side in one window: the left pane is the one
+with the URL and the back button, the right one is a second view for reference.
+
 ## Outbound fetch safety
 
 Everything the server fetches is influenced by someone else: a feed is third-party
@@ -168,7 +203,7 @@ make lint        # backend: uv run ruff check ., then frontend: npm run lint (ox
 | ----------- | ------------------------------------------------------- |
 | `backend/`  | FastAPI app (`app/`), tests, uv-managed dependencies     |
 | `frontend/` | Vite + React + TypeScript SPA, built into `frontend/dist` |
-| `docs/`     | Design notes                                             |
+| `docs/`     | `DESIGN.md` (design record), `ROADMAP.md` (backlog)       |
 
 In Docker the SPA is built and served by the backend from `/app/static`, so the whole
 app is one container on one port.

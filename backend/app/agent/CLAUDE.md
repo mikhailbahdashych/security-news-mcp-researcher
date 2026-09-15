@@ -8,7 +8,7 @@ Read `backend/CLAUDE.md` (app wiring, SSE table, test harness) and the root
 | `runner.py` | `run(...)` — the loop. `sanitize_for_replay`, `parse_tool_input`, the server-tool result decoding. |
 | `registry.py` | `ToolProvider` protocol, `RegisteredTool`, `ToolResult`, `ToolSource`, `ToolRegistry`, `sanitize_tool_name`. |
 | `builtin.py` | `BuiltinToolProvider` (3 local tools) and `ServerToolProvider` (Anthropic web_search/web_fetch). |
-| `providers.py` | `build_tool_providers(request, session, session_factory)` — the **only** place the provider list is built. |
+| `providers.py` | `build_tool_providers(request, session, session_factory)` — the **only** place the provider list is built — and `turn_settings(session, app_settings)`, the **only** place a run's settings are read. |
 | `persistence.py` | `Persistence` / `NullPersistence`, `load_history`, `repair_unanswered_tool_use`, `flatten_text`, `ToolCallRecord`. |
 | `prompts.py` | `DEFAULT_SYSTEM_PROMPT`, `build_system_prompt(override=, extra=)`. |
 | `events.py` | The frozen event dataclasses + `to_sse()`. |
@@ -36,19 +36,29 @@ async def run(
 ) -> AsyncIterator[ev.AgentEvent]: ...
 ```
 
-Transport-agnostic: the API layer maps the events to SSE; notes generation consumes the
-generator directly.
+Transport-agnostic: both streaming routes drive it through
+`app/api/streaming.py::pump_agent_events` and map the events to SSE.
 
 - `persist=False` → `NullPersistence`: identical loop, identical events, dispatch,
   `pause_turn`/refusal/fallback handling, **zero rows written**; `session_id` may then be
-  `None`. `persist=True` with `session_id is None` raises `ValueError`.
+  `None`. `persist=True` with `session_id is None` raises `ValueError`. This is exactly
+  what note generation uses (`app/api/notes.py`).
 - `system_override` **replaces** `DEFAULT_SYSTEM_PROMPT`; `system_extra` (the
   `system_prompt_extra` setting) is appended in both cases.
 - `tool_subset` filters `registry.tools()` by name; names no provider offers are logged
   and ignored (so a subset naming `web_search` still works when the toggle is off).
+  Notes generation passes `{get_feed_item, fetch_article}` ± `web_search`.
 - `max_pause_restarts` caps `pause_turn` resumes → `error(turn_limit)`.
 - The generator is safe to `aclose()` at any point: `CancelledError`/`GeneratorExit` is
   logged and **re-raised**; whatever was committed stays committed.
+
+Callers must not read settings themselves: `providers.py::turn_settings(session,
+app_settings)` returns `api_key` / `model` / `effort` / `thinking_display` /
+`max_tool_turns` / `system_prompt_extra` in one read, inside the request's own
+transaction and **before** the stream opens, so a settings edit mid-run cannot shift
+the prompt (and therefore the cache prefix) under a model that is already answering.
+`api_key` follows the env → `.env` → stored precedence in
+`app/services/settings.py::get_effective_api_key`.
 
 Module constants: `FALLBACK_BETA = "server-side-fallback-2026-07-01"`,
 `FALLBACKS = "default"`, `MAX_TOKENS = 64_000`, `PREVIEW_CHARS = 600`.
@@ -181,11 +191,17 @@ raw=None)` — `content` is what the model reads, `raw` is what lands in
 ## Built-in and server tools
 
 `BuiltinToolProvider(db_session_factory, settings_service=...)` — `search_feed_items`
-(the inbox, ≤50 results, ≤8000 rendered chars), `get_feed_item` (full text, extracting on
-demand), `fetch_article` (a URL not in the inbox, ≤12000 chars by default). Each handler
+(the inbox, `DEFAULT_SEARCH_LIMIT` 20 / `MAX_SEARCH_LIMIT` 50 results,
+`MAX_SEARCH_CHARS` 8 000 rendered), `get_feed_item` (full text, extracting on demand),
+`fetch_article` (a URL not in the inbox, `DEFAULT_ARTICLE_CHARS` 12 000). Each handler
 opens **its own short transaction** and commits before returning. `fetch_article` goes
 through `extract_service.extract_article` → `url_guard.fetch_guarded(validate_first_hop=True)`;
 there must never be a second HTTP path around the guard.
+
+`search_feed_items` delegates to `items_service.list_items`, whose `q` filter matches
+`title`, `summary` **and `content_text`** — so a CVE that only appears in an extracted
+article body is findable, and the model's view of the inbox agrees with the Inbox page
+and the global search. All three go through `app/db/util.py::matches`.
 
 Tool **descriptions are prescriptive about *when* to call** ("Call this FIRST for any
 question about recent security news…"). Recent Opus models reach for tools conservatively
@@ -200,10 +216,13 @@ turn start (re-reading per call would change the tools array mid-conversation). 
 model is restricted to the local inbox.
 
 `providers.py::build_tool_providers(request, session, session_factory)` is the single
-place the list is assembled (chat and notes generation must not offer different tools).
-It reads settings, the MCP server set and the tool prefs from the request's own
-transaction, calls `sync_manager`, and **connects nothing** — MCP is best-effort, an
-unreachable server contributes no tools rather than an error.
+place the list is assembled (chat and notes generation must not offer different tools;
+they differ by `tool_subset`, not by provider). It reads settings, the MCP server set
+and the tool prefs from the request's own transaction, calls `sync_manager`, and
+**connects nothing** — MCP is best-effort, an unreachable server contributes no tools
+rather than an error. `session_factory` is passed explicitly rather than read off
+`app.state` so a test overriding `get_session_factory` really redirects the built-ins'
+own transactions.
 
 ## Pitfalls specific to this package
 
@@ -219,4 +238,8 @@ unreachable server contributes no tools rather than an error.
 7. `parse_tool_input` is for tests/diagnostics only — the loop reads the parsed `input`
    dict off `get_final_message()`, never the `input_json_delta` fragments.
 8. `events.py` and the SSE table in `backend/CLAUDE.md` are the same contract stated
-   twice; change both together.
+   twice; change both together. The *terminal* contract is not this package's — chat
+   ends on `done`, a note generation ends on `done` only when the note was saved. The
+   route decides, not the runner.
+9. Do not read a setting inside the loop or a tool handler. `turn_settings` reads them
+   once per run, before the stream opens.
