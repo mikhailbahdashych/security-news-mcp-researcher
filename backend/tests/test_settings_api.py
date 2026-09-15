@@ -140,6 +140,52 @@ async def test_test_key_reports_a_connection_failure(
     assert body["error"]
 
 
+async def test_test_key_survives_an_api_error_that_is_neither_status_nor_connection(
+    client: httpx2.AsyncClient, use_client
+) -> None:
+    """``APIResponseValidationError`` and friends are ``APIError`` and nothing
+    else: without the final clause they escaped as a 500 that told the user
+    nothing about their key."""
+    request = httpx2.Request("GET", "https://api.anthropic.com/v1/models")
+    use_client(FakeAnthropicClient(error=anthropic.APIError("malformed", request, body=None)))
+
+    response = await client.post("/api/settings/test-key")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is False
+    assert body["error"]
+    # Still never the SDK's own message.
+    assert "malformed" not in body["error"]
+
+
+# ------------------------------------------ values the database should not hold
+
+
+@pytest.mark.parametrize(
+    ("key", "stored", "expected"),
+    [("effort", "turbo", "high"), ("thinking_display", "loud", "summarized")],
+)
+async def test_an_off_union_stored_value_falls_back_to_the_default(
+    client: httpx2.AsyncClient, db_session, key: str, stored: str, expected: str
+) -> None:
+    """Both fields are closed sets in the response model, and the store behind
+    them is TEXT. A hand-edited row must not turn the Settings page — the one
+    place that could fix it — into a 500."""
+    await settings_service.set_value(db_session, key, stored)
+    await db_session.commit()
+    # Guards the guard: without this the assertion below would pass just as well
+    # on a write that never landed, since the fallback *is* the seeded value.
+    assert await settings_service.get(db_session, key) == stored
+
+    response = await client.get("/api/settings")
+
+    assert response.status_code == 200
+    assert response.json()[key] == expected
+    # Reading is not repairing: the row is left for the next PUT to overwrite.
+    assert await settings_service.get(db_session, key) == stored
+
+
 async def test_test_key_without_a_key(client: httpx2.AsyncClient) -> None:
     # No override: the real dependency sees an empty stored key and returns None.
     response = await client.post("/api/settings/test-key")
@@ -267,6 +313,63 @@ async def test_the_dotenv_key_is_never_written_to_the_database(dotenv_client) ->
     await http.post("/api/settings/test-key")
 
     assert (await http.get("/api/settings")).json()["has_api_key"] is False
+
+
+#: The other spelling of "configured outside the app": a real environment
+#: variable, which wins over both ``.env`` and the database.
+ENV_KEY = "sk-ant-api03-from-the-process-environment-p0q1"
+
+
+@pytest.fixture
+def env_key_client(app, monkeypatch):
+    """The app plus ``ANTHROPIC_API_KEY`` in the process environment.
+
+    ``isolated_api_key_env`` deletes the variable for every test, so setting it
+    here is the only way it is ever present — and the stub records the key the
+    dependency built a client with, which is the half of the path an assertion on
+    ``key_source`` alone would miss.
+    """
+    built: list[str] = []
+
+    def fake_build(api_key: str) -> ClosableFakeClient:
+        built.append(api_key)
+        return ClosableFakeClient()
+
+    monkeypatch.setenv(settings_service.API_KEY_ENV_VAR, ENV_KEY)
+    monkeypatch.setattr("app.api.deps.build_anthropic_client", fake_build)
+    return built
+
+
+async def test_the_environment_key_is_used_and_named_as_the_source(
+    client: httpx2.AsyncClient, env_key_client
+) -> None:
+    built = env_key_client
+
+    settings_body = (await client.get("/api/settings")).json()
+    test_key = await client.post("/api/settings/test-key")
+
+    # Nothing is stored, and the app still works — which is what `key_source` is
+    # there to explain.
+    assert settings_body["has_api_key"] is False
+    assert settings_body["key_source"] == "env"
+    assert test_key.json() == {"ok": True, "error": None}
+    assert built == [ENV_KEY]
+    assert ENV_KEY not in str(settings_body)
+
+
+async def test_the_environment_key_beats_a_stored_one_and_is_never_written_down(
+    client: httpx2.AsyncClient, env_key_client
+) -> None:
+    built = env_key_client
+    await client.put("/api/settings", json={"anthropic_api_key": RAW_KEY})
+
+    body = (await client.get("/api/settings")).json()
+    await client.post("/api/settings/test-key")
+
+    # The stored key is still stored — it is just not the one being used.
+    assert body["has_api_key"] is True
+    assert body["key_source"] == "env"
+    assert built == [ENV_KEY]
 
 
 async def test_key_source_is_stored_once_a_key_is_saved(client: httpx2.AsyncClient) -> None:

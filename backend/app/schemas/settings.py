@@ -12,11 +12,18 @@ KeySource = Literal["env", "stored", "none"]
 
 
 class SettingsRead(BaseModel):
-    """The settings as the UI sees them — note there is no raw API key field."""
+    """The settings as the UI sees them — note there is no raw API key field.
+
+    ``effort`` and ``thinking_display`` are the same closed sets ``SettingsUpdate``
+    accepts, so the contract the frontend's union types describe is the one this
+    endpoint actually keeps. The store behind them is untyped TEXT, so the route
+    falls a hand-edited value back to its default rather than answering 500 — see
+    ``app.api.settings._one_of``.
+    """
 
     model: str
-    effort: str
-    thinking_display: str
+    effort: Effort
+    thinking_display: ThinkingDisplay
     #: Whether a key is stored **in this database** — not whether one is usable.
     has_api_key: bool
     api_key_masked: str
