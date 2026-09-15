@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useState } from 'react'
+import { useState, type ReactNode } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 
 import {
@@ -13,26 +13,50 @@ import {
   type NoteSource,
 } from '../api/notes'
 import Markdown from '../components/chat/Markdown'
-import { formatNoteDate } from '../components/notes/noteDate'
+import { formatNoteDate, formatNoteDay } from '../components/notes/noteDate'
+import Button from '../components/ui/Button'
+import Card from '../components/ui/Card'
+import ConfirmDialog from '../components/ui/ConfirmDialog'
+import EmptyState from '../components/ui/EmptyState'
+import Icon from '../components/ui/Icon'
+import Input from '../components/ui/Input'
+import PageHeader from '../components/ui/PageHeader'
+import SectionLabel from '../components/ui/SectionLabel'
+import Textarea from '../components/ui/Textarea'
+import { CARD, FIELD_LABEL, buttonClass, cx } from '../components/ui/classes'
+import type { EmbeddablePageProps } from '../components/ui/PageHost'
+import Page from './Page'
 
-const buttonClass =
-  'rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 ' +
-  'hover:border-slate-400 disabled:opacity-40'
+export interface NoteDetailPageProps extends EmbeddablePageProps {
+  /** Which note to show when embedded — there is no route to read it from. */
+  noteId?: number
+  /** How "back to the list" works when embedded. */
+  onBack?: () => void
+}
 
-const primaryButtonClass =
-  'rounded-md bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-800 ' +
-  'disabled:bg-slate-300'
-
-export default function NoteDetailPage() {
+export default function NoteDetailPage({
+  embedded = false,
+  noteId: embeddedNoteId,
+  onBack,
+}: NoteDetailPageProps) {
   const params = useParams<{ id: string }>()
-  const noteId = Number(params.id)
+  const noteId = embedded ? (embeddedNoteId ?? Number.NaN) : Number(params.id)
   const navigate = useNavigate()
   const queryClient = useQueryClient()
+  const goBack = () => {
+    if (onBack) {
+      onBack()
+    } else {
+      navigate('/notes')
+    }
+  }
+  const backLink = <BackLink embedded={embedded} onBack={goBack} />
 
   const [editing, setEditing] = useState(false)
   const [draftTitle, setDraftTitle] = useState('')
   const [draftBody, setDraftBody] = useState('')
   const [copied, setCopied] = useState<string | null>(null)
+  const [confirmingDelete, setConfirmingDelete] = useState(false)
 
   const note = useQuery({
     queryKey: noteQueryKey(noteId),
@@ -52,21 +76,31 @@ export default function NoteDetailPage() {
   const remove = useMutation({
     mutationFn: () => deleteNote(noteId),
     onSuccess: async () => {
+      setConfirmingDelete(false)
       await queryClient.invalidateQueries({ queryKey: notesQueryKey })
-      navigate('/notes')
+      goBack()
     },
   })
 
   if (note.isPending) {
-    return <Shell>Loading note…</Shell>
+    return (
+      <Page width="note">
+        {backLink}
+        <EmptyState icon="spinner" title="Loading note…" />
+      </Page>
+    )
   }
   if (note.isError || !note.data) {
     return (
-      <Shell>
-        <span className="text-rose-600">
-          This note could not be loaded. It may have been deleted.
-        </span>
-      </Shell>
+      <Page width="note">
+        {backLink}
+        <EmptyState
+          tone="error"
+          icon="warning"
+          title="This note could not be loaded."
+          description="It may have been deleted."
+        />
+      </Page>
     )
   }
 
@@ -93,120 +127,142 @@ export default function NoteDetailPage() {
     window.setTimeout(() => setCopied(null), 2500)
   }
 
+  // While editing, the heading follows the draft: the title field lives in the
+  // card below, and a stale heading above it would be the only thing on the page
+  // disagreeing with what is being typed.
+  const heading = editing ? draftTitle.trim() || `Note ${data.id}` : (data.title ?? `Note ${data.id}`)
+
   return (
-    <section className="mx-auto flex max-w-3xl flex-col gap-4 px-8 py-8">
-      <Link to="/notes" className="text-xs text-slate-500 hover:text-slate-900">
-        ← All notes
-      </Link>
-
-      <header className="flex flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0 flex-1">
-          {editing ? (
-            <input
-              value={draftTitle}
-              onChange={(event) => setDraftTitle(event.target.value)}
-              aria-label="Note title"
-              className="w-full rounded-md border border-slate-300 px-3 py-1.5 text-lg font-semibold text-slate-900"
-            />
-          ) : (
-            <h1 className="text-2xl font-semibold tracking-tight text-slate-900">
-              {data.title ?? `Note ${data.id}`}
-            </h1>
-          )}
-          <p className="mt-1 text-xs text-slate-500">
-            {formatNoteDate(data.created_at)}
-            {data.updated_at !== data.created_at
-              ? ` · edited ${formatNoteDate(data.updated_at)}`
-              : ''}
-            {data.session_id !== null ? (
-              <>
-                {' · '}
-                <Link
-                  to={`/chat/${data.session_id}`}
-                  className="underline underline-offset-2 hover:text-slate-900"
-                >
-                  research session
-                </Link>
-              </>
-            ) : null}
-          </p>
-        </div>
-
-        <div className="flex flex-wrap gap-2">
-          {editing ? (
+    <Page width="note">
+      <PageHeader
+        back={backLink}
+        title={heading}
+        subtitle={<Meta note={data} embedded={embedded} />}
+        actions={
+          editing ? null : (
             <>
-              <button
-                type="button"
-                onClick={() => setEditing(false)}
-                className={buttonClass}
-                disabled={save.isPending}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                disabled={save.isPending || !draftBody.trim()}
-                onClick={() =>
-                  save.mutate({
-                    title: draftTitle.trim() || undefined,
-                    body_md: draftBody,
-                  })
-                }
-                className={primaryButtonClass}
-              >
-                {save.isPending ? 'Saving…' : 'Save'}
-              </button>
-            </>
-          ) : (
-            <>
-              <button type="button" onClick={startEditing} className={buttonClass}>
+              <Button icon="edit" onClick={startEditing}>
                 Edit
-              </button>
-              <button type="button" onClick={() => void copy()} className={buttonClass}>
+              </Button>
+              <Button icon="copy" onClick={() => void copy()}>
                 Copy
-              </button>
+              </Button>
               {/* A plain link, so the browser honours the attachment header. */}
-              <a href={exportUrl(data.id)} download className={buttonClass}>
+              <a href={exportUrl(data.id)} download className={buttonClass('secondary')}>
+                <Icon name="download" size={14} />
                 Download
               </a>
-              <button
-                type="button"
-                disabled={remove.isPending}
-                onClick={() => {
-                  if (window.confirm('Delete this note? This cannot be undone.')) {
-                    remove.mutate()
-                  }
-                }}
-                className={`${buttonClass} hover:border-rose-300 hover:text-rose-700`}
+              <Button
+                className="text-muted hover:border-red hover:text-red"
+                onClick={() => setConfirmingDelete(true)}
               >
                 Delete
-              </button>
+              </Button>
             </>
-          )}
-        </div>
-      </header>
+          )
+        }
+      />
 
-      {copied ? <p className="text-xs text-slate-500">{copied}</p> : null}
-      {save.isError ? (
-        <p className="text-xs text-rose-600">The edit could not be saved.</p>
-      ) : null}
+      {copied ? <p className="text-[11.5px] text-faint">{copied}</p> : null}
 
       {editing ? (
-        <textarea
-          value={draftBody}
-          onChange={(event) => setDraftBody(event.target.value)}
-          aria-label="Note body"
-          spellCheck={false}
-          className="min-h-[60vh] w-full rounded-lg border border-slate-300 p-4 font-mono text-xs leading-relaxed text-slate-800"
-        />
+        <div className={cx(CARD, 'flex flex-col gap-3 bg-panel px-6 py-5')}>
+          <label className="flex flex-col gap-1.5">
+            <span className={FIELD_LABEL}>Title</span>
+            <Input
+              value={draftTitle}
+              onChange={(event) => setDraftTitle(event.target.value)}
+              placeholder={`Note ${data.id}`}
+              tone="bg"
+            />
+          </label>
+          <label className="flex flex-col gap-1.5">
+            <span className={FIELD_LABEL}>Body (Markdown)</span>
+            <Textarea
+              value={draftBody}
+              onChange={(event) => setDraftBody(event.target.value)}
+              spellCheck={false}
+              mono
+              tone="bg"
+              className="min-h-[50vh]"
+            />
+          </label>
+          {save.isError ? <p className="text-[12px] text-red">The edit could not be saved.</p> : null}
+          <div className="flex items-center justify-end gap-2">
+            <Button onClick={() => setEditing(false)} disabled={save.isPending}>
+              Cancel
+            </Button>
+            <Button
+              variant="primary"
+              loading={save.isPending}
+              disabled={!draftBody.trim()}
+              onClick={() =>
+                save.mutate({
+                  title: draftTitle.trim() || undefined,
+                  body_md: draftBody,
+                })
+              }
+            >
+              Save
+            </Button>
+          </div>
+        </div>
       ) : (
-        <article className="rounded-lg border border-slate-200 bg-white px-5 py-4">
+        <article className={cx(CARD, 'bg-panel px-6 py-5')}>
+          {/* `Markdown` is already the design's article column — 14px/1.65 on
+              `text-ink`, serif headings, accent links. There is nothing left for
+              a note to override. */}
           <Markdown>{data.body_md}</Markdown>
         </article>
       )}
 
       <Sources sources={data.sources} />
-    </section>
+
+      {confirmingDelete ? (
+        <ConfirmDialog
+          title="Delete note"
+          message="This note and its sources will be deleted. This cannot be undone."
+          confirmLabel="Delete note"
+          busy={remove.isPending}
+          error={remove.isError ? 'The note could not be deleted.' : null}
+          onCancel={() => setConfirmingDelete(false)}
+          onConfirm={() => remove.mutate()}
+        />
+      ) : null}
+    </Page>
+  )
+}
+
+/**
+ * `<date> · edited <date> · research session` — the line under the title.
+ *
+ * Embedded there is no route to link to: this note is the split view's RIGHT
+ * pane, and a router `<Link>` here changed the URL, which swapped the *left*
+ * pane out from under the reader while the note they were reading stayed put.
+ */
+function Meta({ note, embedded }: { note: Note; embedded: boolean }) {
+  return (
+    <span className="text-faint" title={formatNoteDate(note.created_at)}>
+      {formatNoteDay(note.created_at)}
+      {note.updated_at !== note.created_at ? (
+        <span title={formatNoteDate(note.updated_at)}> · edited {formatNoteDay(note.updated_at)}</span>
+      ) : null}
+      {note.session_id !== null ? (
+        <>
+          {' · '}
+          {embedded ? (
+            <span className="text-muted">research session</span>
+          ) : (
+            <Link
+              to={`/chat/${note.session_id}`}
+              className="text-muted underline underline-offset-2 hover:text-ink"
+            >
+              research session
+            </Link>
+          )}
+        </>
+      ) : null}
+    </span>
   )
 }
 
@@ -218,11 +274,13 @@ function Sources({ sources }: { sources: NoteSource[] }) {
   const fetched = sources.filter((source) => source.feed_item_id === null)
 
   return (
-    <section className="rounded-lg border border-slate-200 bg-slate-50 px-5 py-4">
-      <h2 className="text-xs font-semibold tracking-wide text-slate-700 uppercase">Sources</h2>
+    <Card tone="panel2">
+      <SectionLabel as="h2" className="text-muted">
+        Sources
+      </SectionLabel>
       <SourceList label="From the inbox" sources={fromInbox} />
       <SourceList label="Fetched while writing" sources={fetched} />
-    </section>
+    </Card>
   )
 }
 
@@ -231,22 +289,22 @@ function SourceList({ label, sources }: { label: string; sources: NoteSource[] }
     return null
   }
   return (
-    <div className="mt-3">
-      <p className="text-[11px] font-medium text-slate-500">{label}</p>
-      <ul className="mt-1 space-y-1">
+    <div className="mt-2.5">
+      <p className="text-[11px] font-medium text-faint">{label}</p>
+      <ul className="mt-1 space-y-[3px]">
         {sources.map((source) => (
-          <li key={source.id} className="text-xs">
+          <li key={source.id} className="text-[12px]">
             {source.url ? (
               <a
                 href={source.url}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="text-sky-700 underline underline-offset-2 hover:text-sky-900"
+                className="underline underline-offset-2"
               >
                 {source.title || source.url}
               </a>
             ) : (
-              <span className="text-slate-600">{source.title ?? 'Untitled source'}</span>
+              <span className="text-muted">{source.title ?? 'Untitled source'}</span>
             )}
           </li>
         ))}
@@ -255,13 +313,21 @@ function SourceList({ label, sources }: { label: string; sources: NoteSource[] }
   )
 }
 
-function Shell({ children }: { children: React.ReactNode }) {
-  return (
-    <section className="mx-auto max-w-3xl px-8 py-10">
-      <Link to="/notes" className="text-xs text-slate-500 hover:text-slate-900">
+/** A link when there is a route behind it, a button when the pane owns the state. */
+function BackLink({ embedded, onBack }: { embedded: boolean; onBack: () => void }): ReactNode {
+  const className =
+    'self-start text-[12px] text-muted no-underline transition-colors duration-150 ' +
+    'hover:text-ink hover:opacity-100'
+  if (embedded) {
+    return (
+      <button type="button" onClick={onBack} className={className}>
         ← All notes
-      </Link>
-      <p className="mt-4 text-sm text-slate-600">{children}</p>
-    </section>
+      </button>
+    )
+  }
+  return (
+    <Link to="/notes" className={className}>
+      ← All notes
+    </Link>
   )
 }

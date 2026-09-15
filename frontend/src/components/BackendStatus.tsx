@@ -1,20 +1,22 @@
 import { useQuery } from '@tanstack/react-query'
 
 import { fetchHealth } from '../api/client'
+import { cx } from './ui/classes'
 
-/** Live backend health in the sidebar footer, polled every 30 s. */
-export default function BackendStatus() {
+export interface BackendStatusProps {
+  /** The wide rail shows the text; the narrow one is the dot and its tooltip. */
+  expanded: boolean
+}
+
+/** Live backend health at the foot of the rail, polled every 30 s. */
+export default function BackendStatus({ expanded }: BackendStatusProps) {
   const { data, isPending, isError } = useQuery({
     queryKey: ['health'],
     queryFn: fetchHealth,
     refetchInterval: 30_000,
   })
 
-  const tone = isPending
-    ? 'bg-slate-300'
-    : isError
-      ? 'bg-rose-500'
-      : 'bg-emerald-500'
+  const tone = isPending ? 'bg-amber' : isError ? 'bg-red' : 'bg-green'
 
   const label = isPending
     ? 'checking backend…'
@@ -23,9 +25,19 @@ export default function BackendStatus() {
       : `backend ${data.status} · v${data.version}`
 
   return (
-    <p className="flex items-center gap-2 text-xs text-slate-500">
-      <span className={`inline-block size-2 rounded-full ${tone}`} aria-hidden="true" />
-      {label}
-    </p>
+    <div className="flex items-center gap-2 px-[11px] py-1" title={label}>
+      <span
+        className={cx('size-[7px] shrink-0 rounded-full', tone)}
+        aria-hidden="true"
+      />
+      <span
+        className={cx(
+          'truncate text-[10.5px] whitespace-nowrap text-faint',
+          expanded ? '' : 'sr-only',
+        )}
+      >
+        {label}
+      </span>
+    </div>
   )
 }

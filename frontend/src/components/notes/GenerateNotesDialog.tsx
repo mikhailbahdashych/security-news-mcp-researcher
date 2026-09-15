@@ -15,7 +15,14 @@ import {
 import { fetchSettings, settingsQueryKey } from '../../api/settings'
 import { SSEHttpError, streamSSE } from '../../lib/sse'
 import TurnError from '../chat/TurnError'
-import useDebouncedValue from '../inbox/useDebouncedValue'
+import useDebouncedValue from '../../lib/useDebouncedValue'
+import Button from '../ui/Button'
+import Dialog from '../ui/Dialog'
+import Icon from '../ui/Icon'
+import Input from '../ui/Input'
+import Select from '../ui/Select'
+import Textarea from '../ui/Textarea'
+import { FIELD_HINT, FIELD_LABEL, cx } from '../ui/classes'
 
 export interface GenerateNotesDialogProps {
   /** Items the caller already has in hand (the Inbox selection), pinned at the top. */
@@ -23,15 +30,14 @@ export interface GenerateNotesDialogProps {
   /** A research session to generate from (the Chat header's action). */
   initialSessionId?: number | null
   onClose: () => void
+  /**
+   * What to do with the saved note instead of navigating to `/notes/:id`.
+   *
+   * Only the embedded Notes pane passes this: it has no route to navigate, so it
+   * opens the note in place.
+   */
+  onGenerated?: (noteId: number) => void
 }
-
-const primaryButtonClass =
-  'rounded-md bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-800 ' +
-  'disabled:bg-slate-300'
-
-const secondaryButtonClass =
-  'rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 ' +
-  'hover:border-slate-400 disabled:opacity-40'
 
 /** What a running tool looks like in the status line. */
 const ACTIVITY: Record<string, string> = {
@@ -51,6 +57,7 @@ export default function GenerateNotesDialog({
   initialItems = [],
   initialSessionId = null,
   onClose,
+  onGenerated,
 }: GenerateNotesDialogProps) {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
@@ -199,7 +206,11 @@ export default function GenerateNotesDialog({
 
     if (savedNoteId !== null) {
       await queryClient.invalidateQueries({ queryKey: notesQueryKey })
-      navigate(`/notes/${savedNoteId}`)
+      if (onGenerated) {
+        onGenerated(savedNoteId)
+      } else {
+        navigate(`/notes/${savedNoteId}`)
+      }
       onClose()
       return
     }
@@ -212,7 +223,7 @@ export default function GenerateNotesDialog({
         category: null,
       },
     )
-  }, [navigate, onClose, queryClient, selected, sessionId, templateOverride, title])
+  }, [navigate, onClose, onGenerated, queryClient, selected, sessionId, templateOverride, title])
 
   const stop = useCallback(() => {
     // Both halves: the abort stops the browser reading, the endpoint stops the
@@ -224,175 +235,170 @@ export default function GenerateNotesDialog({
     }
   }, [])
 
+  // Every way out of the dialog — ✕, Escape, the backdrop, Cancel — also stops a
+  // generation that is still running, so closing never leaves one billing.
+  const close = useCallback(() => {
+    stop()
+    onClose()
+  }, [onClose, stop])
+
   const template = templateOverride ?? settings.data?.note_template ?? ''
 
   return (
-    <div className="fixed inset-0 z-20 flex items-start justify-center overflow-y-auto bg-slate-900/30 p-6">
-      <div className="w-full max-w-3xl rounded-lg border border-slate-200 bg-white shadow-lg">
-        <header className="flex items-center justify-between border-b border-slate-200 px-5 py-3">
-          <div>
-            <h2 className="text-sm font-semibold text-slate-900">Generate meeting notes</h2>
-            <p className="text-xs text-slate-500">
-              Pick the news items, a research session, or both.
-            </p>
+    <Dialog
+      title="Generate meeting notes"
+      description="Pick the news items, a research session, or both."
+      width="lg"
+      onClose={close}
+      footer={
+        <>
+          {streaming ? (
+            <Button onClick={stop}>Stop</Button>
+          ) : (
+            <Button onClick={close}>Cancel</Button>
+          )}
+          <Button variant="primary" disabled={!canSubmit} loading={streaming} onClick={() => void submit()}>
+            {streaming ? 'Generating…' : 'Generate'}
+          </Button>
+        </>
+      }
+    >
+      <div className="flex max-h-[60vh] flex-col gap-4 overflow-y-auto">
+        <section>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <h3 className={FIELD_LABEL}>
+              News items{selected.size > 0 ? ` · ${selected.size} selected` : ''}
+            </h3>
+            <Input
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="Search the inbox (blank shows starred)"
+              aria-label="Search the inbox"
+              tone="bg"
+              className="w-[280px] max-w-full"
+            />
           </div>
+
+          <ul className="mt-2 max-h-56 overflow-y-auto rounded-[8px] border border-line bg-bg p-1.5">
+            {items.isPending ? (
+              <li className="px-2 py-3 text-[12px] text-muted">Loading items…</li>
+            ) : null}
+            {!items.isPending && listed.length === 0 ? (
+              <li className="px-2 py-3 text-[12px] text-muted">
+                No starred items. Star a few in the Inbox first, or search for them here.
+              </li>
+            ) : null}
+            {listed.map((item) => (
+              <li key={item.id}>
+                <label className="flex cursor-pointer items-start gap-2.5 rounded-[6px] px-2 py-1.5 transition-colors duration-150 hover:bg-hover">
+                  <input
+                    type="checkbox"
+                    checked={selected.has(item.id)}
+                    onChange={(event) => toggle(item, event.target.checked)}
+                    className="mt-0.5 size-[14px] shrink-0 accent-[var(--accent-btn)]"
+                  />
+                  <span className="min-w-0">
+                    <span className="block truncate text-[12px] text-ink">{item.title}</span>
+                    <span className="block truncate text-[11px] text-faint">
+                      {item.feed_title ?? 'Unknown feed'}
+                    </span>
+                  </span>
+                </label>
+              </li>
+            ))}
+          </ul>
+        </section>
+
+        <section className="grid gap-3 sm:grid-cols-2">
+          <label className="flex flex-col gap-1.5">
+            <span className={FIELD_LABEL}>Research session (optional)</span>
+            <Select
+              tone="bg"
+              value={sessionId ?? ''}
+              onChange={(event) =>
+                setSessionId(event.target.value ? Number(event.target.value) : null)
+              }
+            >
+              <option value="">None</option>
+              {(sessions.data?.sessions ?? []).map((session) => (
+                <option key={session.id} value={session.id}>
+                  {session.title ?? `Session ${session.id}`}
+                </option>
+              ))}
+            </Select>
+          </label>
+
+          <label className="flex flex-col gap-1.5">
+            <span className={FIELD_LABEL}>Title (optional)</span>
+            <Input
+              tone="bg"
+              value={title}
+              onChange={(event) => setTitle(event.target.value)}
+              placeholder="Defaults to the item title, or a dated one"
+            />
+          </label>
+        </section>
+
+        <section>
           <button
             type="button"
-            onClick={() => {
-              stop()
-              onClose()
-            }}
-            className="text-slate-400 hover:text-slate-900"
-            aria-label="Close"
+            onClick={() => setAdvanced((value) => !value)}
+            aria-expanded={advanced}
+            className={cx(
+              'flex items-center gap-1.5 text-[12px] font-medium text-muted',
+              'transition-colors duration-150 hover:text-ink',
+            )}
           >
-            ✕
+            <Icon name={advanced ? 'chevronDown' : 'chevronRight'} size={14} />
+            Template for this note
           </button>
-        </header>
-
-        <div className="max-h-[70vh] space-y-4 overflow-y-auto px-5 py-4">
-          <section>
-            <div className="flex items-center justify-between gap-3">
-              <h3 className="text-xs font-medium text-slate-700">
-                News items{selected.size > 0 ? ` · ${selected.size} selected` : ''}
-              </h3>
-              <input
-                value={search}
-                onChange={(event) => setSearch(event.target.value)}
-                placeholder="Search the inbox (blank shows starred)"
-                className="w-64 rounded-md border border-slate-300 px-2 py-1 text-xs"
+          {advanced ? (
+            <div className="mt-2 flex flex-col gap-1.5">
+              <Textarea
+                rows={7}
+                mono
+                tone="bg"
+                value={template}
+                aria-label="Template for this note"
+                onChange={(event) => setTemplateOverride(event.target.value)}
               />
+              <p className={FIELD_HINT}>
+                Used for this note only. Editing the default for every note is in Settings.
+              </p>
             </div>
+          ) : null}
+        </section>
 
-            <ul className="mt-2 max-h-56 space-y-0.5 overflow-y-auto rounded-md border border-slate-200 p-1.5">
-              {items.isPending ? (
-                <li className="px-2 py-3 text-xs text-slate-500">Loading items…</li>
-              ) : null}
-              {!items.isPending && listed.length === 0 ? (
-                <li className="px-2 py-3 text-xs text-slate-500">
-                  No starred items. Star a few in the Inbox first, or search for them here.
-                </li>
-              ) : null}
-              {listed.map((item) => (
-                <li key={item.id}>
-                  <label className="flex cursor-pointer items-start gap-2 rounded px-2 py-1.5 hover:bg-slate-50">
-                    <input
-                      type="checkbox"
-                      checked={selected.has(item.id)}
-                      onChange={(event) => toggle(item, event.target.checked)}
-                      className="mt-0.5 size-3.5 shrink-0 rounded border-slate-300 accent-slate-900"
-                    />
-                    <span className="min-w-0">
-                      <span className="block truncate text-xs text-slate-800">{item.title}</span>
-                      <span className="block truncate text-[11px] text-slate-500">
-                        {item.feed_title ?? 'Unknown feed'}
-                      </span>
-                    </span>
-                  </label>
-                </li>
-              ))}
-            </ul>
-          </section>
-
-          <section className="grid gap-3 sm:grid-cols-2">
-            <label className="flex flex-col gap-1.5">
-              <span className="text-xs font-medium text-slate-700">Research session (optional)</span>
-              <select
-                value={sessionId ?? ''}
-                onChange={(event) =>
-                  setSessionId(event.target.value ? Number(event.target.value) : null)
-                }
-                className="rounded-md border border-slate-300 px-2 py-1.5 text-xs"
-              >
-                <option value="">None</option>
-                {(sessions.data?.sessions ?? []).map((session) => (
-                  <option key={session.id} value={session.id}>
-                    {session.title ?? `Session ${session.id}`}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <label className="flex flex-col gap-1.5">
-              <span className="text-xs font-medium text-slate-700">Title (optional)</span>
-              <input
-                value={title}
-                onChange={(event) => setTitle(event.target.value)}
-                placeholder="Defaults to the item title, or a dated one"
-                className="rounded-md border border-slate-300 px-2 py-1.5 text-xs"
-              />
-            </label>
-          </section>
-
-          <section>
-            <button
-              type="button"
-              onClick={() => setAdvanced((value) => !value)}
-              className="text-xs font-medium text-slate-500 hover:text-slate-900"
-            >
-              {advanced ? '▾' : '▸'} Advanced — template for this note
-            </button>
-            {advanced ? (
-              <div className="mt-2 space-y-1.5">
-                <textarea
-                  rows={7}
-                  value={template}
-                  onChange={(event) => setTemplateOverride(event.target.value)}
-                  className="w-full rounded-md border border-slate-300 px-2 py-1.5 font-mono text-xs"
-                />
-                <p className="text-[11px] text-slate-500">
-                  Used for this note only. Editing the default for every note is in Settings.
-                </p>
-              </div>
+        {streaming || preview || error ? (
+          <section className="flex flex-col gap-2">
+            {activity ? (
+              <p className="flex items-center gap-1.5 text-[12px] text-muted">
+                <Icon name="spinner" size={13} />
+                {activity}
+              </p>
+            ) : null}
+            {preview ? (
+              <pre className="max-h-64 overflow-y-auto rounded-[8px] border border-line bg-code p-3 font-mono text-[11.5px] leading-[1.6] whitespace-pre-wrap text-muted">
+                {preview}
+              </pre>
+            ) : streaming ? (
+              <p className="flex items-center gap-1.5 text-[12px] text-muted">
+                <Icon name="spinner" size={13} />
+                Thinking…
+              </p>
+            ) : null}
+            {error?.type === 'cancelled' ? (
+              // Not TurnError's chat copy: a stopped chat turn keeps what it
+              // wrote, and a stopped generation keeps nothing at all.
+              <p className="rounded-[8px] border border-line bg-panel2 px-3 py-2 text-[12px] text-muted">
+                Stopped. Nothing was saved — the preview above is all there was.
+              </p>
+            ) : error ? (
+              <TurnError error={error} />
             ) : null}
           </section>
-
-          {streaming || preview || error ? (
-            <section className="space-y-2">
-              {activity ? (
-                <p className="text-xs text-slate-500">
-                  <span className="animate-pulse">⋯</span> {activity}
-                </p>
-              ) : null}
-              {preview ? (
-                <pre className="max-h-64 overflow-y-auto rounded-md border border-slate-200 bg-slate-50 p-3 text-[11px] leading-relaxed whitespace-pre-wrap text-slate-700">
-                  {preview}
-                </pre>
-              ) : streaming ? (
-                <p className="text-xs text-slate-500">Thinking…</p>
-              ) : null}
-              {error?.type === 'cancelled' ? (
-                // Not TurnError's chat copy: a stopped chat turn keeps what it
-                // wrote, and a stopped generation keeps nothing at all.
-                <p className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
-                  Stopped. Nothing was saved — the preview above is all there was.
-                </p>
-              ) : error ? (
-                <TurnError error={error} />
-              ) : null}
-            </section>
-          ) : null}
-        </div>
-
-        <footer className="flex items-center justify-end gap-2 border-t border-slate-200 px-5 py-3">
-          {streaming ? (
-            <button type="button" onClick={stop} className={secondaryButtonClass}>
-              Stop
-            </button>
-          ) : (
-            <button type="button" onClick={onClose} className={secondaryButtonClass}>
-              Cancel
-            </button>
-          )}
-          <button
-            type="button"
-            disabled={!canSubmit}
-            onClick={() => void submit()}
-            className={primaryButtonClass}
-          >
-            {streaming ? 'Generating…' : 'Generate'}
-          </button>
-        </footer>
+        ) : null}
       </div>
-    </div>
+    </Dialog>
   )
 }

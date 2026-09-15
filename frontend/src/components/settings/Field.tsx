@@ -1,26 +1,30 @@
 import type { ReactNode } from 'react'
 
+import { FIELD_HINT, FIELD_LABEL, cx } from '../ui/classes'
+
 interface FieldProps {
   label: string
   hint?: ReactNode
   htmlFor?: string
   children: ReactNode
+  className?: string
 }
 
 /** Label above a control, with an optional line of help text below it. */
-export default function Field({ label, hint, htmlFor, children }: FieldProps) {
+export default function Field({ label, hint, htmlFor, children, className }: FieldProps) {
   return (
-    <div className="flex flex-col gap-1.5">
-      <label htmlFor={htmlFor} className="text-xs font-medium text-slate-700">
+    <div className={cx('flex min-w-0 flex-col gap-[5px]', className)}>
+      <label htmlFor={htmlFor} className={FIELD_LABEL}>
         {label}
       </label>
       {children}
-      {hint ? <p className="text-xs text-slate-500">{hint}</p> : null}
+      {hint ? <p className={FIELD_HINT}>{hint}</p> : null}
     </div>
   )
 }
 
-export const controlClass =
-  'w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 ' +
-  'shadow-xs outline-none focus:border-slate-500 focus:ring-2 focus:ring-slate-200 ' +
-  'disabled:bg-slate-50 disabled:text-slate-400'
+/**
+ * The design's side-by-side field row: as many columns as fit at 180px, one
+ * column once the pane is narrow. Used by Layout, Model and Tools.
+ */
+export const FIELD_GRID = 'grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-3'

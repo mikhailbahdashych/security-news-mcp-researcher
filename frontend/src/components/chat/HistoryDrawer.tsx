@@ -1,0 +1,325 @@
+import { useEffect, useState } from 'react'
+
+import { whenLabel, type ResearchSession } from '../../api/chat'
+import Button from '../ui/Button'
+import Checkbox from '../ui/Checkbox'
+import ConfirmDialog from '../ui/ConfirmDialog'
+import Icon from '../ui/Icon'
+import IconButton from '../ui/IconButton'
+import Input from '../ui/Input'
+import { cx } from '../ui/classes'
+
+interface HistoryDrawerProps {
+  sessions: ResearchSession[]
+  activeId: number | null
+  search: string
+  showArchived: boolean
+  isPending: boolean
+  isError: boolean
+  hasMore: boolean
+  loadingMore: boolean
+  /** The row with a rename, archive or delete in flight. */
+  busyId: number | null
+  onSearchChange: (value: string) => void
+  onShowArchivedChange: (show: boolean) => void
+  onOpen: (id: number) => void
+  onRename: (id: number, title: string) => void
+  onArchive: (id: number, archived: boolean) => void
+  onDelete: (id: number) => void
+  onLoadMore: () => void
+  onClose: () => void
+}
+
+/**
+ * The list of chats, and everything you can do to one.
+ *
+ * The filter goes to the server rather than filtering the loaded page, because
+ * the page is thirty rows of a history that grows without bound — and because
+ * the server matches on what was *said* in a chat, which the rows do not carry.
+ */
+export default function HistoryDrawer({
+  sessions,
+  activeId,
+  search,
+  showArchived,
+  isPending,
+  isError,
+  hasMore,
+  loadingMore,
+  busyId,
+  onSearchChange,
+  onShowArchivedChange,
+  onOpen,
+  onRename,
+  onArchive,
+  onDelete,
+  onLoadMore,
+  onClose,
+}: HistoryDrawerProps) {
+  const [editingId, setEditingId] = useState<number | null>(null)
+  const [menuId, setMenuId] = useState<number | null>(null)
+  const [draft, setDraft] = useState('')
+  const [pendingDelete, setPendingDelete] = useState<ResearchSession | null>(null)
+
+  // Escape unwinds one layer at a time: the confirm dialog, the row menu, then a
+  // rename in progress, then the drawer. Closing everything at once loses the
+  // edit — or answers a question the user was still reading.
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') {
+        return
+      }
+      if (pendingDelete !== null) {
+        // The dialog is modal and closes itself; this listener stays out of it.
+        return
+      }
+      if (menuId !== null) {
+        setMenuId(null)
+      } else if (editingId !== null) {
+        setEditingId(null)
+      } else {
+        onClose()
+      }
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [editingId, menuId, onClose, pendingDelete])
+
+  const commit = (id: number) => {
+    const title = draft.trim()
+    setEditingId(null)
+    if (title) {
+      onRename(id, title)
+    }
+  }
+
+  const startEditing = (session: ResearchSession) => {
+    setDraft(session.title ?? '')
+    setEditingId(session.id)
+    setMenuId(null)
+  }
+
+  return (
+    <div
+      className="absolute top-[49px] bottom-0 left-0 z-20 flex w-[262px] flex-col border-r border-line bg-panel shadow-[8px_0_24px_rgba(0,0,0,0.06)]"
+    >
+      <div className="border-b border-line p-2.5">
+        <Input
+          type="search"
+          value={search}
+          autoFocus
+          placeholder="Filter chats…"
+          aria-label="Filter chats"
+          onChange={(event) => onSearchChange(event.target.value)}
+          tone="bg"
+        />
+      </div>
+
+      <div className="flex-1 overflow-y-auto p-1.5">
+        <Body
+          isPending={isPending}
+          isError={isError}
+          isEmpty={sessions.length === 0}
+          searching={search.trim() !== ''}
+          showArchived={showArchived}
+        />
+
+        {sessions.map((session) => {
+          const busy = busyId === session.id
+          if (editingId === session.id) {
+            return (
+              <div key={session.id} className="px-0.5 py-0.5">
+                <Input
+                  autoFocus
+                  value={draft}
+                  aria-label="Chat title"
+                  onChange={(event) => setDraft(event.target.value)}
+                  onBlur={() => commit(session.id)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') {
+                      commit(session.id)
+                    }
+                  }}
+                  tone="bg"
+                />
+              </div>
+            )
+          }
+
+          return (
+            <div
+              key={session.id}
+              className={cx(
+                'group relative rounded-[8px] transition-colors duration-150',
+                session.id === activeId ? 'bg-accent-soft' : 'hover:bg-hover',
+                busy && 'opacity-50',
+              )}
+            >
+              <button
+                type="button"
+                onClick={() => onOpen(session.id)}
+                onDoubleClick={() => startEditing(session)}
+                title={session.title ?? 'Untitled chat'}
+                className="block w-full cursor-pointer px-[9px] py-[7px] pr-7 text-left"
+              >
+                <span
+                  className={cx(
+                    'block truncate text-[12.5px]',
+                    session.archived ? 'text-muted italic' : 'text-ink',
+                  )}
+                >
+                  {session.title || 'Untitled chat'}
+                </span>
+                <span className="mt-px block text-[10.5px] text-faint">
+                  {busy ? 'Saving…' : whenLabel(session.updated_at)}
+                </span>
+              </button>
+
+              <IconButton
+                icon="ellipsis"
+                label={`Actions for ${session.title || 'this chat'}`}
+                size={13}
+                disabled={busy}
+                onClick={() => setMenuId((current) => (current === session.id ? null : session.id))}
+                className={cx(
+                  'absolute top-1.5 right-1 p-1 opacity-0 transition-opacity duration-150',
+                  'group-hover:opacity-100 focus-visible:opacity-100',
+                  menuId === session.id && 'opacity-100',
+                )}
+              />
+
+              {menuId === session.id ? (
+                <>
+                  {/* Catches the click that should dismiss the menu. */}
+                  <div className="fixed inset-0 z-30" onClick={() => setMenuId(null)} />
+                  <div className="absolute top-7 right-1 z-40 w-[138px] overflow-hidden rounded-[8px] border border-line bg-panel py-1 shadow-[0_8px_24px_rgba(0,0,0,0.16)]">
+                    <MenuItem icon="edit" onClick={() => startEditing(session)}>
+                      Rename
+                    </MenuItem>
+                    <MenuItem
+                      icon={session.archived ? 'unarchive' : 'archive'}
+                      onClick={() => {
+                        setMenuId(null)
+                        onArchive(session.id, !session.archived)
+                      }}
+                    >
+                      {session.archived ? 'Unarchive' : 'Archive'}
+                    </MenuItem>
+                    <MenuItem
+                      icon="trash"
+                      danger
+                      onClick={() => {
+                        setMenuId(null)
+                        setPendingDelete(session)
+                      }}
+                    >
+                      Delete
+                    </MenuItem>
+                  </div>
+                </>
+              ) : null}
+            </div>
+          )
+        })}
+
+        {hasMore ? (
+          <div className="px-0.5 pt-2">
+            <Button size="sm" loading={loadingMore} onClick={onLoadMore} className="w-full">
+              Load more
+            </Button>
+          </div>
+        ) : null}
+      </div>
+
+      <div className="border-t border-line px-3 py-2.5">
+        <Checkbox
+          checked={showArchived}
+          onChange={onShowArchivedChange}
+          label={<span className="text-[11px] font-normal text-muted">Show archived</span>}
+        />
+      </div>
+
+      {pendingDelete ? (
+        <ConfirmDialog
+          title="Delete chat"
+          // Spelled out because the two halves have different fates, and a user
+          // who thinks the write-up goes too will never press the button.
+          message={
+            <>
+              “{pendingDelete.title || 'This chat'}” and every message and tool call in it will be
+              deleted permanently. Notes generated from it are kept — they just stop linking back
+              here.
+            </>
+          }
+          confirmLabel="Delete chat"
+          busy={busyId === pendingDelete.id}
+          onCancel={() => setPendingDelete(null)}
+          onConfirm={() => {
+            // The row greys out while the delete is in flight and leaves the
+            // list when it lands, which is the whole of the feedback needed.
+            onDelete(pendingDelete.id)
+            setPendingDelete(null)
+          }}
+        />
+      ) : null}
+    </div>
+  )
+}
+
+function MenuItem({
+  icon,
+  danger = false,
+  onClick,
+  children,
+}: {
+  icon: 'edit' | 'archive' | 'unarchive' | 'trash'
+  danger?: boolean
+  onClick: () => void
+  children: string
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cx(
+        'flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-[12px] transition-colors duration-150 hover:bg-hover',
+        danger ? 'text-muted hover:text-red' : 'text-ink',
+      )}
+    >
+      <Icon name={icon} size={13} className="shrink-0 text-faint" />
+      {children}
+    </button>
+  )
+}
+
+interface BodyProps {
+  isPending: boolean
+  isError: boolean
+  isEmpty: boolean
+  searching: boolean
+  showArchived: boolean
+}
+
+/** The states the list can be in before it has rows to show. */
+function Body({ isPending, isError, isEmpty, searching, showArchived }: BodyProps) {
+  if (isPending) {
+    return <p className="px-2 py-6 text-center text-[11.5px] text-faint">Loading chats…</p>
+  }
+  if (isError) {
+    return (
+      <p className="px-2 py-6 text-center text-[11.5px] text-red">
+        Could not load chats. Is the backend running?
+      </p>
+    )
+  }
+  if (!isEmpty) {
+    return null
+  }
+  if (searching) {
+    return <p className="px-2 py-6 text-center text-[11.5px] text-faint">No chats match.</p>
+  }
+  if (showArchived) {
+    return <p className="px-2 py-6 text-center text-[11.5px] text-faint">No archived chats.</p>
+  }
+  return <p className="px-2 py-6 text-center text-[11.5px] text-faint">No chats yet.</p>
+}

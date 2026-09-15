@@ -9,22 +9,29 @@ import {
   notesQueryKey,
   type NoteSummary,
 } from '../api/notes'
-import useDebouncedValue from '../components/inbox/useDebouncedValue'
+import { excerptFromMarkdown } from '../components/notes/excerpt'
 import GenerateNotesDialog from '../components/notes/GenerateNotesDialog'
-import { formatNoteDate } from '../components/notes/noteDate'
+import { formatNoteDate, formatNoteDay } from '../components/notes/noteDate'
+import Button from '../components/ui/Button'
+import Card from '../components/ui/Card'
+import ConfirmDialog from '../components/ui/ConfirmDialog'
+import EmptyState from '../components/ui/EmptyState'
+import IconButton from '../components/ui/IconButton'
+import Input from '../components/ui/Input'
+import PageHeader from '../components/ui/PageHeader'
+import { HOVER_ROW, cx } from '../components/ui/classes'
+import type { EmbeddablePageProps } from '../components/ui/PageHost'
+import useDebouncedValue from '../lib/useDebouncedValue'
+import NoteDetailPage from './NoteDetail'
+import Page from './Page'
 
-const primaryButtonClass =
-  'rounded-md bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-800 ' +
-  'disabled:bg-slate-300'
-
-const secondaryButtonClass =
-  'rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 ' +
-  'hover:border-slate-400 disabled:opacity-40'
-
-export default function NotesPage() {
+export default function NotesPage({ embedded = false }: EmbeddablePageProps) {
   const queryClient = useQueryClient()
   const [search, setSearch] = useState('')
   const [dialogOpen, setDialogOpen] = useState(false)
+  const [pendingDelete, setPendingDelete] = useState<NoteSummary | null>(null)
+  // Embedded there is no `/notes/:id` to go to — the detail view opens in place.
+  const [openNoteId, setOpenNoteId] = useState<number | null>(null)
   const debouncedSearch = useDebouncedValue(search)
 
   const notes = useInfiniteQuery({
@@ -36,73 +43,95 @@ export default function NotesPage() {
 
   const remove = useMutation({
     mutationFn: (id: number) => deleteNote(id),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: notesQueryKey }),
+    onSuccess: async () => {
+      setPendingDelete(null)
+      await queryClient.invalidateQueries({ queryKey: notesQueryKey })
+    },
   })
 
   const rows = notes.data?.pages.flatMap((page) => page.notes) ?? []
 
-  return (
-    <section className="mx-auto flex max-w-4xl flex-col gap-4 px-8 py-8">
-      <header className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight text-slate-900">Notes</h1>
-          <p className="mt-0.5 text-xs text-slate-500">
-            Meeting notes generated from starred items and research sessions.
-          </p>
-        </div>
-        <button
-          type="button"
-          onClick={() => setDialogOpen(true)}
-          className={primaryButtonClass}
-        >
-          Generate notes
-        </button>
-      </header>
+  if (embedded && openNoteId !== null) {
+    return <NoteDetailPage embedded noteId={openNoteId} onBack={() => setOpenNoteId(null)} />
+  }
 
-      <input
+  return (
+    <Page>
+      <PageHeader
+        title="Notes"
+        subtitle="Meeting notes generated from starred items and research sessions."
+        actions={
+          <Button variant="primary" onClick={() => setDialogOpen(true)}>
+            Generate notes
+          </Button>
+        }
+      />
+
+      <Input
         value={search}
         onChange={(event) => setSearch(event.target.value)}
         placeholder="Search titles and bodies"
-        className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+        aria-label="Search notes"
       />
 
-      <div className="rounded-lg border border-slate-200 bg-white">
-        <Body
+      <Card padded={false}>
+        <ListState
           isPending={notes.isPending}
           isError={notes.isError}
           isEmpty={rows.length === 0}
           searching={debouncedSearch.trim() !== ''}
+          embedded={embedded}
         />
 
-        <ul className="divide-y divide-slate-100">
+        <ul>
           {rows.map((note) => (
             <NoteRow
               key={note.id}
               note={note}
               busy={remove.isPending}
-              onDelete={() => {
-                if (window.confirm(`Delete "${note.title ?? 'this note'}"? This cannot be undone.`)) {
-                  remove.mutate(note.id)
-                }
-              }}
+              onOpen={embedded ? () => setOpenNoteId(note.id) : undefined}
+              onDelete={() => setPendingDelete(note)}
             />
           ))}
         </ul>
-      </div>
+      </Card>
 
       {notes.hasNextPage ? (
-        <button
-          type="button"
-          disabled={notes.isFetchingNextPage}
+        <Button
+          className="self-center"
+          loading={notes.isFetchingNextPage}
           onClick={() => void notes.fetchNextPage()}
-          className={`${secondaryButtonClass} self-center`}
         >
-          {notes.isFetchingNextPage ? 'Loading…' : 'Load more'}
-        </button>
+          Load more
+        </Button>
       ) : null}
 
-      {dialogOpen ? <GenerateNotesDialog onClose={() => setDialogOpen(false)} /> : null}
-    </section>
+      {dialogOpen ? (
+        <GenerateNotesDialog
+          onClose={() => setDialogOpen(false)}
+          // Routed, the dialog navigates to the new note; embedded there is no
+          // route to navigate, so the pane opens it itself.
+          onGenerated={embedded ? (id) => setOpenNoteId(id) : undefined}
+        />
+      ) : null}
+
+      {pendingDelete ? (
+        <ConfirmDialog
+          title="Delete note"
+          message={
+            <>
+              “{pendingDelete.title ?? `Note ${pendingDelete.id}`}” will be deleted, along with its
+              sources. This cannot be undone.
+            </>
+          }
+          confirmLabel="Delete note"
+          busy={remove.isPending}
+          error={remove.isError ? 'The note could not be deleted.' : null}
+          onCancel={() => setPendingDelete(null)}
+          onConfirm={() => remove.mutate(pendingDelete.id)}
+        />
+      ) : null}
+    </Page>
   )
 }
 
@@ -110,75 +139,104 @@ interface NoteRowProps {
   note: NoteSummary
   busy: boolean
   onDelete: () => void
+  /** Set when there is no route to link to: opens the note in place instead. */
+  onOpen?: () => void
 }
 
-function NoteRow({ note, busy, onDelete }: NoteRowProps) {
+function NoteRow({ note, busy, onDelete, onOpen }: NoteRowProps) {
+  const sources = `${note.source_count} ${note.source_count === 1 ? 'source' : 'sources'}`
+  const body = (
+    <>
+      <span className="block font-display text-[15px] font-semibold text-ink">
+        {note.title ?? `Note ${note.id}`}
+      </span>
+      <span className="mt-0.5 block text-[11px] text-faint" title={formatNoteDate(note.created_at)}>
+        {formatNoteDay(note.created_at)} · {sources}
+        {note.session_id !== null ? ' · from a research session' : ''}
+      </span>
+      {/* The API's excerpt is the head of the Markdown source, so the hashes,
+          arrows and asterisks come off before the two-line clamp. */}
+      <span className="mt-[5px] line-clamp-2 block text-[12px] leading-[1.55] text-muted">
+        {excerptFromMarkdown(note.excerpt)}
+      </span>
+    </>
+  )
+  // `no-underline`/`opacity-100` undo the base `a` rules: inside a row the link
+  // is the whole block, and fading it on hover fights the row's own highlight.
+  const openClass = 'block min-w-0 flex-1 text-left no-underline hover:opacity-100'
+
   return (
-    <li className="flex items-start gap-3 px-4 py-3.5">
-      <div className="min-w-0 flex-1">
-        <Link
-          to={`/notes/${note.id}`}
-          className="text-sm font-medium text-slate-900 underline-offset-2 hover:underline"
-        >
-          {note.title ?? `Note ${note.id}`}
+    <li
+      className={cx(
+        'flex items-start gap-3 border-t border-line px-4 py-[13px] first:border-t-0',
+        HOVER_ROW,
+      )}
+    >
+      {onOpen ? (
+        <button type="button" onClick={onOpen} className={openClass}>
+          {body}
+        </button>
+      ) : (
+        <Link to={`/notes/${note.id}`} className={openClass}>
+          {body}
         </Link>
-        <p className="mt-0.5 text-[11px] text-slate-500">
-          {formatNoteDate(note.created_at)} · {note.source_count}{' '}
-          {note.source_count === 1 ? 'source' : 'sources'}
-          {note.session_id !== null ? ' · from a research session' : ''}
-        </p>
-        {/* Plain text: the excerpt is raw Markdown and is shown as such. */}
-        <p className="mt-1.5 line-clamp-2 text-xs leading-relaxed text-slate-600">
-          {note.excerpt}
-        </p>
-      </div>
-      <button
-        type="button"
+      )}
+      <IconButton
+        icon="dismiss"
+        label="Delete note"
+        tone="danger"
         disabled={busy}
         onClick={onDelete}
-        className="rounded border border-slate-200 px-2 py-1 text-[11px] font-medium text-slate-600 hover:border-rose-300 hover:text-rose-700 disabled:opacity-40"
-      >
-        Delete
-      </button>
+      />
     </li>
   )
 }
 
-interface BodyProps {
+interface ListStateProps {
   isPending: boolean
   isError: boolean
   isEmpty: boolean
   searching: boolean
+  /** No route to point at: this list is the split view's right pane. */
+  embedded: boolean
 }
 
 /** The states the list can be in before it has rows to show. */
-function Body({ isPending, isError, isEmpty, searching }: BodyProps) {
+function ListState({ isPending, isError, isEmpty, searching, embedded }: ListStateProps) {
   if (isPending) {
-    return <p className="px-4 py-10 text-center text-xs text-slate-500">Loading notes…</p>
+    return <EmptyState icon="spinner" title="Loading notes…" />
   }
   if (isError) {
     return (
-      <p className="px-4 py-10 text-center text-xs text-rose-600">
-        Could not load notes. Is the backend running?
-      </p>
+      <EmptyState
+        tone="error"
+        icon="warning"
+        title="Could not load notes."
+        description="Is the backend running?"
+      />
     )
   }
   if (!isEmpty) {
     return null
   }
   if (searching) {
-    return <p className="px-4 py-10 text-center text-xs text-slate-500">No notes match.</p>
+    return <EmptyState icon="search" title="No notes match." />
   }
   return (
-    <div className="px-4 py-10 text-center">
-      <p className="text-xs text-slate-500">No notes yet.</p>
-      <p className="mt-1 text-xs text-slate-500">
-        Star a few items in the{' '}
-        <Link to="/" className="underline underline-offset-2 hover:text-slate-900">
-          Inbox
-        </Link>
-        , then generate notes from them.
-      </p>
-    </div>
+    <EmptyState
+      icon="notes"
+      title="No notes yet."
+      description={
+        // Embedded, this link would navigate the *other* pane — so it is only a
+        // link where it can take the reader somewhere they asked to go.
+        embedded ? (
+          'Star a few items in the Inbox, then generate notes from them.'
+        ) : (
+          <>
+            Star a few items in the <Link to="/">Inbox</Link>, then generate notes from them.
+          </>
+        )
+      }
+    />
   )
 }

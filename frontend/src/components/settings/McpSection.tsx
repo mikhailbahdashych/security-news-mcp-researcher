@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useState } from 'react'
+import { useId, useState } from 'react'
 
 import { ApiError } from '../../api/client'
 import {
@@ -10,9 +10,17 @@ import {
   mcpToolsQueryKey,
   saveMcpServers,
 } from '../../api/mcp'
+import Button from '../ui/Button'
+import Icon from '../ui/Icon'
+import Textarea from '../ui/Textarea'
 import McpServerList from './McpServerList'
 import McpToolList from './McpToolList'
 import SettingsSection from './SettingsSection'
+
+/** The underlined "Show tools" affordance — a link in everything but the markup. */
+const LINK_BUTTON =
+  'text-[12px] font-medium text-muted underline underline-offset-2 ' +
+  'transition-colors duration-150 hover:text-ink'
 
 /**
  * The MCP panel: a JSON editor, the server status board, and the per-tool toggles.
@@ -51,46 +59,46 @@ export default function McpSection() {
       />
 
       {serversQuery.isError ? (
-        <p className="text-xs text-rose-600">Could not load MCP servers. Is the backend running?</p>
+        <p className="text-[11.5px] text-red">
+          Could not load MCP servers. Is the backend running?
+        </p>
       ) : (
         <McpServerList servers={servers} />
       )}
 
-      {tools && tools.enabled_count > tools.warn_threshold ? (
-        <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
-          <strong>{tools.enabled_count} tools enabled</strong> (built-in, web and MCP together).
-          Past about {tools.warn_threshold} the model starts choosing tools poorly, and the tool
-          definitions alone cost prompt tokens on every turn. Turn off the ones you do not use.
-        </p>
-      ) : null}
-
       <div>
-        <button
-          type="button"
-          onClick={() => setShowTools((value) => !value)}
-          className="text-xs font-medium text-slate-700 underline underline-offset-2"
-        >
+        <button type="button" onClick={() => setShowTools((value) => !value)} className={LINK_BUTTON}>
           {showTools ? 'Hide tools' : 'Show tools'}
         </button>
         {showTools ? (
-          <p className="mt-1 text-[11px] text-slate-500">
-            Opening this connects to each enabled server; the first run of an `npx` server can
-            take a while.
+          <p className="mt-1 text-[11px] text-faint">
+            Opening this connects to each enabled server; the first run of an npx server can take
+            a while.
           </p>
         ) : null}
       </div>
 
       {showTools ? (
-        <div>
+        <div className="flex flex-col gap-2.5">
           {toolsQuery.isPending ? (
-            <p className="text-xs text-slate-500">Connecting to servers…</p>
+            <p className="text-[11.5px] text-faint">Connecting to servers…</p>
           ) : toolsQuery.isError ? (
-            <p className="text-xs text-rose-600">Could not load the tool list.</p>
+            <p className="text-[11.5px] text-red">Could not load the tool list.</p>
           ) : (
             <>
-              <p className="mb-2 text-[11px] text-slate-500">
-                {tools?.enabled_count} of {tools?.warn_threshold} suggested tools enabled in
-                total.
+              {tools && tools.enabled_count > tools.warn_threshold ? (
+                <p className="flex items-start gap-2 rounded-[8px] border border-line bg-panel2 px-3 py-2 text-[11.5px] text-amber">
+                  <Icon name="warning" size={14} className="mt-[1px] shrink-0" />
+                  <span>
+                    <strong className="font-semibold">{tools.enabled_count} tools enabled</strong>{' '}
+                    (built-in, web and MCP together). Past about {tools.warn_threshold} the model
+                    starts choosing tools poorly, and the tool definitions alone cost prompt tokens
+                    on every turn. Turn off the ones you do not use.
+                  </span>
+                </p>
+              ) : null}
+              <p className="text-[11px] text-faint">
+                {tools?.enabled_count} of {tools?.warn_threshold} suggested tools enabled in total.
               </p>
               <McpToolList tools={tools?.tools ?? []} />
             </>
@@ -111,6 +119,7 @@ function ConfigEditor({
 }) {
   const [draft, setDraft] = useState<string | null>(null)
   const [parseError, setParseError] = useState<string | null>(null)
+  const editorId = useId()
 
   const serialised = stored ? JSON.stringify(stored, null, 2) : ''
   const value = draft ?? serialised
@@ -141,10 +150,12 @@ function ConfigEditor({
     save.error instanceof ApiError && save.error.status === 422 ? save.error.detail : null
 
   return (
-    <div className="flex flex-col gap-2">
-      <textarea
-        id="mcp-config"
-        rows={10}
+    <div className="flex flex-col gap-2.5">
+      <Textarea
+        id={editorId}
+        tone="bg"
+        mono
+        rows={8}
         spellCheck={false}
         value={value}
         placeholder={EXAMPLE_CONFIG}
@@ -153,26 +164,20 @@ function ConfigEditor({
           setParseError(null)
           save.reset()
         }}
-        className="w-full rounded-md border border-slate-300 bg-white px-3 py-2 font-mono text-xs text-slate-900 shadow-xs outline-none focus:border-slate-500 focus:ring-2 focus:ring-slate-200"
       />
 
       {parseError ? (
-        <p className="font-mono text-[11px] text-rose-600">Invalid JSON: {parseError}</p>
+        <p className="font-mono text-[11px] text-red">Invalid JSON: {parseError}</p>
       ) : null}
-      {serverError ? <p className="text-xs text-rose-600">{serverError}</p> : null}
+      {serverError ? <p className="text-[11.5px] text-red">{serverError}</p> : null}
       {save.isError && !serverError ? (
-        <p className="text-xs text-rose-600">Could not save. Is the backend running?</p>
+        <p className="text-[11.5px] text-red">Could not save. Is the backend running?</p>
       ) : null}
 
-      <div className="flex items-center gap-3">
-        <button
-          type="button"
-          disabled={save.isPending}
-          onClick={submit}
-          className="rounded-md bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-800 disabled:bg-slate-300"
-        >
+      <div className="flex flex-wrap items-center gap-3">
+        <Button variant="primary" loading={save.isPending} onClick={submit}>
           {save.isPending ? 'Saving…' : 'Save MCP config'}
-        </button>
+        </Button>
         {draft !== null ? (
           <button
             type="button"
@@ -181,12 +186,12 @@ function ConfigEditor({
               setParseError(null)
               save.reset()
             }}
-            className="text-xs text-slate-500 underline underline-offset-2"
+            className={LINK_BUTTON}
           >
             Revert
           </button>
         ) : null}
-        {save.isSuccess ? <span className="text-xs text-emerald-700">Saved.</span> : null}
+        {save.isSuccess ? <span className="text-[11.5px] text-green">Saved</span> : null}
       </div>
     </div>
   )

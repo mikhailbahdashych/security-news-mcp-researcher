@@ -1,10 +1,16 @@
-import { parseUtc, type FeedItem } from '../../api/inbox'
-import StatusBadge from './StatusBadge'
+import type { FeedItem, ItemStatus } from '../../api/inbox'
+import { parseUtc } from '../../lib/dates'
+import IconButton from '../ui/IconButton'
+import { HOVER_ROW, cx } from '../ui/classes'
 
 interface ItemRowProps {
   item: FeedItem
   selected: boolean
+  /** True while anything is selected: every checkbox stays out, not just the hovered one. */
+  selecting: boolean
   busy: boolean
+  /** This row's article is being fetched right now. */
+  extracting?: boolean
   /** The row a search result pointed at — called out so it is findable on a long page. */
   highlighted?: boolean
   onToggleSelect: (id: number, selected: boolean) => void
@@ -14,11 +20,19 @@ interface ItemRowProps {
   extractNote?: string
 }
 
+/** The triage state, as the 7px dot at the head of the row. */
+const DOT: Record<ItemStatus, string> = {
+  unread: 'bg-accent',
+  starred: 'bg-amber',
+  dismissed: 'bg-faint',
+}
+
 function formatDate(item: FeedItem): string {
   const stamp = item.published_at ?? item.fetched_at
   const date = parseUtc(stamp)
   const text = date.toLocaleString(undefined, {
-    year: 'numeric',
+    // The year only earns its place once the item is not from this one.
+    year: date.getFullYear() === new Date().getFullYear() ? undefined : 'numeric',
     month: 'short',
     day: 'numeric',
     hour: '2-digit',
@@ -29,15 +43,19 @@ function formatDate(item: FeedItem): string {
   return item.published_at ? text : `fetched ${text}`
 }
 
-const actionClass =
-  'rounded border border-slate-200 px-2 py-1 text-[11px] font-medium text-slate-600 ' +
-  'hover:border-slate-400 hover:text-slate-900 disabled:opacity-40'
-
-/** One headline: title, source, date, snippet, badge and the triage actions. */
+/**
+ * One headline: status dot, title, source, date, snippet and the triage actions.
+ *
+ * The dot and the select checkbox share a slot. The checkbox takes it over on
+ * hover, on keyboard focus, and for as long as anything is selected — so a
+ * resting list is all dots, and a list being triaged is all checkboxes.
+ */
 export default function ItemRow({
   item,
   selected,
+  selecting,
   busy,
+  extracting = false,
   highlighted = false,
   onToggleSelect,
   onStar,
@@ -47,88 +65,111 @@ export default function ItemRow({
 }: ItemRowProps) {
   const starred = item.status === 'starred'
   const dismissed = item.status === 'dismissed'
+  const pinned = selecting || selected
 
   return (
     <li
       // The id is the anchor the Inbox scrolls to for a `?item=` deep link.
       id={`item-${item.id}`}
-      className={`flex gap-3 px-4 py-3.5 ${dismissed ? 'opacity-60' : ''} ${
-        highlighted ? 'bg-amber-50 ring-2 ring-inset ring-amber-300' : ''
-      }`}
+      className={cx(
+        'group flex gap-3 border-t border-line px-4 py-3',
+        HOVER_ROW,
+        dismissed && 'opacity-60',
+        highlighted && 'bg-accent-soft ring-1 ring-accent ring-inset',
+      )}
     >
-      <input
-        type="checkbox"
-        checked={selected}
-        aria-label={`Select ${item.title}`}
-        onChange={(event) => onToggleSelect(item.id, event.target.checked)}
-        className="mt-1 size-4 shrink-0 rounded border-slate-300 accent-slate-900"
-      />
+      <span className="relative mt-[3px] flex size-[15px] shrink-0 items-center justify-center">
+        <span
+          aria-hidden
+          className={cx(
+            'absolute size-[7px] rounded-full transition-opacity duration-150',
+            DOT[item.status],
+            pinned ? 'opacity-0' : 'opacity-100 group-hover:opacity-0',
+          )}
+        />
+        <input
+          type="checkbox"
+          checked={selected}
+          aria-label={`Select ${item.title}`}
+          onChange={(event) => onToggleSelect(item.id, event.target.checked)}
+          className={cx(
+            'absolute size-[15px] cursor-pointer accent-[var(--accent-btn)] transition-opacity duration-150',
+            pinned
+              ? 'opacity-100'
+              : 'opacity-0 group-hover:opacity-100 focus-visible:opacity-100',
+          )}
+        />
+      </span>
 
       <div className="min-w-0 flex-1">
-        <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
-          {item.url ? (
-            <a
-              href={item.url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-sm font-medium text-slate-900 underline-offset-2 hover:underline"
-            >
-              {item.title}
-            </a>
-          ) : (
-            <span className="text-sm font-medium text-slate-900">{item.title}</span>
-          )}
-          <StatusBadge status={item.status} />
-        </div>
+        {item.url ? (
+          <a
+            href={item.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-[13.5px] leading-[1.35] font-[550] text-ink no-underline transition-colors duration-150 hover:text-accent hover:opacity-100"
+          >
+            {item.title}
+          </a>
+        ) : (
+          <span className="text-[13.5px] leading-[1.35] font-[550] text-ink">{item.title}</span>
+        )}
 
-        <p className="mt-0.5 text-[11px] text-slate-500">
-          {item.feed_title ?? 'Unknown feed'} · {formatDate(item)}
-          {item.author ? ` · ${item.author}` : ''}
+        <p className="mt-0.5 text-[11px] text-faint">
+          <span className="font-medium text-muted">{item.feed_title ?? 'Unknown feed'}</span>
+          {' · '}
+          {formatDate(item)}
         </p>
 
         {item.summary ? (
           // Plain text, rendered as text. Feed summaries are stripped of HTML at
           // ingest and nothing here ever sets innerHTML.
-          <p className="mt-1.5 line-clamp-3 text-xs leading-relaxed text-slate-600">
+          <p className="mt-[5px] line-clamp-2 text-[12px] leading-[1.55] text-muted">
             {item.summary}
           </p>
         ) : null}
 
         {item.content_text ? (
           <details className="mt-2">
-            <summary className="cursor-pointer text-[11px] font-medium text-slate-500 hover:text-slate-900">
+            <summary className="cursor-pointer text-[11px] text-faint transition-colors duration-150 hover:text-ink">
               Extracted article ({item.content_text.length.toLocaleString()} characters)
             </summary>
-            <pre className="mt-1.5 max-h-72 overflow-auto rounded bg-slate-50 p-3 text-[11px] leading-relaxed whitespace-pre-wrap text-slate-700">
+            <pre className="mt-1.5 max-h-72 overflow-auto rounded-[8px] bg-code p-3 font-mono text-[11px] leading-relaxed whitespace-pre-wrap text-muted">
               {item.content_text}
             </pre>
           </details>
         ) : null}
 
-        {extractNote ? <p className="mt-1.5 text-[11px] text-amber-700">{extractNote}</p> : null}
+        {extractNote ? <p className="mt-1.5 text-[11px] text-amber">{extractNote}</p> : null}
+      </div>
 
-        <div className="mt-2 flex flex-wrap gap-1.5">
-          <button type="button" disabled={busy} onClick={() => onStar(item)} className={actionClass}>
-            {starred ? 'Unstar' : 'Star'}
-          </button>
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => onDismiss(item)}
-            className={actionClass}
-          >
-            {dismissed ? 'Restore' : 'Dismiss'}
-          </button>
-          <button
-            type="button"
-            disabled={busy || !item.url}
-            onClick={() => onExtract(item)}
-            className={actionClass}
-            title={item.url ? 'Fetch and store the article text' : 'This entry has no link'}
-          >
-            {item.content_text ? 'Re-extract' : 'Extract article'}
-          </button>
-        </div>
+      <div className="flex shrink-0 items-start gap-0.5">
+        <IconButton
+          icon={starred ? 'starFilled' : 'star'}
+          label={starred ? 'Unstar' : 'Star'}
+          tone={starred ? 'amber' : 'default'}
+          disabled={busy}
+          onClick={() => onStar(item)}
+        />
+        <IconButton
+          icon={dismissed ? 'unarchive' : 'dismiss'}
+          label={dismissed ? 'Restore' : 'Dismiss'}
+          disabled={busy}
+          onClick={() => onDismiss(item)}
+        />
+        <IconButton
+          icon={extracting ? 'spinner' : 'extract'}
+          // `IconButton` makes the label the tooltip too, so it carries the why.
+          label={
+            !item.url
+              ? 'This entry has no link to extract'
+              : item.content_text
+                ? 'Fetch the article text again'
+                : 'Extract article'
+          }
+          disabled={busy || !item.url}
+          onClick={() => onExtract(item)}
+        />
       </div>
     </li>
   )
