@@ -10,6 +10,10 @@ from app.main import create_app
 INDEX_HTML = '<!doctype html><html><body><div id="root"></div></body></html>'
 
 
+#: Written next to `static/`, so serving it means the resolver escaped the root.
+SECRET = "SUPERSECRET-token-value"
+
+
 @pytest.fixture
 def spa_client(tmp_path: Path) -> httpx2.AsyncClient:
     """Client for an app whose static_dir exists and holds a built SPA."""
@@ -17,6 +21,7 @@ def spa_client(tmp_path: Path) -> httpx2.AsyncClient:
     (static_dir / "assets").mkdir(parents=True)
     (static_dir / "index.html").write_text(INDEX_HTML)
     (static_dir / "assets" / "app.js").write_text("console.log('hi')")
+    (tmp_path / "secrets.txt").write_text(SECRET)
 
     app = create_app(Settings(static_dir=static_dir))
     return httpx2.AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
@@ -64,4 +69,27 @@ async def test_path_traversal_is_not_served(spa_client: httpx2.AsyncClient) -> N
 
     # Falls back to the SPA shell rather than escaping static_dir.
     assert response.status_code in (200, 404)
-    assert "secret" not in response.text.lower()
+    assert SECRET not in response.text
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/%2e%2e/secrets.txt",
+        "/%2E%2E/secrets.txt",
+        "/assets/%2e%2e/%2e%2e/secrets.txt",
+        "/%2e%2e%2fsecrets.txt",
+    ],
+)
+async def test_percent_encoded_traversal_is_not_served(
+    spa_client: httpx2.AsyncClient, path: str
+) -> None:
+    """The plain `/../x` case is near-tautological: httpx2 normalises the dots out
+    of the URL before the request is ever made, so the app never sees them. These
+    reach the resolver with `..` intact — an unquoted path is what ASGI hands the
+    route — which is the case `_resolve_static_file` actually has to refuse."""
+    async with spa_client as client:
+        response = await client.get(path)
+
+    assert response.status_code in (200, 404)
+    assert SECRET not in response.text

@@ -1,10 +1,13 @@
 services:
   app:
     build: .
+    # PORT comes from the repo-root .env (compose reads it) or the shell, and is
+    # published on the same number inside and out so links printed by the app work.
     ports:
-      - "8000:8000"
+      - "${PORT:-8000}:${PORT:-8000}"
     environment:
       DB_PATH: /data/app.db
+      PORT: ${PORT:-8000}
     volumes:
       # Named volume, never a bind mount: SQLite locking is unreliable on
       # macOS bind mounts.

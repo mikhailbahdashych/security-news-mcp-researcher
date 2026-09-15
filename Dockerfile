@@ -34,8 +34,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 RUN pip install --no-cache-dir uv
 
 # Install the locked runtime dependencies system-wide (no venv in the image).
+#
+# The export keeps its hashes: uv then refuses any artefact whose digest is not
+# the one the lock recorded, which is the difference between "pinned" and
+# "verified". The export is platform-independent (the lock is universal), so the
+# same command produces the same file wherever the image is built.
 COPY backend/pyproject.toml backend/uv.lock ./
-RUN uv export --frozen --no-dev --no-emit-project --no-hashes -o requirements.txt \
+RUN uv export --frozen --no-dev --no-emit-project -o requirements.txt \
     && uv pip install --system --no-cache -r requirements.txt \
     && rm requirements.txt pyproject.toml uv.lock
 
@@ -68,7 +73,21 @@ ENV DB_PATH=/data/app.db \
     HOME=/data \
     NPM_CONFIG_CACHE=/data/.npm
 
+# Nothing in here needs root — and a stdio MCP server is arbitrary code the user
+# configured, running inside this container. The user owns /data because that is
+# the only writable path (the SQLite database, npx's cache, $HOME), and it is
+# chowned BEFORE the VOLUME declaration so a fresh named volume inherits the
+# ownership from the image rather than coming up owned by root.
+RUN useradd --create-home --home-dir /data --shell /usr/sbin/nologin app \
+    && chown -R app:app /data
+
 VOLUME /data
+USER app
+
+# Documentation only, and only correct for the default: the app binds $PORT, and
+# a published port is what actually decides reachability.
 EXPOSE 8000
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# `python -m app`, not `uvicorn`: it is the one entrypoint that reads PORT off
+# Settings, so overriding PORT here moves the server as well as the label.
+CMD ["python", "-m", "app", "--host", "0.0.0.0"]
