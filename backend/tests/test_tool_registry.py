@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from datetime import timedelta
 
 import pytest
 from sqlalchemy import select
@@ -327,6 +328,85 @@ async def test_search_feed_items_admits_a_full_page(session_factory, db_session,
     assert f"More than {MAX_SEARCH_LIMIT} items match" in result.content
     assert result.raw["has_more"] is True
     assert result.raw["next_cursor"]
+
+
+def bulk_items(feed_id: int, count: int, *, prefix: str, summary: str, age_days: int = 0):
+    """`count` matching items, all `age_days` old (0 = now)."""
+    published = utcnow() - timedelta(days=age_days)
+    return [
+        FeedItem(
+            feed_id=feed_id,
+            guid=f"{prefix}-{index}",
+            url=f"https://example.test/{prefix}-{index}",
+            title=f"AcmeVPN advisory {index}",
+            summary=summary,
+            published_at=published,
+        )
+        for index in range(count)
+    ]
+
+
+async def test_search_feed_items_counts_what_it_actually_rendered(
+    session_factory, db_session, seeded
+):
+    """The renderer has its own character budget, so a `count` taken before it
+    ran described an answer the model was never shown all of — and the stored
+    tool_call row is the only record of what the turn really saw."""
+    db_session.add_all(bulk_items(seeded.id, 40, prefix="wordy", summary="AcmeVPN detail. " * 30))
+    await db_session.commit()
+
+    result = await BuiltinToolProvider(session_factory).search_feed_items(
+        q="AcmeVPN", limit=MAX_SEARCH_LIMIT
+    )
+
+    rendered = result.content.count("[id ")
+    assert "omitted to save space" in result.content
+    assert rendered < 41
+    assert result.raw["count"] == rendered
+    assert result.raw["has_more"] is True
+
+
+async def test_search_feed_items_does_not_warn_about_items_the_window_excludes(
+    session_factory, db_session, seeded
+):
+    """`next_cursor` describes the query *without* the date bound. Items come
+    back newest-first, so once the window has cut into the page, everything
+    beyond the page is older still — and "bound it with since_days" is advice
+    the model has already taken."""
+    db_session.add_all(
+        bulk_items(
+            seeded.id,
+            MAX_SEARCH_LIMIT + 5,
+            prefix="old",
+            summary="Older AcmeVPN coverage.",
+            age_days=30,
+        )
+    )
+    await db_session.commit()
+
+    result = await BuiltinToolProvider(session_factory).search_feed_items(q="AcmeVPN", since_days=7)
+
+    assert f"More than {MAX_SEARCH_LIMIT} items match" not in result.content
+    assert result.raw["has_more"] is False
+    assert result.raw["count"] == 1
+
+
+async def test_a_window_that_excludes_nothing_still_warns_about_the_page(
+    session_factory, db_session, seeded
+):
+    """The other half: a `since_days` wide enough to keep the whole page leaves
+    the warning standing, because there really is more behind it."""
+    db_session.add_all(
+        bulk_items(seeded.id, MAX_SEARCH_LIMIT + 5, prefix="recent", summary="AcmeVPN coverage.")
+    )
+    await db_session.commit()
+
+    result = await BuiltinToolProvider(session_factory).search_feed_items(
+        q="AcmeVPN", since_days=30, limit=MAX_SEARCH_LIMIT
+    )
+
+    assert f"More than {MAX_SEARCH_LIMIT} items match" in result.content
+    assert result.raw["has_more"] is True
 
 
 async def test_search_feed_items_empty_result_is_not_an_error(session_factory, seeded):
