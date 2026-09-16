@@ -310,7 +310,7 @@ touched; what changed is everything around them.
   tested rule (`liveTurn.ts::shouldAttach`) that believes `GET /api/sessions/running`
   rather than the session row's cached `turn_status`, because that row is read both before
   a turn starts and after it ends. Three indicators make a detached turn findable (the rail's dot, a `running` row
-  in the history drawer, `running · 1m 05s` in the chat header), all off one
+  in the rail's chat list, `running · 1m 05s` in the chat header), all off one
   `GET /api/sessions/running` query refetched on window focus and on the page's own
   events: **the no-poller rule holds on the frontend too**. A turn a backend restart cut
   short reads `interrupted`, says so, and offers "Send again" from the stored question.
