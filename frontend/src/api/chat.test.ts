@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
   blocksToText,
@@ -7,6 +7,7 @@ import {
   formatMs,
   formatTokens,
   groupTurns,
+  parseSessionId,
   resendPayload,
   stepsFromMessage,
   toolCallStatus,
@@ -523,22 +524,91 @@ describe('formatting', () => {
   })
 })
 
-describe('whenLabel', () => {
-  const now = new Date(2026, 8, 14, 12, 0, 0)
-
-  it('names the last two days rather than dating them', () => {
-    // Midday, because the stored timestamps are naive UTC and a late-evening
-    // one crosses into the next day for anyone east of Greenwich.
-    expect(whenLabel('2026-09-14T06:39:23', now)).toBe('today')
-    expect(whenLabel('2026-09-13T12:00:00', now)).toBe('yesterday')
+describe('parseSessionId', () => {
+  it('reads a plain positive integer', () => {
+    expect(parseSessionId('5')).toBe(5)
+    expect(parseSessionId('1204')).toBe(1204)
   })
 
-  it('falls back to a date once the week is out', () => {
-    expect(whenLabel('2026-09-01T09:00:00', now)).toBe('Sep 1')
+  it('rejects anything that is not all digits', () => {
+    // These reached the API as `NaN`, `1.5` and `-3`, where FastAPI answers 422
+    // — not the 404 the missing-session path knows what to do with.
+    expect(parseSessionId('abc')).toBeNull()
+    expect(parseSessionId('1.5')).toBeNull()
+    expect(parseSessionId('-3')).toBeNull()
+    expect(parseSessionId('12a')).toBeNull()
+    expect(parseSessionId(' 7')).toBeNull()
+  })
+
+  it('rejects an id no row could carry', () => {
+    expect(parseSessionId('0')).toBeNull()
+    expect(parseSessionId('99999999999999999999')).toBeNull()
+  })
+
+  it('is null for a route with no id at all', () => {
+    expect(parseSessionId(undefined)).toBeNull()
+    expect(parseSessionId('')).toBeNull()
+  })
+})
+
+describe('whenLabel', () => {
+  // The zone is pinned to UTC in `vite.config.ts` (`test.env.TZ`), because the
+  // app renders the viewer's *local* day of a naive-UTC stamp: `T12:00:00` is
+  // still the 16th from UTC-12 to UTC+11, and the 17th in UTC+13 and UTC+14.
+  //
+  // And the `Intl` path is taken away for the whole block: asserting English
+  // output on the runner's own locale would pass just as happily against
+  // `toLocaleDateString('en-GB', …)`, which renders `15 janv. 2026` on a French
+  // machine. If anyone reintroduces it here, these tests throw.
+  beforeEach(() => {
+    vi.spyOn(Date.prototype, 'toLocaleDateString').mockImplementation(() => {
+      throw new Error('whenLabel must not go through Intl')
+    })
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('dates every row, day then month then year', () => {
+    expect(whenLabel('2026-09-16T12:00:00')).toBe('16 Sep 2026')
+    expect(whenLabel('2025-12-31T12:00:00')).toBe('31 Dec 2025')
+  })
+
+  it('writes the day without a leading zero', () => {
+    expect(whenLabel('2026-09-01T12:00:00')).toBe('1 Sep 2026')
+  })
+
+  it('dates the last two days rather than naming them', () => {
+    const stamp = (at: number) => `${new Date(at).toISOString().slice(0, 10)}T12:00:00`
+    const now = Date.now()
+    expect(whenLabel(stamp(now))).toMatch(/^\d{1,2} [A-Z][a-z]{2} \d{4}$/)
+    expect(whenLabel(stamp(now - 86_400_000))).toMatch(/^\d{1,2} [A-Z][a-z]{2} \d{4}$/)
+  })
+
+  it('names the month in English whatever the browser locale is', () => {
+    const months = [
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec',
+    ]
+    months.forEach((month, index) => {
+      const at = String(index + 1).padStart(2, '0')
+      expect(whenLabel(`2026-${at}-15T12:00:00`)).toBe(`15 ${month} 2026`)
+    })
   })
 
   it('survives a timestamp it cannot read', () => {
-    expect(whenLabel('not a date', now)).toBe('')
+    expect(whenLabel('not a date')).toBe('')
   })
 })
 

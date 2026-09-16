@@ -9,9 +9,11 @@ export default defineConfig({
     // Node is enough: the only unit tests are for the hand-rolled SSE parser.
     environment: 'node',
     include: ['src/**/*.test.ts'],
-    // The backend stores naive UTC and the app re-appends the `Z`. Without a
-    // pinned zone the tests that assert an instant assert the machine's offset
-    // instead, and pass or fail depending on where the laptop is.
+    // Pin the zone. The backend stores naive UTC and the app re-appends the `Z`
+    // to render the viewer's local day, so a test that asserts an instant or a
+    // date is only reproducible against a known offset — `2026-09-16T12:00:00`
+    // is already the 17th in UTC+13, and an elapsed counter asserted in the
+    // machine's own zone passes or fails depending on where the laptop is.
     env: { TZ: 'UTC' },
   },
   server: {

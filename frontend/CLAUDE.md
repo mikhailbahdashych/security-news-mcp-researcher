@@ -101,13 +101,19 @@ these rather than inventing a fifth slightly-different secondary button. Primiti
 
 - `Icon.tsx` is the whole icon set as inline paths (one 1.6 stroke weight in a 20×20
   box). **Do not add an icon library.** Icons are `aria-hidden`; an icon-only control
-  gets its label from `IconButton`, not from the glyph.
+  gets its label from `IconButton`, not from the glyph. `IconButton`'s props are
+  `ComponentPropsWithRef<'button'>`, so it **takes a `ref`** — `ChatPage` holds one on
+  the history opener so a click on it is not a click outside the drawer.
 - `modal.ts::useModalPanel(onClose)` is the keyboard contract every overlay owes:
   focus in on mount and back out on unmount, Escape from anywhere, Tab cycling inside
   the panel. Mount the panel **conditionally** — "open" is this hook's mount. A panel
   that says `aria-modal` without this is worse than one that never claimed it.
   `ConfirmDialog` builds on it to replace `window.confirm`, which is an OS box in a
   themed app and blocks the event loop so a pending mutation cannot report into it.
+  `modal.ts::isOutside(target, ...containers)` is the other half, for overlays that
+  also dismiss on a click away: pure, variadic, and **the opener counts as inside** —
+  without it the opener's `pointerdown` closes the panel and its `click` reopens it.
+  A missing target, or no mounted container, is not outside.
 - `GlobalSearch.tsx` owns the `Cmd/Ctrl+K` binding (not `/` — the composer and the
   note editor are text fields). It queries `GET /api/search`, groups the hits and
   follows `hit.link`, which the **backend** builds. The match is highlighted by
@@ -119,7 +125,9 @@ these rather than inventing a fifth slightly-different secondary button. Primiti
 `client.ts` is the whole HTTP layer: `apiGet/apiPost/apiPut/apiPatch/apiDelete` over
 `fetch` against `API_BASE = '/api'`, throwing `ApiError(status, detail)` from FastAPI's
 `detail` field and returning `undefined` for 204. **Do not call `fetch` directly
-elsewhere** (except `lib/sse.ts`, which must).
+elsewhere** (except `lib/sse.ts`, which must). `isNotFound(error)` is the tested
+predicate a page navigates away on — a 404 means the thing is gone, while a backend
+that is down throws a `TypeError` out of `fetch` and must not lose the user's URL.
 
 One module per domain — `inbox.ts`, `chat.ts`, `notes.ts`, `search.ts`, `settings.ts`,
 `mcp.ts` — each exporting the response *interfaces* (mirroring the backend pydantic
@@ -225,7 +233,11 @@ a turn does not re-render differently the instant it is refetched.
   `null` (the `ToolStepSpec.input` contract) and the row hints `…`, because "called with no
   arguments" is a statement and it would be the wrong one.
 - Presentation helpers live here too: `hostOf`, `formatMs`, `formatTokens`, `toolTag`
-  (`local`/`web`/`sandbox`/an MCP server name), `toolHint`, `whenLabel`.
+  (`local`/`web`/`sandbox`/an MCP server name), `toolHint`, `whenLabel`. `whenLabel`
+  dates every history row exactly — `16 Sep 2026`, assembled from the parts, because
+  `toLocaleDateString` reorders the fields and translates the month, and because
+  "today"/"yesterday"/a weekday named the top of the list and told you nothing about
+  the rest of it.
 
 Components: `AnswerTurn`, `StepsCard`, `TurnProgress`, `SourcesGrid`, `Composer`,
 `AttachmentPicker`, `HistoryDrawer`, `EmptyResearch`, `TurnError`, `InterruptedNotice`,
@@ -378,6 +390,41 @@ deliberately still resets: `newChat`, the history drawer and `remove` all dispat
 themselves. The one case this lets through is a browser-back to `/chat` mid-turn, where
 keeping the turn on screen is the lesser evil.
 
+**The history drawer closes three ways**: its own Escape handler (which unwinds one
+layer at a time — the confirm dialog, the row menu, a rename, then the drawer), the
+opener toggling it, and a `pointerdown` anywhere else. The last one is a
+capture-phase document listener in `HistoryDrawer` over `ui/modal.ts::isOutside`,
+given the panel **and** the opener (`openerRef`, a ref `ChatPage` holds on the header
+button). Capture, and `pointerdown` rather than `click`, so the decision is made
+before anything inside re-renders the node the event landed on. Nothing in this app
+renders into a portal, so the row menu and the delete dialog are DOM children of the
+panel and one `contains` check covers them.
+
+**Clicking away saves a rename in flight**; Escape discards it. It used to be the
+input's `onBlur` that saved, and closing on `pointerdown` took that away — the drawer
+unmounts before focus moves, and an element removed from the DOM fires no `blur`. So
+the handler commits first and closes second, through a `useEffectEvent` — which is
+also what keeps the `document` listener from re-subscribing on every keystroke. The
+`onClose` it is given is a `useCallback` in `ChatPage` for the same reason: an inline
+arrow re-subscribed the drawer's Escape listener on every streamed delta.
+
+**`/chat/:id` is parsed, not `Number()`d.** `api/chat.ts::parseSessionId(raw)` returns
+an id only for `/^\d+$/` and a positive safe integer; `Number('abc')` is `NaN` and
+`Number('1.5')` is `1.5`, and both reached the API, which answers **422** — a status
+the 404 path cannot act on, so the page sat on a dead URL. Null keeps the detail query
+disabled, and a routed `:id` that parsed to null navigates to `/chat` (replace) on its
+own, because a disabled query never errors.
+
+**A 404 from `GET /sessions/{id}` leaves the session.** `isNotFound(detail.error)`
+drives an effect that abandons the live turn, dispatches `reset` and calls
+`openSession(null, true)` — `navigate('/chat', {replace: true})` routed, a cleared
+`embeddedSessionId` embedded — and invalidates `sessionsQueryKey`, because the
+likeliest 404 is a chat deleted from another tab and the drawer's cached row would
+otherwise bounce the user for the 30 s of `staleTime`. Only a 404: a backend that is
+down keeps today's error on screen. The detail query overrides the app-wide
+`retry: 1` with `retry: (n, e) => !isNotFound(e) && n < 1`, or a dead id is asked for
+twice and the redirect waits out the backoff under the dead URL.
+
 **Stop is the cancel alone.** `POST /api/sessions/:id/cancel` is the whole of it now:
 aborting the reader would stop nothing — the turn is the server's — and would throw away
 the turn's own ending, since the registry appends a `cancelled` error and a `done` on its
@@ -421,21 +468,25 @@ hand-rolled `.prose-chat` block in `src/index.css`, deliberately instead of
 
 ## Tests
 
-`npx vitest run` — **9 files, 172 tests**, `environment: 'node'` with **`TZ` pinned to
-`UTC`** (`vite.config.ts`: the backend sends naive UTC, so a test asserting an instant
-would otherwise assert the machine's offset), so only pure modules
-are covered: `lib/sse.test.ts` (frames split across chunks, multi-line data,
-heartbeats ignored, a 204 raised as `SSEHttpError` rather than read as an empty stream,
-and a `GET` attachment sending no body), `api/chat.test.ts` (`blocksToText`, `groupTurns`,
-`stepsFromMessage`, `toolCallStatus`, source extraction, the sandbox card,
-`resendPayload`, the formatters), `components/chat/liveTurn.test.ts`
-(`isForeignSession`, `shouldAttach`, `turnsBesideLive`, `attach` + `turn_started` +
-`lastTurnId`'s replay guard, the streamed server-tool input, the `activity` transitions,
-turn scoping, `activityLabel`, `showsProgress`, `formatElapsed`),
+`npx vitest run` — **11 files, 187 tests**, `environment: 'node'` with
+**`TZ` pinned to `UTC`** (`test.env` in `vite.config.ts`: the backend sends naive UTC and
+the app renders the viewer's *local* day of it, so a test that asserts an instant would
+otherwise assert the machine's offset, and UTC+13/+14 roll a midday stamp over to the next
+day), so only pure modules are covered: `lib/sse.test.ts` (frames split across chunks,
+multi-line data, heartbeats ignored, a 204 raised as `SSEHttpError` rather than read as an
+empty stream, and a `GET` attachment sending no body), `api/chat.test.ts` (`blocksToText`,
+`groupTurns`, `parseSessionId`, `stepsFromMessage`, `toolCallStatus`, source extraction,
+the sandbox card, `resendPayload` and the attachment lines it reads back, the formatters),
+`components/chat/liveTurn.test.ts` (`isForeignSession`, `shouldAttach`, `turnsBesideLive`,
+`attach` + `turn_started` + `lastTurnId`'s replay guard, the streamed server-tool input,
+the `activity` transitions, turn scoping, `activityLabel`, `showsProgress`,
+`formatElapsed`),
 `lib/useRunningTurns.test.ts` (`runningHeaderMeta`),
 `api/inbox.test.ts`, `components/ui/preferences.test.ts` (`parseStoredTheme`/
 `resolveTheme`, `parseRail`, `parseLayout`/`pageFromPath`),
 `components/ui/searchKeys.test.ts` (the shared overlay keyboard model),
+`components/ui/modal.test.ts` (`isOutside`, against `contains` stubs — there is no
+DOM here, which is the point), `api/client.test.ts` (`isNotFound`),
 `components/notes/excerpt.test.ts` and `lib/ids.test.ts`.
 
 Component and E2E tests are deliberately out of scope — **do not add a jsdom

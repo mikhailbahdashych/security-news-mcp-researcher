@@ -63,3 +63,28 @@ export function useModalPanel<T extends HTMLElement>(onClose: () => void): RefOb
 
   return panelRef
 }
+
+/**
+ * Is this the click that should dismiss an overlay?
+ *
+ * "Outside" is the whole decision behind a click-away dismissal, so it is a
+ * function rather than a condition buried in a listener — and a pure one, which
+ * is why it asks for the containers instead of reading refs itself.
+ *
+ * Two rules it would be easy to get wrong:
+ *
+ * - The **opener** counts as inside. Otherwise the button's own `pointerdown`
+ *   closes the panel and its `click` immediately reopens it, and the toggle
+ *   stops working.
+ * - A missing target, or no containers at all, is **not** outside. Neither is
+ *   evidence that the user clicked away, and guessing closes the panel under
+ *   someone mid-action. A container that is still `null` (a ref before its
+ *   element mounts) is skipped rather than counted as a miss.
+ */
+export function isOutside(target: Node | null, ...containers: (Element | null)[]): boolean {
+  const mounted = containers.filter((container): container is Element => container !== null)
+  if (!target || mounted.length === 0) {
+    return false
+  }
+  return mounted.every((container) => !container.contains(target))
+}
