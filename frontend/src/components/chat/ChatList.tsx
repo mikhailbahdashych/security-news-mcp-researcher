@@ -17,7 +17,18 @@ import Icon from '../ui/Icon'
 import IconButton from '../ui/IconButton'
 import Input from '../ui/Input'
 import { SECTION_LABEL, cx } from '../ui/classes'
+import { menuPosition, type MenuPosition } from '../ui/menuPosition'
 import { useSessionActions } from './useSessionActions'
+
+/**
+ * The rendered height of the three-item row menu, near enough.
+ *
+ * It only decides whether the menu hangs below its button or flips above it, so
+ * a couple of pixels either way changes nothing; measuring for real would mean
+ * rendering the menu off-screen first, which is a second paint to answer a
+ * question this constant already answers.
+ */
+const ROW_MENU_HEIGHT = 92
 
 export interface ChatListProps {
   /** The chat the routed pane has open, so its row reads as current. */
@@ -44,7 +55,9 @@ export default function ChatList({ activeId }: ChatListProps) {
   const navigate = useNavigate()
   const [search, setSearch] = useState('')
   const [editingId, setEditingId] = useState<number | null>(null)
-  const [menuId, setMenuId] = useState<number | null>(null)
+  // The open row menu, and where on the screen it was put. It is placed in
+  // viewport coordinates, so the id alone is not enough to draw it.
+  const [menu, setMenu] = useState<{ id: number; at: MenuPosition } | null>(null)
   const [draft, setDraft] = useState('')
   const [pendingDelete, setPendingDelete] = useState<ResearchSession | null>(null)
   const [deleting, setDeleting] = useState(false)
@@ -109,27 +122,51 @@ export default function ChatList({ activeId }: ChatListProps) {
   // progress. There is no third layer: the list is part of the rail and has
   // nothing to close. The delete dialog is modal and closes itself.
   useEffect(() => {
-    if (pendingDelete !== null || (menuId === null && editingId === null)) {
+    if (pendingDelete !== null || (menu === null && editingId === null)) {
       return
     }
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') {
         return
       }
-      if (menuId !== null) {
-        setMenuId(null)
+      if (menu !== null) {
+        setMenu(null)
       } else {
         setEditingId(null)
       }
     }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
-  }, [editingId, menuId, pendingDelete])
+  }, [editingId, menu, pendingDelete])
+
+  // A menu placed in viewport coordinates does not travel with the row it
+  // belongs to, so scrolling the list closes it rather than leaving it floating
+  // beside whatever scrolled into its place. Capture, because the scroll is the
+  // scroller's own event and does not bubble to `document`.
+  useEffect(() => {
+    const node = scroller.current
+    if (menu === null || !node) {
+      return
+    }
+    const close = () => setMenu(null)
+    node.addEventListener('scroll', close, true)
+    return () => node.removeEventListener('scroll', close, true)
+  }, [menu])
 
   const startEditing = (session: ResearchSession) => {
     setDraft(session.title ?? '')
     setEditingId(session.id)
-    setMenuId(null)
+    setMenu(null)
+  }
+
+  /** Open this row's menu under its button, or close it if it is already open. */
+  const toggleMenu = (id: number, button: HTMLButtonElement) => {
+    const rect = button.getBoundingClientRect()
+    setMenu((current) =>
+      current?.id === id
+        ? null
+        : { id, at: menuPosition(rect, ROW_MENU_HEIGHT, window.innerHeight) },
+    )
   }
 
   /** Save on Enter and on the way out; Escape unmounts the input and discards. */
@@ -254,28 +291,36 @@ export default function ChatList({ activeId }: ChatListProps) {
                     label={`Actions for ${session.title || 'this chat'}`}
                     size={13}
                     disabled={busy}
-                    onClick={() =>
-                      setMenuId((current) => (current === session.id ? null : session.id))
-                    }
+                    onClick={(event) => toggleMenu(session.id, event.currentTarget)}
                     className={cx(
                       'absolute top-1 right-0.5 p-1 opacity-0 transition-opacity duration-150',
                       'group-hover:opacity-100 focus-visible:opacity-100',
-                      menuId === session.id && 'opacity-100',
+                      menu?.id === session.id && 'opacity-100',
                     )}
                   />
 
-                  {menuId === session.id ? (
+                  {menu?.id === session.id ? (
                     <>
                       {/* Catches the click that should dismiss the menu. */}
-                      <div className="fixed inset-0 z-30" onClick={() => setMenuId(null)} />
-                      <div className="absolute top-6 right-0.5 z-40 w-[138px] overflow-hidden rounded-[8px] border border-line bg-panel py-1 shadow-[0_8px_24px_rgba(0,0,0,0.16)]">
+                      <div className="fixed inset-0 z-30" onClick={() => setMenu(null)} />
+                      {/* `fixed`, positioned from the button's own box: the list
+                          above is a scrollport, and an `absolute` menu inside one
+                          is clipped by it — on the last row, "Delete" was not
+                          drawn at all. This escapes it only for as long as no
+                          ancestor of the rail has a `transform`, which would
+                          become the containing block for `fixed` and clip it
+                          again. The rail's width transition is not one. */}
+                      <div
+                        style={{ top: menu.at.top, left: menu.at.left }}
+                        className="fixed z-40 w-[138px] overflow-hidden rounded-[8px] border border-line bg-panel py-1 shadow-[0_8px_24px_rgba(0,0,0,0.16)]"
+                      >
                         <MenuItem icon="edit" onClick={() => startEditing(session)}>
                           Rename
                         </MenuItem>
                         <MenuItem
                           icon="archive"
                           onClick={() => {
-                            setMenuId(null)
+                            setMenu(null)
                             archive(session.id, true)
                           }}
                         >
@@ -285,7 +330,7 @@ export default function ChatList({ activeId }: ChatListProps) {
                           icon="trash"
                           danger
                           onClick={() => {
-                            setMenuId(null)
+                            setMenu(null)
                             setPendingDelete(session)
                           }}
                         >

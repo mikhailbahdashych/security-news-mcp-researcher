@@ -122,6 +122,9 @@ these rather than inventing a fifth slightly-different secondary button. Primiti
   A missing target, or no mounted container, is not outside. Nothing calls it since the
   history drawer became the rail's list; it is kept, with its tests, as the rule the next
   click-away overlay should use rather than re-derive.
+- `menuPosition.ts` is the same idea for placement: where a `fixed` row menu goes,
+  given its trigger's box, its height and the viewport's. Pure, so the flip-and-clamp
+  arithmetic is tested without a DOM. See the rail chat list below for why `fixed`.
 - `GlobalSearch.tsx` owns the `Cmd/Ctrl+K` binding (not `/` — the composer and the
   note editor are text fields). It queries `GET /api/search`, groups the hits and
   follows `hit.link`, which the **backend** builds. The match is highlighted by
@@ -427,6 +430,18 @@ group, and **only** when the rail is expanded *and* Research is on screen in eit
   `ChatPage`'s missing-session effect abandons the turn, resets and leaves the URL —
   the same path a chat deleted in another tab already took. Nothing is wired back from
   the rail to the page.
+- **The row menu is `position: fixed`**, placed from the trigger's own
+  `getBoundingClientRect()` by the pure `ui/menuPosition.ts::menuPosition(rect,
+  menuHeight, viewportHeight)`: below and left-aligned to the button, flipped above when
+  it would run off the bottom, clamped to `MENU_VIEWPORT_MARGIN` either way. An
+  `absolute` menu inside the list's own scrollport was **clipped by it** — on a row near
+  the bottom, "Delete" was not drawn at all. That escape holds only while nothing above
+  the rail has a `transform`: a transformed ancestor becomes the containing block for
+  `fixed` and the clipping comes straight back. **Never give the rail a `transform`**
+  (`transition-[width]` is not one.) Scrolling the list closes the menu — placed in
+  viewport coordinates it does not travel with its row — through a capture-phase
+  `scroll` listener on the scroller, and the `fixed inset-0` backdrop still catches the
+  click away.
 - Escape unwinds the row menu, then a rename in progress. There is no third layer: the
   list is part of the rail and has nothing to close, so a rename commits on Enter and on
   blur (the panel no longer vanishes out from under the input, which is what made the
@@ -504,7 +519,7 @@ hand-rolled `.prose-chat` block in `src/index.css`, deliberately instead of
 
 ## Tests
 
-`npx vitest run` — **11 files, 190 tests**, `environment: 'node'` with
+`npx vitest run` — **12 files, 193 tests**, `environment: 'node'` with
 **`TZ` pinned to `UTC`** (`test.env` in `vite.config.ts`: the backend sends naive UTC and
 the app renders the viewer's *local* day of it, so a test that asserts an instant would
 otherwise assert the machine's offset, and UTC+13/+14 roll a midday stamp over to the next
@@ -523,7 +538,8 @@ the `activity` transitions, turn scoping, `activityLabel`, `showsProgress`,
 `resolveTheme`, `parseRail`, `parseLayout`/`pageFromPath`),
 `components/ui/searchKeys.test.ts` (the shared overlay keyboard model),
 `components/ui/modal.test.ts` (`isOutside`, against `contains` stubs — there is no
-DOM here, which is the point), `api/client.test.ts` (`isNotFound`),
+DOM here, which is the point), `components/ui/menuPosition.test.ts` (fits below, flips
+above, clamps), `api/client.test.ts` (`isNotFound`),
 `components/notes/excerpt.test.ts` and `lib/ids.test.ts`.
 
 Component and E2E tests are deliberately out of scope — **do not add a jsdom
