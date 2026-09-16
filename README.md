@@ -76,9 +76,11 @@ and every tool call in the order they happened, and a SOURCES grid of what the a
 can be traced back to. The model can search and read your inbox, use Anthropic's
 server-side web search and fetch (both toggleable in Settings), and call any tool from
 a configured MCP server. Attach inbox items to a question from the composer, or send a
-multi-select straight from the Inbox with **Research these**. **Stop** both aborts the
-browser's read and tells the server to stop the turn, so it stops billing too. Refresh
-mid-turn and the transcript is still there — it is written as the turn progresses.
+multi-select straight from the Inbox with **Research these**. A turn belongs to the
+conversation, not to the page that asked for it: reload, walk off to the Inbox or close
+the tab and it keeps running. Open the chat again and it is there, replayed from its
+first word and still writing. **Stop** is the one thing that ends a turn early — it
+cancels it server-side, so it stops billing too.
 
 ## Meeting notes
 
