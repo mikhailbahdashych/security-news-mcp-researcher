@@ -12,13 +12,7 @@ import Icon from '../ui/Icon'
  * Same muted card as `TurnError`: nothing broke, and a red panel under the
  * user's own question reads as breakage.
  */
-export default function InterruptedNotice({
-  onResend,
-  busy,
-}: {
-  onResend: () => void
-  busy: boolean
-}) {
+export default function InterruptedNotice({ onResend }: { onResend: () => void }) {
   return (
     <div className="rounded-[12px] border border-line bg-panel px-4 py-3.5">
       <div className="flex items-center gap-2">
@@ -29,7 +23,7 @@ export default function InterruptedNotice({
         The backend restarted before the turn finished. Anything already written is kept.
       </p>
       <div className="mt-2.5">
-        <Button size="sm" variant="primary" disabled={busy} onClick={onResend}>
+        <Button size="sm" variant="primary" onClick={onResend}>
           Send again
         </Button>
       </div>

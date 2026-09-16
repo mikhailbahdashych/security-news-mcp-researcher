@@ -731,7 +731,13 @@ describe('resendPayload', () => {
       assistantText(2, 'a'),
       userMessage(3, 'second', [{ id: 9, title: 'Item nine', url: 'https://example.test/9' }]),
     ]
-    expect(resendPayload(messages)).toEqual({ content: 'second', attached_item_ids: [9] })
+    expect(resendPayload(messages)).toEqual({
+      content: 'second',
+      attached_item_ids: [9],
+      // The chips too: the live turn draws them while the question is answered,
+      // and the picker the user is holding must not be sent in their place.
+      attachments: [{ id: 9, title: 'Item nine', url: 'https://example.test/9' }],
+    })
   })
   it('is null with no user message', () => {
     expect(resendPayload([])).toBeNull()

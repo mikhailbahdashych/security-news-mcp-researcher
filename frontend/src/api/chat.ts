@@ -1009,23 +1009,34 @@ export function attachmentsFromMessage(message: ChatMessage): TurnAttachment[] {
   return attachments
 }
 
+/** Everything "Send again" needs: what to send, and what to draw while it runs. */
+export interface ResendPayload {
+  content: string
+  attached_item_ids: number[]
+  /** The chips for the live turn — the picker is not consulted for a resend. */
+  attachments: TurnAttachment[]
+}
+
 /**
  * What "Send again" re-sends after an interrupted turn: the last question as
- * typed, and the ids of the items that were pinned to it.
+ * typed, the ids of the items that were pinned to it, and those items again as
+ * chips.
  *
- * The ids are read back off the block the server wrote, because the ones the
- * browser sent are long gone by the time the page is reloaded.
+ * All of it is read back off the block the server wrote, because the browser's
+ * own copy died with the page. The chips travel with the ids on purpose: the
+ * live turn draws them, and drawing whatever the attachment picker happens to
+ * hold would caption the question with items that were never sent.
  */
-export function resendPayload(
-  messages: ChatMessage[],
-): { content: string; attached_item_ids: number[] } | null {
+export function resendPayload(messages: ChatMessage[]): ResendPayload | null {
   const last = [...messages].reverse().find((message) => message.kind === 'user')
   if (!last) {
     return null
   }
+  const attachments = attachmentsFromMessage(last)
   return {
     content: questionFromMessage(last),
-    attached_item_ids: attachmentsFromMessage(last).map((attachment) => attachment.id),
+    attached_item_ids: attachments.map((attachment) => attachment.id),
+    attachments,
   }
 }
 

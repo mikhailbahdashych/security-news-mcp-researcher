@@ -1,11 +1,13 @@
 /**
- * A hand-rolled SSE client for POST requests.
+ * A hand-rolled SSE client.
  *
- * Two libraries were ruled out on purpose. `EventSource` is GET-only, and the
- * chat turn is a POST with a JSON body. `@microsoft/fetch-event-source` would
- * work, but its automatic retry would silently re-run — and re-bill — an LLM
- * turn whenever the connection hiccuped. So: no library, and **no retry, ever**.
- * A failed or aborted stream surfaces to the caller, which decides what to do.
+ * Two libraries were ruled out on purpose. `EventSource` is GET-only, and note
+ * generation is a POST with a JSON body — so is starting a chat turn, although
+ * a turn is now *watched* over a GET (`method: 'GET'` below).
+ * `@microsoft/fetch-event-source` would work, but its automatic retry would
+ * silently re-run — and re-bill — an LLM turn whenever the connection hiccuped.
+ * So: no library, and **no retry, ever**. A failed or aborted stream surfaces to
+ * the caller, which decides what to do.
  */
 
 export interface SSEMessage {

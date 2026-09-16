@@ -17,6 +17,7 @@ import {
   type TurnEndPayload,
   type TurnStartedPayload,
   type TurnStartPayload,
+  type TurnStatus,
   type TurnStep,
 } from '../../api/chat'
 
@@ -133,6 +134,16 @@ export interface LiveTurn {
    * and anything carrying an older one is a message from a turn that is over.
    */
   token: number
+  /**
+   * The id of the last turn this page watched, kept through `settle`.
+   *
+   * The server keeps a finished turn replayable for half a minute, so a page
+   * that re-attaches inside that window is handed the whole turn a second time
+   * — which would paint a live copy of an answer the transcript already holds.
+   * Remembering the id is how the reducer recognises a replay, and
+   * `shouldAttach` uses it to not go back for one at all.
+   */
+  lastTurnId: string | null
 }
 
 export const emptyTurn: LiveTurn = {
@@ -150,6 +161,7 @@ export const emptyTurn: LiveTurn = {
   activeTool: null,
   startedAt: 0,
   token: 0,
+  lastTurnId: null,
 }
 
 export type LiveAction =
@@ -259,6 +271,9 @@ export function liveTurnReducer(state: LiveTurn, action: LiveAction): LiveTurn {
         streaming: true,
         activity: 'starting',
         startedAt: Date.now(),
+        // Kept: the stream about to open may be the replay of the turn this
+        // page has just watched, and this is the only way to recognise it.
+        lastTurnId: state.lastTurnId,
       }
     case 'failed':
       return { ...state, streaming: false, error: action.error }
@@ -270,6 +285,7 @@ export function liveTurnReducer(state: LiveTurn, action: LiveAction): LiveTurn {
         ...emptyTurn,
         sessionId: state.sessionId,
         error: state.error && !RENDERED_BY_TRANSCRIPT.has(state.error.type) ? state.error : null,
+        lastTurnId: state.lastTurnId,
       }
     case 'sse':
       break
@@ -282,6 +298,13 @@ export function liveTurnReducer(state: LiveTurn, action: LiveAction): LiveTurn {
       // fills in a turn this page did not start — and, for the page that did,
       // it restates what `start` already set.
       const started = payload as TurnStartedPayload
+      if (started.turn_id === state.lastTurnId) {
+        // The replay of the turn this page already watched to its end: the
+        // server keeps a finished turn readable for half a minute. Refusing the
+        // opener leaves the live turn without a prompt, and a live turn with no
+        // prompt renders nothing — so the transcript below it stands alone.
+        return state
+      }
       return {
         ...state,
         sessionId: started.session_id,
@@ -291,6 +314,7 @@ export function liveTurnReducer(state: LiveTurn, action: LiveAction): LiveTurn {
         // on or the counter is out by the browser's offset.
         startedAt: Date.parse(`${started.started_at}Z`),
         activity: 'starting',
+        lastTurnId: started.turn_id,
       }
     }
     case 'turn_start':
@@ -452,6 +476,50 @@ export function liveTurnReducer(state: LiveTurn, action: LiveAction): LiveTurn {
  */
 export function isForeignSession(live: LiveTurn, routeSessionId: number | null): boolean {
   return routeSessionId !== null && live.sessionId !== null && live.sessionId !== routeSessionId
+}
+
+/** What the page knows when it decides whether to open a stream. */
+export interface AttachContext {
+  /** The conversation on screen. */
+  sessionId: number | null
+  /** The session row's own word, from the detail query. */
+  turnStatus: TurnStatus | null
+  /** The sessions the turn registry says are running right now. */
+  runningIds: Set<number>
+  live: LiveTurn
+}
+
+/**
+ * Whether this page should open a stream on the session it is showing.
+ *
+ * **The registry decides, not the session row.** `turn_status` reaches the page
+ * through a cached query and is wrong in both directions: a second tab read it
+ * before the turn started, and a page that walked to the Inbox and back reads
+ * it after the turn ended. Attaching on a stale `running` replays a finished
+ * turn — the server keeps one readable for half a minute — over the transcript
+ * that already holds it, and attaching on a stale `idle` never happens at all,
+ * which is the bug that made "start a turn, walk away, come back" show an empty
+ * page. `GET /sessions/running` is refetched on focus, so it is the one signal
+ * that follows the turn rather than the page.
+ *
+ * The row still has a veto: a turn marked `interrupted` is one a restart killed,
+ * and there is nothing to watch whatever any list says.
+ */
+export function shouldAttach({ sessionId, turnStatus, runningIds, live }: AttachContext): boolean {
+  if (sessionId === null || !runningIds.has(sessionId)) {
+    return false
+  }
+  if (turnStatus === 'interrupted') {
+    return false
+  }
+  if (live.sessionId !== sessionId) {
+    // Whatever this page was watching, it was not this conversation.
+    return true
+  }
+  // Already watching it — or already watched it: the running list is up to five
+  // seconds old, so it can still name a session whose turn ended a moment ago,
+  // and going back for that turn is how a replay lands on top of the answer.
+  return !live.streaming && live.lastTurnId === null
 }
 
 /**

@@ -21,6 +21,7 @@ import {
   startTurn,
   streamUrl,
   type ErrorPayload,
+  type ResendPayload,
   type SessionFilters,
 } from '../api/chat'
 import { ApiError } from '../api/client'
@@ -37,6 +38,7 @@ import {
   isForeignSession,
   liveSteps,
   liveTurnReducer,
+  shouldAttach,
   turnsBesideLive,
 } from '../components/chat/liveTurn'
 import GenerateNotesDialog from '../components/notes/GenerateNotesDialog'
@@ -169,8 +171,11 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
         // Worth doing even for an abandoned reader: the turn still wrote to the
         // session, and the rail's dot is keyed on the running list.
         await queryClient.invalidateQueries({ queryKey: sessionQueryKey(id) })
+        // `['sessions']` is a prefix, so this covers `runningSessionsKey`
+        // (`['sessions', 'running']`) as well — and awaiting it is what makes
+        // the running list right *before* `settle`, so the attach rule below
+        // does not read a list that still names this session.
         await queryClient.invalidateQueries({ queryKey: sessionsQueryKey })
-        await queryClient.invalidateQueries({ queryKey: runningSessionsKey })
         // `settle`, not `reset`: a refusal, a stop or a connection failure has to
         // stay on screen until the next send, or the user is left looking at
         // their own question with nothing under it. Re-checked after the awaits,
@@ -182,6 +187,17 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
     },
     [queryClient],
   )
+
+  // Leaving Research for another page unmounts this one, and without this the
+  // reader went on consuming the stream to the end of the turn: every return
+  // opened another, and HTTP/1.1 gives a browser about six per origin. It is a
+  // detach, not a cancel — the turn is the server's and keeps running, which is
+  // what the rail's dot goes on saying.
+  //
+  // It also makes StrictMode's double-invoke harmless: the simulated unmount
+  // runs this cleanup between the two passes, so the first pass's reader is
+  // aborted and its token retired, and exactly one reader survives.
+  useEffect(() => () => abandonTurn(), [abandonTurn])
 
   const debouncedSessionSearch = useDebouncedValue(sessionSearch)
   const sessionFilters = useMemo<SessionFilters>(
@@ -206,6 +222,12 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
     queryKey: sessionQueryKey(sessionId ?? 0),
     queryFn: () => fetchSession(sessionId as number),
     enabled: sessionId !== null,
+    // Against the app-wide defaults (30 s stale, no focus refetch), because this
+    // row is what says whether a turn is running. Reading it out of a 30 s cache
+    // was why "send, walk to the Inbox, come back" showed an empty page with the
+    // composer enabled, and why a second tab never noticed the turn at all.
+    refetchOnMount: 'always',
+    refetchOnWindowFocus: true,
   })
 
   // The configured model, for the composer's "what will answer this" line. The
@@ -232,25 +254,22 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
   }, [abandonTurn, staleSession])
 
   // Joining a turn this page did not start: a reload, a return from the Inbox,
-  // the drawer, a second tab. Keyed on the session and its status so a settle
-  // (status back to idle) does not re-attach, and a new turn started elsewhere
-  // (status running again) does. Declared after the effect above so that a
-  // browser-back onto another running session resets the old turn first and
-  // this one then claims a token of its own.
+  // the drawer, a second tab. The rule itself is `shouldAttach`, a tested
+  // function in `liveTurn.ts` — it weighs two caches against each other and is
+  // exactly the kind of thing this project keeps out of components. Declared
+  // after the effect above so that a browser-back onto another running session
+  // resets the old turn first and this one then claims a token of its own.
   const turnStatus = detail.data?.session.turn_status ?? null
+  const attachNow = shouldAttach({ sessionId, turnStatus, runningIds: running, live })
   useEffect(() => {
-    if (sessionId === null || turnStatus !== 'running') {
+    if (!attachNow || sessionId === null) {
       return
-    }
-    if (live.streaming && live.sessionId === sessionId) {
-      return // this page started it and is already watching
     }
     turnSeq.current += 1
     const token = turnSeq.current
     dispatch({ kind: 'attach', sessionId, token })
     void attach(sessionId, token)
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- `live` is read, not depended on: this must not re-run for a delta.
-  }, [sessionId, turnStatus, attach])
+  }, [attachNow, sessionId, attach])
 
   // Clear the handover off the history entry so a reload does not re-attach.
   useEffect(() => {
@@ -328,7 +347,7 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
   })
 
   const send = useCallback(
-    async (text: string, attachedItemIds?: number[]) => {
+    async (text: string, resent?: ResendPayload) => {
       // A send supersedes whatever this page was watching rather than racing it.
       abandonTurn()
       const token = turnSeq.current
@@ -347,13 +366,20 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
         openSession(id, true)
       }
 
-      // "Send again" hands over the ids it read back off the interrupted
-      // question; anything else is what the picker is holding.
-      const itemIds = attachedItemIds ?? attached.map((item) => item.id)
+      // "Send again" carries the interrupted question's own items — both the ids
+      // it sends and the chips it draws, read back off the stored user row. The
+      // attachment picker belongs to the *next* question, so a resend neither
+      // sends what is in it nor empties it; anything else is the picker.
+      //
       // The chips ride along on the live turn: they are stored on the user row,
       // and `turnsBesideLive` hides that row until the turn settles.
-      const chips = attached.map((item) => ({ id: item.id, title: item.title, url: item.url }))
-      setAttached([])
+      const itemIds = resent ? resent.attached_item_ids : attached.map((item) => item.id)
+      const chips = resent
+        ? resent.attachments
+        : attached.map((item) => ({ id: item.id, title: item.title, url: item.url }))
+      if (!resent) {
+        setAttached([])
+      }
       // Before the request, not after it: the question has to appear the moment
       // it is asked, and `start` is also what claims the live state for this
       // token — a `failed` dispatched before it would be ignored as stale. The
@@ -370,16 +396,27 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
       try {
         await startTurn(id, { content: text, attached_item_ids: itemIds })
       } catch (error) {
-        // A 409 (a turn is already running for this session) included.
+        const failure = error instanceof ApiError ? error : null
+        let message = String(error)
+        if (failure) {
+          // The detail alone: `ApiError.message` prefixes it with `API 409:`,
+          // which is a status line, not something to show someone.
+          message = failure.detail
+        } else if (error instanceof Error) {
+          message = error.message
+        }
         dispatch({
           kind: 'failed',
-          error: {
-            type: error instanceof ApiError ? 'api_error' : 'connection',
-            message: error instanceof Error ? error.message : String(error),
-            category: null,
-          },
+          error: { type: failure ? 'api_error' : 'connection', message, category: null },
           token,
         })
+        if (failure?.status === 409) {
+          // A turn *is* running on this session — this page simply did not start
+          // it. Refresh both signals the attach rule reads, and it will pick the
+          // running turn up instead of leaving an error card over an empty page.
+          void queryClient.invalidateQueries({ queryKey: sessionQueryKey(id) })
+          void queryClient.invalidateQueries({ queryKey: runningSessionsKey })
+        }
         return
       }
       // The turn is the server's now, so the rail's dot is already wrong.
@@ -399,7 +436,7 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
   const resend = useCallback(() => {
     const payload = resendPayload(messages ?? [])
     if (payload) {
-      void send(payload.content, payload.attached_item_ids)
+      void send(payload.content, payload)
     }
   }, [messages, send])
 
@@ -575,7 +612,7 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
               {settledError ? <TurnError error={settledError} /> : null}
 
               {turnStatus === 'interrupted' && !live.streaming ? (
-                <InterruptedNotice onResend={resend} busy={live.streaming} />
+                <InterruptedNotice onResend={resend} />
               ) : null}
 
               <div ref={bottom} />

@@ -8,6 +8,7 @@ import {
   isForeignSession,
   liveSteps,
   liveTurnReducer,
+  shouldAttach,
   showsProgress,
   turnsBesideLive,
   type LiveAction,
@@ -595,6 +596,18 @@ describe('showsProgress', () => {
   })
 })
 
+/** A replayable `turn_started` frame for session 12. */
+function started(turnId: string, overrides: Record<string, unknown> = {}) {
+  return {
+    turn_id: turnId,
+    session_id: 12,
+    prompt: 'what happened?',
+    attachments: [{ id: 3, title: 'An item', url: 'https://example.test/a' }],
+    started_at: '2026-09-16T10:00:00',
+    ...overrides,
+  }
+}
+
 describe('attaching to a running turn', () => {
   it('turn_started fills the turn the way start does', () => {
     let state = liveTurnReducer(emptyTurn, { kind: 'attach', sessionId: 12, token: 3 })
@@ -604,19 +617,77 @@ describe('attaching to a running turn', () => {
       kind: 'sse',
       token: 3,
       event: 'turn_started',
-      payload: {
-        turn_id: 'abc',
-        session_id: 12,
-        prompt: 'what happened?',
-        attachments: [{ id: 3, title: 'An item', url: 'https://example.test/a' }],
-        started_at: '2026-09-16T10:00:00',
-      },
+      payload: started('abc'),
     })
     expect(state.prompt).toBe('what happened?')
     expect(state.attachments).toEqual([{ id: 3, title: 'An item', url: 'https://example.test/a' }])
-    expect(state.startedAt).toBe(Date.parse('2026-09-16T10:00:00Z'))
+    // A fixed instant, not `Date.parse` of the same string: the server's
+    // timestamps are naive UTC, and the point of the test is that the reducer
+    // reads them as UTC rather than as whatever zone the machine is in. (The
+    // suite pins TZ=UTC in `vite.config.ts` so the number is stable anyway.)
+    expect(state.startedAt).toBe(Date.UTC(2026, 8, 16, 10, 0, 0))
     expect(state.sessionId).toBe(12)
     expect(state.activity).toBe('starting')
+    expect(state.lastTurnId).toBe('abc')
+  })
+
+  it('keeps the settled turn id, so its replay cannot paint over the transcript', () => {
+    // The backend keeps a finished turn replayable for 30 s, so a page that
+    // re-attaches in that window is handed the whole turn again.
+    let state = liveTurnReducer(emptyTurn, { kind: 'attach', sessionId: 12, token: 3 })
+    state = liveTurnReducer(state, {
+      kind: 'sse',
+      token: 3,
+      event: 'turn_started',
+      payload: started('abc'),
+    })
+    state = liveTurnReducer(state, { kind: 'settle', token: 3 })
+    expect(state.prompt).toBeNull()
+    expect(state.lastTurnId).toBe('abc')
+
+    // Attaching again keeps it, and the replayed opener is ignored: with no
+    // prompt the live turn renders nothing, so the transcript stands alone.
+    const attached = liveTurnReducer(state, { kind: 'attach', sessionId: 12, token: 4 })
+    expect(attached.lastTurnId).toBe('abc')
+    const replayed = liveTurnReducer(attached, {
+      kind: 'sse',
+      token: 4,
+      event: 'turn_started',
+      payload: started('abc'),
+    })
+    expect(replayed).toBe(attached)
+    expect(replayed.prompt).toBeNull()
+  })
+
+  it('a different turn in the same session is not mistaken for the replay', () => {
+    let state = liveTurnReducer(emptyTurn, { kind: 'attach', sessionId: 12, token: 3 })
+    state = liveTurnReducer(state, {
+      kind: 'sse',
+      token: 3,
+      event: 'turn_started',
+      payload: started('abc'),
+    })
+    state = liveTurnReducer(state, { kind: 'settle', token: 3 })
+    state = liveTurnReducer(state, { kind: 'attach', sessionId: 12, token: 4 })
+    state = liveTurnReducer(state, {
+      kind: 'sse',
+      token: 4,
+      event: 'turn_started',
+      payload: started('def', { prompt: 'and now?' }),
+    })
+    expect(state.prompt).toBe('and now?')
+    expect(state.lastTurnId).toBe('def')
+  })
+
+  it('leaving the conversation forgets the turn it watched', () => {
+    let state = liveTurnReducer(emptyTurn, { kind: 'attach', sessionId: 12, token: 3 })
+    state = liveTurnReducer(state, {
+      kind: 'sse',
+      token: 3,
+      event: 'turn_started',
+      payload: started('abc'),
+    })
+    expect(liveTurnReducer(state, { kind: 'reset' }).lastTurnId).toBeNull()
   })
 
   it('a turn_started from a stale token is ignored', () => {
@@ -625,8 +696,100 @@ describe('attaching to a running turn', () => {
       kind: 'sse',
       token: 2,
       event: 'turn_started',
-      payload: { turn_id: 'x', session_id: 12, prompt: 'p', attachments: [], started_at: '2026-09-16T10:00:00' },
+      payload: started('x'),
     })
     expect(next).toBe(state)
+  })
+})
+
+describe('shouldAttach', () => {
+  /** A live turn as it looks once this page has watched `turnId` to its end. */
+  function settled(sessionId: number, turnId: string): LiveTurn {
+    return { ...emptyTurn, sessionId, lastTurnId: turnId }
+  }
+
+  it('attaches to a turn running in the open session that this page is not watching', () => {
+    expect(
+      shouldAttach({
+        sessionId: 12,
+        turnStatus: 'running',
+        runningIds: new Set([12]),
+        live: emptyTurn,
+      }),
+    ).toBe(true)
+  })
+
+  it('does not attach twice to the turn this page started', () => {
+    expect(
+      shouldAttach({
+        sessionId: 12,
+        turnStatus: 'running',
+        runningIds: new Set([12]),
+        live: { ...emptyTurn, sessionId: 12, streaming: true },
+      }),
+    ).toBe(false)
+  })
+
+  it('attaches to the open session although a reader from another one is winding down', () => {
+    // A browser-back onto a second running session: the foreign-session effect
+    // abandons the first reader, and this session still deserves watching.
+    expect(
+      shouldAttach({
+        sessionId: 12,
+        turnStatus: 'running',
+        runningIds: new Set([12]),
+        live: { ...emptyTurn, sessionId: 9, streaming: true },
+      }),
+    ).toBe(true)
+  })
+
+  it('does not attach to an idle session', () => {
+    expect(
+      shouldAttach({ sessionId: 12, turnStatus: 'idle', runningIds: new Set(), live: emptyTurn }),
+    ).toBe(false)
+  })
+
+  it('believes the registry, not a session row cached before the turn ended', () => {
+    // The detail query is a cache: `turn_status` can say `running` about a turn
+    // that finished while the user was on another page. Attaching on that word
+    // replays a finished turn over the transcript that already holds it.
+    expect(
+      shouldAttach({ sessionId: 12, turnStatus: 'running', runningIds: new Set(), live: emptyTurn }),
+    ).toBe(false)
+  })
+
+  it('never watches a turn a restart left behind', () => {
+    expect(
+      shouldAttach({
+        sessionId: 12,
+        turnStatus: 'interrupted',
+        runningIds: new Set([12]),
+        live: emptyTurn,
+      }),
+    ).toBe(false)
+  })
+
+  it('does not re-attach to a turn this page has already settled', () => {
+    // The registry list is up to 5 s stale, so it can still name a session
+    // whose turn this page watched to `done` a moment ago.
+    expect(
+      shouldAttach({
+        sessionId: 12,
+        turnStatus: 'running',
+        runningIds: new Set([12]),
+        live: settled(12, 'abc'),
+      }),
+    ).toBe(false)
+  })
+
+  it('has nothing to attach to with no session open', () => {
+    expect(
+      shouldAttach({
+        sessionId: null,
+        turnStatus: null,
+        runningIds: new Set([12]),
+        live: emptyTurn,
+      }),
+    ).toBe(false)
   })
 })
