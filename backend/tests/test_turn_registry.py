@@ -55,6 +55,13 @@ async def _updated_at(session_factory, session_id: int):
         return row.updated_at
 
 
+async def done_then_waits(delay: float) -> AsyncIterator[ev.AgentEvent]:
+    """Says ``done`` and keeps the generator alive, as the real runner does."""
+    yield ev.TextDelta(text="x")
+    yield ev.Done(session_id=None)
+    await asyncio.sleep(delay)
+
+
 async def slow_turn(steps: int, delay: float) -> AsyncIterator[ev.AgentEvent]:
     for index in range(steps):
         await asyncio.sleep(delay)
@@ -391,7 +398,11 @@ async def test_the_registry_forgets_a_turn_before_its_subscriber_sees_done(
     turn = await registry.start(
         session_id=session_id,
         session_factory=session_factory,
-        generator=slow_turn(1, 0.01),
+        # It must await *after* ``done``, the way the real runner does. A
+        # generator that ends with it hands control straight to ``_drive``'s
+        # ``finally``, which forgets the turn too — and the pre-``done`` forget,
+        # the fix itself, could then be deleted with the test still green.
+        generator=done_then_waits(0.5),
         client=None,
         prompt="a",
         attachments=[],
@@ -403,6 +414,7 @@ async def test_the_registry_forgets_a_turn_before_its_subscriber_sees_done(
 
     assert registry.is_running(session_id) is False
     assert registry.running_ids() == []
+    turn.task.cancel()
     await asyncio.gather(turn.task, return_exceptions=True)
 
 

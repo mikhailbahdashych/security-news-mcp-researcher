@@ -17,7 +17,9 @@ from httpx2 import ASGITransport
 from sse_util import event_names, payloads_for
 from test_api_sessions import create_session, finish_turn
 
+from app.agent import events as ev
 from app.agent import turns
+from app.agent.turnlog import TurnLog
 from app.api import streaming
 from app.api.deps import get_chat_client_factory
 from app.services import settings as settings_service
@@ -196,3 +198,44 @@ async def test_a_turn_that_ended_long_ago_is_a_204_again(app, with_key, monkeypa
         await finish_turn(app, session_id)
 
         assert (await http.get(f"/api/sessions/{session_id}/stream")).status_code == 204
+
+
+class StubRequest:
+    """Just enough of ``Request`` for ``stream_turn_log``: the disconnect flag.
+
+    A real detached client never gets this far in the test suite — an
+    ``ASGITransport`` request that is dropped is cancelled, not disconnected — so
+    the branch that actually runs against a browser needs a stand-in to reach.
+    """
+
+    def __init__(self) -> None:
+        self.gone = False
+
+    async def is_disconnected(self) -> bool:
+        return self.gone
+
+
+async def test_a_disconnected_subscriber_leaves_and_the_turn_runs_on(monkeypatch):
+    """The poll exists to notice a browser that went away — and to do no more.
+
+    Ending this subscriber must not close the log, must not stop the turn, and
+    must not leave the pending read behind as an orphan task.
+    """
+    monkeypatch.setattr(streaming, "DISCONNECT_POLL_S", 0.01)
+    log = TurnLog()
+    log.append(ev.TextDelta(text="one"))
+    request = StubRequest()
+
+    stream = streaming.stream_turn_log(request, log)
+    assert (await stream.__anext__())["event"] == "text_delta"
+
+    running_before = asyncio.all_tasks()
+    request.gone = True
+    with pytest.raises(StopAsyncIteration):
+        # Bounded: with the disconnect check gone this waits for an event that
+        # will never come, which is the bug the branch prevents.
+        await asyncio.wait_for(stream.__anext__(), 2.0)
+
+    assert log.closed is False
+    log.append(ev.TextDelta(text="two"))  # the turn is still writing to it
+    assert asyncio.all_tasks() - running_before == set()

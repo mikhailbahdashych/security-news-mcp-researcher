@@ -620,7 +620,7 @@ async def test_server_tools_are_absent_when_both_toggles_are_off(app, client, wi
 
 async def test_a_second_concurrent_turn_is_a_conflict(app, with_key, session_factory):
     """A slow scripted stream keeps the first turn open while the second POSTs."""
-    scripted = ScriptedAnthropic([turn_text("slow answer", delay_s=0.05), turn_text("second")])
+    scripted = ScriptedAnthropic([turn_text("slow answer", delay_s=0.2), turn_text("second")])
     app.dependency_overrides[get_chat_client_factory] = lambda: lambda _key: scripted
 
     async with httpx2.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as http:
@@ -628,7 +628,11 @@ async def test_a_second_concurrent_turn_is_a_conflict(app, with_key, session_fac
 
         first = await http.post(f"/api/sessions/{session_id}/messages", json={"content": "one"})
         assert first.status_code == 202
-        # The first turn is still running: the POST returned without waiting for it.
+        # The first turn is still running: the POST returned without waiting for
+        # it. Asserted rather than assumed — the conflict this test is about only
+        # happens while it is, and a turn that had already finished would answer
+        # the second POST with a 202 and fail here instead of racing silently.
+        assert app.state.turn_registry.is_running(session_id) is True
         second = await http.post(f"/api/sessions/{session_id}/messages", json={"content": "two"})
         assert second.status_code == 409
         await finish_turn(app, session_id)
