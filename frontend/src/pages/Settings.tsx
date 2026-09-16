@@ -16,6 +16,7 @@ import {
   type ThinkingDisplay,
 } from '../api/settings'
 import ApiKeySection from '../components/settings/ApiKeySection'
+import ArchivedChatsDialog from '../components/settings/ArchivedChatsDialog'
 import Field, { FIELD_GRID } from '../components/settings/Field'
 import McpSection from '../components/settings/McpSection'
 import NumberField from '../components/settings/NumberField'
@@ -141,6 +142,8 @@ function SettingsForm({ settings }: { settings: AppSettings }) {
   return (
     <Shell>
       <LayoutSection />
+
+      <ArchivedChatsSection />
 
       <ApiKeySection settings={settings} />
 
@@ -386,6 +389,31 @@ function LayoutSection() {
           <p className={FIELD_HINT}>Clicking a page in the rail opens it in the left pane.</p>
         </>
       ) : null}
+    </SettingsSection>
+  )
+}
+
+/**
+ * Where an archived chat is found again.
+ *
+ * Archiving is the one thing you can do to a chat whose result is that it stops
+ * being anywhere: the rail's history lists the live chats only. So the way back
+ * lives here rather than as a mode of that list — and the dialog is mounted
+ * conditionally, which is also what keeps its query off the wire until it is
+ * asked for.
+ */
+function ArchivedChatsSection() {
+  const [open, setOpen] = useState(false)
+
+  return (
+    <SettingsSection
+      title="Archived chats"
+      description="Chats you archived stay out of the sidebar. Open one here, or bring it back."
+    >
+      <div>
+        <Button onClick={() => setOpen(true)}>Browse archived chats</Button>
+      </div>
+      {open ? <ArchivedChatsDialog onClose={() => setOpen(false)} /> : null}
     </SettingsSection>
   )
 }
