@@ -247,19 +247,25 @@ async def cancel_turn(
 # ------------------------------------------------------------------- streaming
 
 
-async def _resolve_attachments(session: AsyncSession, item_ids: list[int]) -> list[dict[str, Any]]:
-    """Turn attached item ids into one extra user content block.
+async def _resolve_attachments(
+    session: AsyncSession, item_ids: list[int]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Read the attached items once, for both of the things they feed.
 
-    Resolved server-side and persisted verbatim, so a reload renders exactly what
-    the model was given.
+    Returns ``(blocks, chips)``: one extra user content block for the model —
+    resolved server-side and persisted verbatim, so a reload renders exactly what
+    the model was given — and the ``{id, title, url}`` chips the turn's opening
+    event carries, which are what a *late* subscriber needs to draw the question
+    it missed. Both come from the same rows; selecting them twice was two round
+    trips per POST for one read.
     """
     if not item_ids:
-        return []
+        return [], []
     rows = (
         (await session.execute(select(FeedItem).where(FeedItem.id.in_(item_ids)))).scalars().all()
     )
     if not rows:
-        return []
+        return [], []
     order = {item_id: index for index, item_id in enumerate(item_ids)}
     rows = sorted(rows, key=lambda item: order.get(item.id, len(order)))
 
@@ -271,32 +277,15 @@ async def _resolve_attachments(session: AsyncSession, item_ids: list[int]) -> li
             + (f"\n  {summary}" if summary else "")
         )
     lines.append("Use get_feed_item with one of these ids to read the full text.")
-    return [{"type": "text", "text": "\n".join(lines)}]
+    blocks = [{"type": "text", "text": "\n".join(lines)}]
+    chips = [{"id": item.id, "title": item.title, "url": item.url} for item in rows]
+    return blocks, chips
 
 
 async def frames_as_events(*events: ev.AgentEvent) -> AsyncIterator[ev.AgentEvent]:
     """A canned run, for a failure the route already knows about."""
     for event in events:
         yield event
-
-
-async def _attachment_chips(session: AsyncSession, item_ids: list[int]) -> list[dict[str, Any]]:
-    """``{id, title, url}`` per attached item, for the turn's opening event.
-
-    The chips are what a *late* subscriber needs to draw the question it missed;
-    the blocks the model reads are built by :func:`_resolve_attachments`.
-    """
-    if not item_ids:
-        return []
-    rows = (
-        (await session.execute(select(FeedItem).where(FeedItem.id.in_(item_ids)))).scalars().all()
-    )
-    by_id = {row.id: row for row in rows}
-    return [
-        {"id": row.id, "title": row.title, "url": row.url}
-        for item_id in item_ids
-        if (row := by_id.get(item_id)) is not None
-    ]
 
 
 @router.post(
@@ -322,9 +311,8 @@ async def post_message(
         )
 
     resolved = await turn_settings(session, app_settings)
-    user_content: list[dict[str, Any]] = [{"type": "text", "text": payload.content}]
-    user_content.extend(await _resolve_attachments(session, payload.attached_item_ids))
-    chips = await _attachment_chips(session, payload.attached_item_ids)
+    blocks, chips = await _resolve_attachments(session, payload.attached_item_ids)
+    user_content: list[dict[str, Any]] = [{"type": "text", "text": payload.content}, *blocks]
 
     if not resolved["api_key"]:
         # Persist the question before answering the error. Without this the user

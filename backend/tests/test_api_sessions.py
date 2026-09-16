@@ -19,7 +19,7 @@ import httpx2
 import pytest
 from fakes.anthropic import ScriptedAnthropic, turn_text, turn_tool_use
 from httpx2 import ASGITransport
-from sqlalchemy import func, select
+from sqlalchemy import event, func, select
 from sqlalchemy.exc import OperationalError
 from sse_util import parse_sse, payloads_for
 
@@ -601,6 +601,48 @@ async def test_attached_item_ids_are_resolved_into_the_persisted_content(
     assert blocks[0] == {"type": "text", "text": "summarise these"}
     assert "Attached feed items:" in blocks[1]["text"]
     assert f"id {item.id} · AcmeVPN RCE" in blocks[1]["text"]
+
+
+async def test_the_attached_items_are_read_once_not_twice(app, client, db_session, db_engine):
+    """The blocks the model reads and the chips a late subscriber draws are one query.
+
+    They were two: the same ids were selected again to build the opening event,
+    a second round trip per POST for rows the route had just fetched.
+    """
+    feed = Feed(url="https://example.test/rss", title="Example")
+    db_session.add(feed)
+    await db_session.flush()
+    items = [
+        FeedItem(feed_id=feed.id, guid=f"g{n}", url=f"https://example.test/{n}", title=f"Item {n}")
+        for n in range(2)
+    ]
+    db_session.add_all(items)
+    await db_session.commit()
+    item_ids = [item.id for item in items]
+
+    selects: list[str] = []
+
+    def record(conn, cursor, statement, parameters, context, executemany):
+        if "FROM feed_items" in statement:
+            selects.append(statement)
+
+    event.listen(db_engine.sync_engine, "before_cursor_execute", record)
+    try:
+        turns = capture_turns(app)
+        session_id = await create_session(client)
+        await client.post(
+            f"/api/sessions/{session_id}/messages",
+            json={"content": "summarise these", "attached_item_ids": item_ids},
+        )
+        await finish_turn(app, session_id)
+    finally:
+        event.remove(db_engine.sync_engine, "before_cursor_execute", record)
+
+    assert len(selects) == 1
+    # ...and both consumers still get what they need from that one read.
+    assert [chip["id"] for chip in turn_events(turns[0])[0][1]["attachments"]] == item_ids
+    detail = (await client.get(f"/api/sessions/{session_id}")).json()
+    assert "Attached feed items:" in detail["messages"][0]["content_json"][1]["text"]
 
 
 async def test_server_tools_are_absent_when_both_toggles_are_off(app, client, with_key, db_session):
