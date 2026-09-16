@@ -8,11 +8,20 @@ import { cx } from './components/ui/classes'
 import { pageFromPath, routeForPage, useLayout, type PageKey } from './components/ui/layout'
 import { useRail } from './components/ui/railState'
 import { useTheme } from './components/ui/theme'
+import { useRunningTurns } from './lib/useRunningTurns'
 import ChatPage from './pages/ChatPage'
 import InboxPage from './pages/Inbox'
 import NoteDetailPage from './pages/NoteDetail'
 import NotesPage from './pages/Notes'
 import SettingsPage from './pages/Settings'
+
+/**
+ * The rail's dot is a statement about the Research page, not about a session:
+ * two stable sets rather than one built per render, so the rail is not handed a
+ * new object every time anything above it re-renders.
+ */
+const RESEARCH_BUSY = new Set<PageKey>(['research'])
+const NOTHING_BUSY = new Set<PageKey>()
 
 /**
  * The app shell: rail on the left, one or two page panes on the right, the ⌘K
@@ -30,6 +39,7 @@ export default function App() {
   const location = useLocation()
   const navigate = useNavigate()
   const [searchOpen, setSearchOpen] = useState(false)
+  const running = useRunningTurns()
 
   const urlPage = pageFromPath(location.pathname)
 
@@ -45,6 +55,7 @@ export default function App() {
         theme={theme}
         onToggleTheme={toggleTheme}
         isActive={(page) => urlPage === page || (layout.split && layout.paneB === page)}
+        busyPages={running.size > 0 ? RESEARCH_BUSY : NOTHING_BUSY}
         onNavigate={goTo}
         onOpenSearch={() => setSearchOpen(true)}
       />

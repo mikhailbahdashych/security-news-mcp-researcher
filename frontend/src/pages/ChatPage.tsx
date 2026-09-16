@@ -45,6 +45,8 @@ import IconButton from '../components/ui/IconButton'
 import type { EmbeddablePageProps } from '../components/ui/PageHost'
 import { SSEHttpError, streamSSE } from '../lib/sse'
 import useDebouncedValue from '../lib/useDebouncedValue'
+import { useNow } from '../lib/useElapsed'
+import { runningHeaderMeta, useRunningTurns } from '../lib/useRunningTurns'
 
 /** What the Inbox's "Research these" button hands over. */
 export interface ChatNavigationState {
@@ -209,6 +211,10 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
   // The configured model, for the composer's "what will answer this" line. The
   // session's own model is authoritative once there is one.
   const settings = useQuery({ queryKey: settingsQueryKey, queryFn: fetchSettings })
+
+  // Which sessions are busy server-side, for the drawer's marks. The same query
+  // the rail's dot reads, so the two cannot disagree about what is running.
+  const running = useRunningTurns()
 
   // Leaving for a *different* conversation drops the live turn — this is what
   // catches browser back/forward, which no click handler sees. Only a route that
@@ -476,9 +482,14 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
           <h1 className="m-0 min-w-0 shrink truncate text-[13px] font-semibold">
             {session?.title || 'New research'}
           </h1>
-          {/* Shrinks four times faster than the title: in a narrow split pane
-              the name of the chat is worth more than its token count. */}
-          {headerMeta ? (
+          {/* Either line shrinks four times faster than the title: in a narrow
+              split pane the name of the chat is worth more than its meta. While
+              a turn runs, how long it has been running is the only part of that
+              meta still true — the token counts are the session's totals as of
+              the last turn that finished. */}
+          {turnStatus === 'running' ? (
+            <RunningMeta startedAt={session?.turn_started_at ?? null} />
+          ) : headerMeta ? (
             <span className="min-w-0 shrink-4 truncate text-[11px] text-faint">{headerMeta}</span>
           ) : null}
         </div>
@@ -505,6 +516,7 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
           hasMore={Boolean(sessions.hasNextPage)}
           loadingMore={sessions.isFetchingNextPage}
           busyId={busyId}
+          running={running}
           onSearchChange={setSessionSearch}
           onShowArchivedChange={setShowArchived}
           onOpen={(id) => {
@@ -583,4 +595,20 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
       ) : null}
     </section>
   )
+}
+
+/**
+ * `running · 1m 05s` in the header, counted from the server's own start time.
+ *
+ * A component of its own so the once-a-second tick lives exactly as long as the
+ * counter does — in the page it would re-render the whole transcript every
+ * second, including every second nothing is running.
+ */
+function RunningMeta({ startedAt }: { startedAt: string | null }) {
+  const now = useNow(1_000)
+  const meta = runningHeaderMeta(startedAt, now)
+  if (!meta) {
+    return null
+  }
+  return <span className="min-w-0 shrink-4 truncate text-[11px] text-accent">{meta}</span>
 }
