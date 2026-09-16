@@ -471,6 +471,11 @@ class SourceCollector:
             if isinstance(url, str):
                 self._fetched.append(ExtraSource(url=url))
         elif isinstance(event, ev.ServerToolResult):
+            # Server tools stream their input as fragments too, so this is the
+            # other place a buffer is finished with. A server tool's arguments are
+            # never a source — only what its results cite — so it is dropped, not
+            # parsed.
+            self._buffers.pop(event.tool_use_id, None)
             if event.is_error or not isinstance(event.results, list):
                 return
             for result in event.results:
