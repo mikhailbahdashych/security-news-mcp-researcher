@@ -241,21 +241,37 @@ watching are two requests.
   server-side. No answer comes back on it; a **409** means that session already has one.
 - **`streamUrl(id)`** — `GET /sessions/:id/stream`, read by `streamSSE` with
   `method: 'GET'`. It **replays** the turn's log from its first event and then tails it,
-  so a page that arrives late draws the whole turn; **204** means nothing is running and
-  the transcript already has the answer. `ChatPage.attach(id, token)` is the single owner
-  of that reader, whether this page started the turn or found it going.
-- **Attaching is an effect keyed on `(sessionId, session.turn_status)`** — not on `live`,
-  which changes on every delta. It skips the session this page is already streaming, so a
-  `settle` (status back to `idle`) cannot re-attach and a turn started in another tab
-  (status `running` again) is picked up.
+  so a page that arrives late draws the whole turn; **204** means nothing is running *and*
+  nothing finished in the last 30 s (the backend keeps a just-ended turn replayable that
+  long, so an error-only turn still reaches the page that asked for it).
+  `ChatPage.attach(id, token)` is the single owner of that reader, whether this page
+  started the turn or found it going.
+- **Whether to attach is `shouldAttach({sessionId, turnStatus, runningIds, live})`** in
+  `liveTurn.ts` — a tested function, because it weighs two caches against each other.
+  **`GET /sessions/running` decides, not `session.turn_status`.** The session row reaches
+  the page through a query and is wrong in both directions: a second tab read it before
+  the turn started, a page that walked to the Inbox and back reads it after the turn
+  ended. Attaching on a stale `running` replays a finished turn over the transcript that
+  already holds it; not attaching on a stale `idle` was the "send, walk away, come back to
+  an empty page" bug. The row keeps one veto (`interrupted` is never watched), and the
+  rule also refuses to re-attach to a turn this page already settled (`live.lastTurnId`).
+  The detail query overrides the app defaults with `refetchOnMount: 'always'` +
+  `refetchOnWindowFocus: true` for the same reason.
 - **Leaving detaches; only Stop cancels.** `abandonTurn` aborts the reader and bumps the
   token, and that is the whole of it — the turn runs on and opening the session again
   resumes the picture. `POST /cancel` (Stop) and `DELETE /sessions/:id` are the two things
-  that end a turn early.
+  that end a turn early. The page also aborts **on unmount**
+  (`useEffect(() => () => abandonTurn(), [abandonTurn])`): walking to the Inbox mid-turn
+  otherwise left the reader consuming the stream to the end, and every return opened
+  another — six per origin is all HTTP/1.1 gives. It is also what makes StrictMode's
+  double-invoke harmless, since the simulated unmount retires the first pass's reader.
 - **`turn_status === 'interrupted'`** means a backend restart killed the turn mid-flight.
   `InterruptedNotice` says so under the transcript and offers "Send again", which re-reads
-  the question and its item ids off the stored user row with `resendPayload(messages)`:
-  the restart took this page's memory of them with it.
+  the question off the stored user row with `resendPayload(messages)`: the restart took
+  this page's memory of it with it. The payload carries `attachments` as well as
+  `attached_item_ids`, and `send(text, resent?)` draws *those* chips and leaves the
+  attachment picker alone — it belongs to the next question, and sending its items under
+  the old question's ids captioned the turn with items the server never saw.
 - **Where a turn shows while the user is elsewhere** — `lib/useRunningTurns.ts`.
   `useRunningTurns()` is one query on `GET /sessions/running` (`runningSessionsKey`)
   behind three indicators: the rail's dot (`Rail`'s `busyPages`), the history drawer's
@@ -270,14 +286,21 @@ watching are two requests.
 `components/chat/liveTurn.ts` holds **only the in-flight turn**; once the turn ends the
 page refetches the session and the Query cache is the source of truth again.
 `LiveTurn = { sessionId, prompt, attachments, streaming, steps, text, interrupted, error,
-turn, usage, activity, activeTool, startedAt, token }`; actions are `start`, `attach`,
-`sse`, `failed`, `settle`, `reset`. `start` carries its own `startedAt` (`Date.now()` at
-the call site) so the reducer stays pure, and the `attachments` the question was sent
+turn, usage, activity, activeTool, startedAt, token, lastTurnId }`; actions are `start`,
+`attach`, `sse`, `failed`, `settle`, `reset`. `start` carries its own `startedAt`
+(`Date.now()` at the call site) so the reducer stays pure, and the `attachments` it was sent
 with — they live on the stored user row, which `turnsBesideLive` hides for the length of
 the turn, so without a copy here the chips vanished the moment the user pressed Enter.
 `attach` is `start` for a turn this page did not start: it claims the token and sets
 `streaming` with nothing to show, because the prompt and the real `startedAt` arrive one
 event later. Both are exempt from the token check — they *are* the claim.
+
+**`lastTurnId` is how a replay is told from a turn.** The server keeps a finished turn
+readable for 30 s, so a page that re-attaches inside that window is handed the whole turn
+again. `settle` and `attach` keep the id, `reset` and `start` drop it, and a
+`turn_started` carrying it is **ignored** — which leaves the live turn without a prompt,
+and a live turn with no prompt renders nothing, so the transcript below it stands alone.
+`shouldAttach` reads the same field to not go back for that turn at all.
 
 `steps` is **one flat `LiveStep[]`** (thinking blocks and tool calls in arrival order),
 not "the thinking" plus "the cards" — a turn thinks, calls a tool, thinks again, and
@@ -386,15 +409,18 @@ hand-rolled `.prose-chat` block in `src/index.css`, deliberately instead of
 
 ## Tests
 
-`npx vitest run` — **9 files, 153 tests**, `environment: 'node'`, so only pure modules
+`npx vitest run` — **9 files, 164 tests**, `environment: 'node'` with **`TZ` pinned to
+`UTC`** (`vite.config.ts`: the backend sends naive UTC, so a test asserting an instant
+would otherwise assert the machine's offset), so only pure modules
 are covered: `lib/sse.test.ts` (frames split across chunks, multi-line data,
 heartbeats ignored, a 204 raised as `SSEHttpError` rather than read as an empty stream,
 and a `GET` attachment sending no body), `api/chat.test.ts` (`blocksToText`, `groupTurns`,
 `stepsFromMessage`, `toolCallStatus`, source extraction, the sandbox card,
 `resendPayload`, the formatters), `components/chat/liveTurn.test.ts`
-(`isForeignSession`, `turnsBesideLive`, `attach` + `turn_started`, the streamed
-server-tool input, the `activity` transitions, turn scoping, `activityLabel`,
-`showsProgress`, `formatElapsed`), `lib/useRunningTurns.test.ts` (`runningHeaderMeta`),
+(`isForeignSession`, `shouldAttach`, `turnsBesideLive`, `attach` + `turn_started` +
+`lastTurnId`'s replay guard, the streamed server-tool input, the `activity` transitions,
+turn scoping, `activityLabel`, `showsProgress`, `formatElapsed`),
+`lib/useRunningTurns.test.ts` (`runningHeaderMeta`),
 `api/inbox.test.ts`, `components/ui/preferences.test.ts` (`parseStoredTheme`/
 `resolveTheme`, `parseRail`, `parseLayout`/`pageFromPath`),
 `components/ui/searchKeys.test.ts` (the shared overlay keyboard model),

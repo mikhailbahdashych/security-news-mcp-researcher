@@ -305,9 +305,11 @@ touched; what changed is everything around them.
   `POST /api/sessions/{id}/messages` → **202**; watching is a separate
   `GET /api/sessions/{id}/stream` that replays the turn's log before tailing it. A
   reload, a walk to the Inbox, a browser-back or a second tab therefore rejoin the same
-  turn instead of killing it: `ChatPage.attach` is the single owner of that reader, keyed
-  on the session's `turn_status`, and leaving only detaches — Stop and Delete are the only
-  cancels. Three indicators make a detached turn findable (the rail's dot, a `running` row
+  turn instead of killing it: `ChatPage.attach` is the single owner of that reader, and
+  leaving only detaches — Stop and Delete are the only cancels. Whether to attach is a
+  tested rule (`liveTurn.ts::shouldAttach`) that believes `GET /api/sessions/running`
+  rather than the session row's cached `turn_status`, because that row is read both before
+  a turn starts and after it ends. Three indicators make a detached turn findable (the rail's dot, a `running` row
   in the history drawer, `running · 1m 05s` in the chat header), all off one
   `GET /api/sessions/running` query refetched on window focus and on the page's own
   events: **the no-poller rule holds on the frontend too**. A turn a backend restart cut
