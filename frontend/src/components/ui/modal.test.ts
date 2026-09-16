@@ -6,7 +6,7 @@ import { isOutside } from './modal'
  * A stand-in for an element, with the one method the predicate asks of it.
  *
  * `environment: 'node'`, so there is no DOM here — and there does not need to
- * be: `isOutside` is pure precisely so the drawer's dismissal rule can be
+ * be: `isOutside` is pure precisely so an overlay's dismissal rule can be
  * stated without one.
  */
 function container(...nodes: unknown[]): Element {
@@ -16,7 +16,7 @@ function container(...nodes: unknown[]): Element {
 const node = (name: string) => ({ name }) as unknown as Node
 
 describe('isOutside', () => {
-  const inPanel = node('a row in the drawer')
+  const inPanel = node('a row inside the panel')
   const inOpener = node('the icon inside the opener')
   const elsewhere = node('the composer')
   const panel = container(inPanel)

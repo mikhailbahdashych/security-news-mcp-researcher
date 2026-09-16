@@ -1,4 +1,5 @@
 import BackendStatus from '../BackendStatus'
+import ChatList from '../chat/ChatList'
 import Icon, { type IconName } from './Icon'
 import { cx } from './classes'
 import { PAGE_KEYS, PAGE_LABELS, type PageKey } from './layout'
@@ -40,6 +41,14 @@ export interface RailProps {
   busyPages: Set<PageKey>
   onNavigate: (page: PageKey) => void
   onOpenSearch: () => void
+  /**
+   * Whether Research is on screen — in either pane. The chat history fills the
+   * rail's middle only there: it is that page's list, and beside the Inbox it
+   * would be a sidebar for somewhere else.
+   */
+  researchOpen: boolean
+  /** The routed chat, so the history can mark it. Null on `/chat` and elsewhere. */
+  chatSessionId: number | null
 }
 
 /**
@@ -58,6 +67,8 @@ export default function Rail({
   busyPages,
   onNavigate,
   onOpenSearch,
+  researchOpen,
+  chatSessionId,
 }: RailProps) {
   const themeLabel = theme === 'dark' ? 'Switch to light' : 'Switch to dark'
   const railLabel = expanded ? 'Collapse sidebar' : 'Expand sidebar'
@@ -108,7 +119,11 @@ export default function Rail({
         ))}
       </nav>
 
-      <div className="mt-auto flex flex-col gap-1.5">
+      {/* Collapsed there is nowhere to put it, and 58px of truncated titles
+          would say nothing: the rail goes back to being four icons. */}
+      {expanded && researchOpen ? <ChatList activeId={chatSessionId} /> : null}
+
+      <div className="mt-auto flex flex-col gap-1.5 pt-1.5">
         <RailButton
           expanded={expanded}
           icon={NAV_ICONS.settings}

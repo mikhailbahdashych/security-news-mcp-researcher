@@ -1,4 +1,4 @@
-import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
 
@@ -6,24 +6,18 @@ import {
   cancelTurn,
   collectFeedTitles,
   createSession,
-  deleteSession,
   fetchSession,
-  fetchSessions,
   formatTokens,
   groupTurns,
   parseSessionId,
-  renameSession,
   resendPayload,
   runningSessionsKey,
   sessionQueryKey,
-  sessionsListKey,
   sessionsQueryKey,
-  setSessionArchived,
   startTurn,
   streamUrl,
   type ErrorPayload,
   type ResendPayload,
-  type SessionFilters,
 } from '../api/chat'
 import { ApiError, isNotFound } from '../api/client'
 import { useFeedTitlesFromCache, type FeedItem } from '../api/inbox'
@@ -31,7 +25,6 @@ import { fetchSettings, settingsQueryKey } from '../api/settings'
 import AnswerTurn from '../components/chat/AnswerTurn'
 import Composer from '../components/chat/Composer'
 import EmptyResearch from '../components/chat/EmptyResearch'
-import HistoryDrawer from '../components/chat/HistoryDrawer'
 import InterruptedNotice from '../components/chat/InterruptedNotice'
 import TurnError from '../components/chat/TurnError'
 import {
@@ -44,10 +37,8 @@ import {
 } from '../components/chat/liveTurn'
 import GenerateNotesDialog from '../components/notes/GenerateNotesDialog'
 import Button from '../components/ui/Button'
-import IconButton from '../components/ui/IconButton'
 import type { EmbeddablePageProps } from '../components/ui/PageHost'
 import { SSEHttpError, streamSSE } from '../lib/sse'
-import useDebouncedValue from '../lib/useDebouncedValue'
 import { useNow } from '../lib/useElapsed'
 import { runningHeaderMeta, useRunningTurns } from '../lib/useRunningTurns'
 
@@ -92,19 +83,12 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
     embedded ? [] : ((location.state as ChatNavigationState | null)?.attachedItems ?? []),
   )
   const [notesOpen, setNotesOpen] = useState(false)
-  const [historyOpen, setHistoryOpen] = useState(false)
-  const [sessionSearch, setSessionSearch] = useState('')
-  const [showArchived, setShowArchived] = useState(false)
   const abort = useRef<AbortController | null>(null)
   // Which send owns the live state. Bumped whenever a turn is abandoned, so a
   // reader that is still running cannot write to the turn that replaced it.
   const turnSeq = useRef(0)
   const scroller = useRef<HTMLDivElement>(null)
   const bottom = useRef<HTMLDivElement>(null)
-  // The drawer closes on a click outside itself, and the button that opens it is
-  // not "outside" — otherwise pressing it while open closes and reopens the
-  // drawer in one gesture.
-  const historyButton = useRef<HTMLButtonElement>(null)
 
   /**
    * Stop watching the turn and disown it — but let it run.
@@ -209,25 +193,6 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
   // aborted and its token retired, and exactly one reader survives.
   useEffect(() => () => abandonTurn(), [abandonTurn])
 
-  const debouncedSessionSearch = useDebouncedValue(sessionSearch)
-  const sessionFilters = useMemo<SessionFilters>(
-    () => ({ q: debouncedSessionSearch, archived: showArchived ? 'true' : 'false' }),
-    [debouncedSessionSearch, showArchived],
-  )
-
-  const sessions = useInfiniteQuery({
-    // Keyed by the filters, prefixed by `sessionsQueryKey` so one invalidation
-    // after a rename or an archive still refreshes whichever variant is on
-    // screen.
-    queryKey: sessionsListKey(sessionFilters),
-    queryFn: ({ pageParam }) => fetchSessions(sessionFilters, pageParam as string | undefined),
-    initialPageParam: undefined as string | undefined,
-    getNextPageParam: (page) => page.next_cursor ?? undefined,
-    // The drawer is an overlay; there is no point paying for the list while it
-    // is shut, and opening it is instant off the cache afterwards.
-    enabled: historyOpen,
-  })
-
   const detail = useQuery({
     queryKey: sessionQueryKey(sessionId ?? 0),
     queryFn: () => fetchSession(sessionId as number),
@@ -249,8 +214,9 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
   // session's own model is authoritative once there is one.
   const settings = useQuery({ queryKey: settingsQueryKey, queryFn: fetchSettings })
 
-  // Which sessions are busy server-side, for the drawer's marks. The same query
-  // the rail's dot reads, so the two cannot disagree about what is running.
+  // Which sessions are busy server-side: what the attach rule below weighs
+  // against the session row. The same query the rail's dot and its chat list
+  // read, so none of the three can disagree about what is running.
   const running = useRunningTurns()
 
   // Leaving for a *different* conversation drops the live turn — this is what
@@ -308,10 +274,13 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
   // every other failure keeps the error on screen, because a backend that is
   // down is not a session that is gone.
   //
-  // The sessions list is refreshed too. The likeliest source of a 404 is the chat
-  // having been deleted from another tab, and the drawer's cached list — 30 s of
-  // `staleTime` — still holds the row: without this, clicking it bounces the user
-  // back to `/chat` with no explanation, and clicking it again does the same.
+  // The sessions list is refreshed too. The likeliest sources of a 404 are the
+  // chat having been deleted from another tab and the rail's own delete, and the
+  // cached list — 30 s of `staleTime` — still holds the row: without this,
+  // clicking it bounces the user back to `/chat` with no explanation, and
+  // clicking it again does the same. That delete is also what this effect is
+  // *for* now: the rail's list cannot reach into this page, so it invalidates
+  // the detail query and lets the 404 below abandon the turn and leave.
   const missingSession = isNotFound(detail.error)
   useEffect(() => {
     if (!missingSession) {
@@ -382,34 +351,6 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
     })
     return () => cancelAnimationFrame(frame)
   }, [live.prompt, live.text, live.steps.length])
-
-  const rename = useMutation({
-    mutationFn: ({ id, title }: { id: number; title: string }) => renameSession(id, title),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: sessionsQueryKey }),
-  })
-
-  const archive = useMutation({
-    mutationFn: ({ id, archived }: { id: number; archived: boolean }) =>
-      setSessionArchived(id, archived),
-    // Invalidate rather than patch the cache: an archived row leaves the default
-    // list entirely, which is not an edit to a row but a change of membership.
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: sessionsQueryKey }),
-  })
-
-  const remove = useMutation({
-    mutationFn: (id: number) => deleteSession(id),
-    onSuccess: (_data, id) => {
-      queryClient.invalidateQueries({ queryKey: sessionsQueryKey })
-      if (id === sessionId) {
-        // Without this the deleted session's terminal error would follow the
-        // user onto the blank /chat view — and its stream would keep running
-        // against a session that no longer exists.
-        abandonTurn()
-        dispatch({ kind: 'reset' })
-        openSession(null)
-      }
-    },
-  })
 
   const send = useCallback(
     async (text: string, resent?: ResendPayload) => {
@@ -521,26 +462,12 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
     }
   }, [live.sessionId, sessionId])
 
-  // Stable, because the drawer's Escape listener is subscribed to `document` for
-  // as long as this prop is unchanged: an inline arrow re-subscribed it on every
-  // render, and during a streaming turn this page renders many times a second.
-  const closeHistory = useCallback(() => setHistoryOpen(false), [])
-
   const newChat = useCallback(() => {
     abandonTurn()
     dispatch({ kind: 'reset' })
     setAttached([])
-    setHistoryOpen(false)
     openSession(null)
   }, [abandonTurn, openSession])
-
-  const allSessions = sessions.data?.pages.flatMap((page) => page.sessions) ?? []
-  // Which row is mid-write, so the drawer can grey it out while it saves.
-  const busyId =
-    (rename.isPending ? rename.variables?.id : undefined) ??
-    (archive.isPending ? archive.variables?.id : undefined) ??
-    (remove.isPending ? remove.variables : undefined) ??
-    null
 
   const session = detail.data?.session
   const model = session?.model ?? settings.data?.model ?? null
@@ -578,14 +505,6 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
   return (
     <section className="relative flex h-full flex-col overflow-hidden bg-bg text-ink">
       <header className="flex h-[49px] shrink-0 items-center gap-2 border-b border-line px-4">
-        <IconButton
-          ref={historyButton}
-          icon="history"
-          label="Chat history"
-          size={16}
-          active={historyOpen}
-          onClick={() => setHistoryOpen((open) => !open)}
-        />
         <div className="flex min-w-0 flex-1 items-baseline gap-2 overflow-hidden">
           <h1 className="m-0 min-w-0 shrink truncate text-[13px] font-semibold">
             {session?.title || 'New research'}
@@ -612,35 +531,6 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
           </Button>
         </div>
       </header>
-
-      {historyOpen ? (
-        <HistoryDrawer
-          sessions={allSessions}
-          activeId={sessionId}
-          search={sessionSearch}
-          showArchived={showArchived}
-          isPending={sessions.isPending}
-          isError={sessions.isError}
-          hasMore={Boolean(sessions.hasNextPage)}
-          loadingMore={sessions.isFetchingNextPage}
-          busyId={busyId}
-          running={running}
-          onSearchChange={setSessionSearch}
-          onShowArchivedChange={setShowArchived}
-          onOpen={(id) => {
-            abandonTurn()
-            dispatch({ kind: 'reset' })
-            setHistoryOpen(false)
-            openSession(id)
-          }}
-          onRename={(id, title) => rename.mutate({ id, title })}
-          onArchive={(id, archived) => archive.mutate({ id, archived })}
-          onDelete={(id) => remove.mutateAsync(id).then(() => undefined)}
-          onLoadMore={() => void sessions.fetchNextPage()}
-          onClose={closeHistory}
-          openerRef={historyButton}
-        />
-      ) : null}
 
       {empty ? (
         <EmptyResearch

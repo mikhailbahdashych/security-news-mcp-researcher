@@ -1,6 +1,7 @@
 import { useState } from 'react'
-import { Route, Routes, useLocation, useNavigate } from 'react-router-dom'
+import { Route, Routes, useLocation, useMatch, useNavigate } from 'react-router-dom'
 
+import { parseSessionId } from './api/chat'
 import GlobalSearch from './components/ui/GlobalSearch'
 import PageHost from './components/ui/PageHost'
 import Rail from './components/ui/Rail'
@@ -42,6 +43,16 @@ export default function App() {
   const running = useRunningTurns()
 
   const urlPage = pageFromPath(location.pathname)
+  // Which chat the URL names, for the rail's history list. `useMatch` rather
+  // than a `pathname.startsWith` of its own, so the one place that decides what
+  // `/chat/:id` means is the router — and `parseSessionId`, because `:id`
+  // matches anything and only a positive integer is an id.
+  const chatMatch = useMatch('/chat/:id')
+  const chatSessionId = parseSessionId(chatMatch?.params.id)
+
+  // A page is current if the URL shows it, or if the split view's second pane
+  // does. Named rather than inlined because the rail asks it twice.
+  const isActive = (page: PageKey) => urlPage === page || (layout.split && layout.paneB === page)
 
   // The left pane is the router's pane, so moving it *is* navigating: there is
   // no stored copy of which page it shows, and nothing to keep in step.
@@ -54,10 +65,12 @@ export default function App() {
         onToggleExpanded={toggleRail}
         theme={theme}
         onToggleTheme={toggleTheme}
-        isActive={(page) => urlPage === page || (layout.split && layout.paneB === page)}
+        isActive={isActive}
         busyPages={running.size > 0 ? RESEARCH_BUSY : NOTHING_BUSY}
         onNavigate={goTo}
         onOpenSearch={() => setSearchOpen(true)}
+        researchOpen={isActive('research')}
+        chatSessionId={chatSessionId}
       />
 
       <main className="flex min-w-0 flex-1">
