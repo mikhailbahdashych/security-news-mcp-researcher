@@ -271,6 +271,19 @@ see the same turn from the start.
 - **A turn is forgotten before anyone sees it end.** The registry entry is dropped
   *before* `done` is appended: a page that has seen `done` may send its next message in
   the very next request, and a stale entry would answer that with a 409.
+- **...but its log is kept for `RECENT_TURN_S` (30 s).** `recent(session_id)` holds the
+  turn each session last finished — one entry, dropped when that session starts another
+  turn — so `GET /stream` can still replay a turn that was over before the page asked to
+  watch it. An error-only turn (no API key, an immediate 401) is three events long and
+  finishes inside the POST's own round trip; without this the stream answered 204 and the
+  error was never shown at all.
+- **A turn that swallows `CancelledError` wedges its session until restart.** Its entry
+  stays in `_turns` with a live task, so every later `start()` for that session is a 409,
+  and `cancel_and_wait` / `drain` give up on it after `CANCEL_WAIT_S` (one deadline for
+  both of `drain`'s waits, not one each). That is a deliberate decision, not an
+  oversight: the alternative — evicting an entry whose task is still running — puts two
+  turns on one transcript, which is the bug `_start_lock` exists to prevent. The runner
+  does not swallow cancellation; a tool handler that did would be the bug to fix.
 - **A cancelled turn ends normally** — `_drive` swallows the `CancelledError` so the
   cleanup can run. Read a turn's ending off its log (`error(cancelled)` then `done`),
   never off `task.cancelled()`.
