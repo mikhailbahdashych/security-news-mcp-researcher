@@ -301,6 +301,17 @@ touched; what changed is everything around them.
   (`sourcesFromTool`, `feedItemSource`, `citationFor`). Tool-call status is
   `running`/`ok`/`error`/`unknown`: `running` belongs to the live stream alone, and a
   stored row with no `result_json` is `unknown` rather than a tick or a forever-spinner.
+- **A research turn survives the page** (added after the redesign). Asking is
+  `POST /api/sessions/{id}/messages` → **202**; watching is a separate
+  `GET /api/sessions/{id}/stream` that replays the turn's log before tailing it. A
+  reload, a walk to the Inbox, a browser-back or a second tab therefore rejoin the same
+  turn instead of killing it: `ChatPage.attach` is the single owner of that reader, keyed
+  on the session's `turn_status`, and leaving only detaches — Stop and Delete are the only
+  cancels. Three indicators make a detached turn findable (the rail's dot, a `running` row
+  in the history drawer, `running · 1m 05s` in the chat header), all off one
+  `GET /api/sessions/running` query refetched on window focus and on the page's own
+  events: **the no-poller rule holds on the frontend too**. A turn a backend restart cut
+  short reads `interrupted`, says so, and offers "Send again" from the stored question.
 - Helpers: `lib/useDebouncedValue.ts` (every search box drives a query key),
   `lib/dates.ts`, `components/notes/excerpt.ts` (Markdown markers off a clamped
   two-line preview — deliberately not a parser).
