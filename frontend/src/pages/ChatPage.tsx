@@ -290,11 +290,15 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
     [messages, cachedTitles],
   )
   const stored = useMemo(() => groupTurns(messages ?? [], feedTitles), [messages, feedTitles])
-  // The backend persists the user row before the first token, so the refetch
-  // that follows `createSession` already holds the question the live turn is
-  // asking. Without this it rendered twice: once as this turn's heading and
-  // again as the live turn's follow-up, with the steps under the second copy.
-  const turns = useMemo(() => turnsBesideLive(stored, live.prompt), [stored, live.prompt])
+  // The backend persists the user row before the first token — and then message
+  // by message — so the transcript already holds the question the live turn is
+  // asking, and, on a page that attached mid-turn, part of its answer too.
+  // Without this it rendered twice: once as this turn's heading and again as
+  // the live turn's follow-up, with the steps under the second copy.
+  const turns = useMemo(
+    () => turnsBesideLive(stored, live.prompt, live.startedAt),
+    [stored, live.prompt, live.startedAt],
+  )
 
   // Opening a conversation lands at its latest answer, without animating
   // through the whole history to get there.

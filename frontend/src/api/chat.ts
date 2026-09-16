@@ -417,6 +417,14 @@ export interface TurnAttachment {
 export interface Turn {
   key: string
   question: string
+  /**
+   * When the question was stored, naive UTC off the user row.
+   *
+   * `turnsBesideLive` compares it with the live turn's start time: that is how
+   * the stored half of the turn being answered *right now* is told from an
+   * older turn that happens to ask the same thing.
+   */
+  askedAt: string
   attachments: TurnAttachment[]
   steps: TurnStep[]
   answer: string
@@ -1100,6 +1108,7 @@ export function groupTurns(messages: ChatMessage[], knownTitles?: FeedTitles): T
       turns.push({
         key: `turn-${message.id}`,
         question: questionFromMessage(message),
+        askedAt: message.created_at,
         attachments: attachmentsFromMessage(message),
         steps: [],
         answer: '',

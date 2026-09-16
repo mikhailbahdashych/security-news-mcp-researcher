@@ -337,15 +337,20 @@ Whether to render it is `showsProgress(streaming, activity)` — a tested functi
 inline predicate — and the three fields travel as one `LiveProgress`, because `startedAt`
 without an `activity` is an elapsed counter with no start.
 
-**`turnsBesideLive(turns, livePrompt)`** is what stops the question rendering twice. The
-backend persists the user row before the first token, so the refetch after `createSession`
-already carries a turn holding the question with nothing under it — which rendered above
-the live turn asking the same thing. It drops that turn only when it is **trailing**, has
-no answer, no steps and no error, and its `question` (already stripped of the server's
-"Attached feed items:" block) matches the prompt. It takes the prompt, not the whole
-`LiveTurn`, so the memo survives a turn's worth of deltas — and the live turn's `followUp`
-reads the filtered list, so the first question of a session stays an `h2`. Hiding that row
-is also why `start` has to carry the attachments.
+**`turnsBesideLive(turns, livePrompt, liveStartedAt)`** is what stops the question
+rendering twice. The backend persists the user row before the first token — and then
+**message by message** — so the transcript already holds the question the live turn is
+asking, and, on a page that attached mid-turn, the steps and half the answer as well. It
+drops the **trailing** turn when its `question` (already stripped of the server's
+"Attached feed items:" block) matches the prompt **and** either nothing is stored under it
+yet or it was `askedAt` the live turn's start time (`Turn.askedAt`, the user row's
+`created_at`, with 5 s of slack for the page whose `startedAt` is still a local
+`Date.now()`). "Nothing stored yet" alone was the rule until turns could be attached to,
+and it left every tool-using turn drawn twice on the page that joined it. It takes the
+prompt and the start time, not the whole `LiveTurn`, so the memo survives a turn's worth
+of deltas — and the live turn's `followUp` reads the filtered list, so the first question
+of a session stays an `h2`. Hiding that row is also why `start` has to carry the
+attachments.
 
 **`settle` vs `reset`.** `ChatPage.attach`'s `finally` invalidates the session queries
 (and `runningSessionsKey`) and dispatches `settle`, not `reset`: a terminal error must

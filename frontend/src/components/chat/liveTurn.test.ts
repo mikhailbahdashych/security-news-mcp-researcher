@@ -482,10 +482,16 @@ describe('formatElapsed', () => {
 })
 
 describe('turnsBesideLive', () => {
+  /** When the live turn began, on the server's clock: 12:00:00 UTC. */
+  const LIVE_STARTED = Date.UTC(2026, 8, 16, 12, 0, 0)
+  /** Two hours before that: a question from earlier in the conversation. */
+  const EARLIER = '2026-09-16T10:00:00'
+
   function turn(overrides: Partial<Turn> = {}): Turn {
     return {
       key: 'turn-1',
       question: 'What broke this week?',
+      askedAt: EARLIER,
       attachments: [],
       steps: [],
       answer: '',
@@ -513,50 +519,82 @@ describe('turnsBesideLive', () => {
   it('drops the transcript\u2019s echo of the question being answered', () => {
     // The backend stores the user row before the first token, so the refetch
     // that follows `createSession` already has a turn with the question and
-    // nothing under it — which rendered above the live turn asking the same
+    // nothing under it \u2014 which rendered above the live turn asking the same
     // thing, and the user saw their question twice.
-    expect(turnsBesideLive([turn()], 'What broke this week?')).toEqual([])
+    expect(turnsBesideLive([turn()], 'What broke this week?', LIVE_STARTED)).toEqual([])
   })
 
   it('compares the stripped question, not the stored message', () => {
     // The server appends an "Attached feed items:" block to what it stores;
     // `groupTurns` already strips it, so `question` is the comparable half.
-    expect(turnsBesideLive([turn({ question: '  What broke this week?  ' })], 'What broke this week?')).toEqual(
-      [],
-    )
+    expect(
+      turnsBesideLive([turn({ question: '  What broke this week?  ' })], 'What broke this week?', LIVE_STARTED),
+    ).toEqual([])
+  })
+
+  it('drops the half-written turn a page attaches to mid-flight', () => {
+    // The runner persists message by message, so any turn that has called a
+    // tool already has an assistant row *while it is still running*. A page
+    // that attaches then reads that partial turn and replays the same turn
+    // live: the question, the steps so far and the text, all of it twice.
+    const turns = [
+      turn({
+        replies: 1,
+        answer: 'Looking into it.',
+        steps: [step],
+        askedAt: '2026-09-16T11:59:58',
+      }),
+    ]
+    expect(turnsBesideLive(turns, 'What broke this week?', LIVE_STARTED)).toEqual([])
+  })
+
+  it('allows the few seconds between the local clock and the server\u2019s', () => {
+    // The page that *started* the turn stamps `startedAt` with `Date.now()`
+    // until the replayed `turn_started` corrects it to the server's own time,
+    // so the stored row can read a little older than the live turn does.
+    const turns = [turn({ replies: 1, askedAt: '2026-09-16T11:59:56' })]
+    expect(turnsBesideLive(turns, 'What broke this week?', LIVE_STARTED)).toEqual([])
+  })
+
+  it('keeps an answered turn that asked the same question earlier', () => {
+    // The same question twice in one conversation is a real transcript: this
+    // one was asked two hours before the live turn started, so whatever the
+    // live turn is replaying, it is not this.
+    const turns = [turn({ replies: 1, answer: 'Three things.' })]
+    expect(turnsBesideLive(turns, 'What broke this week?', LIVE_STARTED)).toEqual(turns)
   })
 
   it('keeps a trailing turn that was answered', () => {
     const turns = [turn({ answer: 'Three things.' })]
-    expect(turnsBesideLive(turns, 'What broke this week?')).toEqual(turns)
+    expect(turnsBesideLive(turns, 'What broke this week?', LIVE_STARTED)).toEqual(turns)
   })
 
   it('keeps a trailing turn that got as far as a step', () => {
     const turns = [turn({ steps: [step] })]
-    expect(turnsBesideLive(turns, 'What broke this week?')).toEqual(turns)
+    expect(turnsBesideLive(turns, 'What broke this week?', LIVE_STARTED)).toEqual(turns)
   })
 
   it('keeps a trailing turn that ended in an error', () => {
     const turns = [turn({ error: { type: 'refusal', message: 'No.', category: null } })]
-    expect(turnsBesideLive(turns, 'What broke this week?')).toEqual(turns)
+    expect(turnsBesideLive(turns, 'What broke this week?', LIVE_STARTED)).toEqual(turns)
   })
 
   it('keeps a turn the assistant replied to, even if the reply said nothing', () => {
     // The text match alone could hide a real earlier turn when the same
-    // question is asked twice. A stored assistant row — however empty — means
+    // question is asked twice. A stored assistant row \u2014 however empty \u2014 means
     // the turn happened, so only a question with no reply at all is a candidate.
     const turns = [turn({ replies: 1 })]
-    expect(turnsBesideLive(turns, 'What broke this week?')).toEqual(turns)
+    expect(turnsBesideLive(turns, 'What broke this week?', LIVE_STARTED)).toEqual(turns)
   })
 
   it('keeps a trailing unanswered turn that asked something else', () => {
     const turns = [turn({ question: 'Anything on the KEV catalog?' })]
-    expect(turnsBesideLive(turns, 'What broke this week?')).toEqual(turns)
+    expect(turnsBesideLive(turns, 'What broke this week?', LIVE_STARTED)).toEqual(turns)
   })
 
   it('drops nothing when no turn is live', () => {
     const turns = [turn()]
-    expect(turnsBesideLive(turns, null)).toEqual(turns)
+    expect(turnsBesideLive(turns, null, LIVE_STARTED)).toEqual(turns)
   })
 
   it('only ever drops the last turn', () => {
@@ -564,11 +602,11 @@ describe('turnsBesideLive', () => {
     // answer under it and is part of the transcript.
     const earlier = turn({ key: 'turn-1', answer: 'Three things.' })
     const echo = turn({ key: 'turn-2' })
-    expect(turnsBesideLive([earlier, echo], 'What broke this week?')).toEqual([earlier])
+    expect(turnsBesideLive([earlier, echo], 'What broke this week?', LIVE_STARTED)).toEqual([earlier])
   })
 
   it('leaves an empty transcript alone', () => {
-    expect(turnsBesideLive([], 'What broke this week?')).toEqual([])
+    expect(turnsBesideLive([], 'What broke this week?', LIVE_STARTED)).toEqual([])
   })
 })
 

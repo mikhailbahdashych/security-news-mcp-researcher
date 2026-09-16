@@ -20,6 +20,15 @@ import {
   type TurnStatus,
   type TurnStep,
 } from '../../api/chat'
+import { parseUtc } from '../../lib/dates'
+
+/**
+ * How far before the live turn's start time a stored question still counts as
+ * that turn's own. It covers the page that started the turn, whose `startedAt`
+ * is a local `Date.now()` for the few milliseconds before the server's
+ * `turn_started` corrects it — and the clock skew that goes with it.
+ */
+const LIVE_SLACK_MS = 5_000
 
 /** A block of reasoning as it streams in. */
 export interface LiveThinking {
@@ -529,27 +538,45 @@ export function shouldAttach({ sessionId, turnStatus, runningIds, live }: Attach
  * follows `createSession` already carries a turn holding the question and
  * nothing else — which rendered above the live turn asking the very same thing,
  * and the user saw their question twice, once as a heading and once as a
- * follow-up. Only a *trailing* turn qualifies, and only one the assistant has
- * not replied to at all (`replies === 0`, not merely "replied with nothing"):
- * the same question asked twice in a session is a real turn, and so is one that
- * failed before it answered.
+ * follow-up.
  *
- * Takes the prompt rather than the whole `LiveTurn` so a memo on it survives a
- * turn's worth of deltas — the turn object is replaced on every one of them.
+ * "Nothing written yet" was the whole test while a page could only ever watch a
+ * turn it had started. Attaching changed that: the runner persists **message by
+ * message**, so a turn that has already called a tool has an assistant row in
+ * the transcript *while it is still running*, and the page that joins it — a
+ * reload, the drawer, a second tab, a focus refetch — read that half-written
+ * turn and drew it above the live replay of the same turn. So the trailing turn
+ * is identified by the turn that is replaying it: one asked at (or just before)
+ * the live turn's start time is that turn's own stored half, whatever it holds.
+ *
+ * Both times are the server's clock once `turn_started` has landed — it is the
+ * log's first event, so an attached page has it before any replayed step. The
+ * five seconds of slack are for the page that *started* the turn, whose
+ * `startedAt` is a local `Date.now()` until that event corrects it.
+ *
+ * Takes the prompt and the start time rather than the whole `LiveTurn` so a memo
+ * on them survives a turn's worth of deltas — the turn object is replaced on
+ * every one of them, but neither of these two fields moves.
  */
-export function turnsBesideLive(turns: Turn[], livePrompt: string | null): Turn[] {
+export function turnsBesideLive(
+  turns: Turn[],
+  livePrompt: string | null,
+  liveStartedAt: number,
+): Turn[] {
   if (livePrompt === null || turns.length === 0) {
     return turns
   }
   const last = turns[turns.length - 1]
-  // `replies === 0` is the load-bearing half: an assistant row exists whatever
-  // it contained, so a turn that was answered — even with nothing — is a turn
-  // that happened, and the text match on its own could have hidden it.
+  // Nothing stored under the question at all — the refetch that follows
+  // `createSession`, before the first token. The extra clauses beyond
+  // `replies === 0` cost nothing and keep an impossible row (a turn with an
+  // answer but no assistant message behind it) out of the live turn's way.
   const unanswered =
     last.replies === 0 && last.answer === '' && last.steps.length === 0 && last.error === null
+  const isLiveTurn = unanswered || parseUtc(last.askedAt).getTime() >= liveStartedAt - LIVE_SLACK_MS
   // `question` is what `groupTurns` already stripped of the "Attached feed
   // items:" block the server appends, so it is the comparable half.
-  return unanswered && last.question.trim() === livePrompt.trim() ? turns.slice(0, -1) : turns
+  return isLiveTurn && last.question.trim() === livePrompt.trim() ? turns.slice(0, -1) : turns
 }
 
 /**
