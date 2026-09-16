@@ -413,10 +413,19 @@ export function formatTokens(count: number): string {
  * Opus 5 runs its own `web_search`/`web_fetch` calls from inside this, so the
  * blocks turn up on most web turns and the user has to be able to tell them
  * apart from anything running on their own machine.
+ *
+ * **The source is half the test.** MCP tool names are user-supplied and
+ * `text_editor_write` is an ordinary name for a filesystem server to expose —
+ * but a stdio MCP server runs on the user's own machine, so captioning its call
+ * "ran in Anthropic's sandbox" is a false provenance claim in the one card that
+ * exists so the work can be audited.
  */
-export function isSandboxTool(name: string | null | undefined): boolean {
+export function isSandboxTool(
+  source: string | null | undefined,
+  name: string | null | undefined,
+): boolean {
   const tool = name ?? ''
-  return tool.includes('code_execution') || tool.includes('text_editor')
+  return source === 'server' && (tool.includes('code_execution') || tool.includes('text_editor'))
 }
 
 /** What the expanded sandbox row says before the code itself. */
@@ -445,7 +454,7 @@ export function toolTag(
     if (tool === 'web_search' || tool === 'web_fetch') {
       return 'web'
     }
-    return isSandboxTool(tool) ? 'sandbox' : 'server'
+    return isSandboxTool(source, tool) ? 'sandbox' : 'server'
   }
   return 'local'
 }
@@ -457,11 +466,11 @@ const HINT_KEYS = ['q', 'query', 'url', 'path', 'command', 'code', 'item_id', 'i
 const SANDBOX_HINT_LIMIT = 80
 
 /** A one-line summary of a tool's arguments. */
-export function toolHint(name: string | null, input: unknown): string {
+export function toolHint(source: string | null, name: string | null, input: unknown): string {
   if (!isRecord(input)) {
     return ''
   }
-  if (isSandboxTool(name)) {
+  if (isSandboxTool(source, name)) {
     // An input-less `code_execution` block is the API allocating the container,
     // not a call the model made with no arguments — `{}` said neither.
     const source = str(input.code) ?? str(input.command)
@@ -515,7 +524,7 @@ function prettyJson(value: unknown): string | null {
  * verbatim, newlines and all, and everything else stays pretty-printed JSON.
  */
 function stepArgs(spec: ToolStepSpec): string | null {
-  if (isSandboxTool(spec.name) && isRecord(spec.input)) {
+  if (isSandboxTool(spec.source, spec.name) && isRecord(spec.input)) {
     const source = str(spec.input.code) ?? str(spec.input.command)
     if (source) {
       return source
@@ -772,12 +781,12 @@ export function toolStep(spec: ToolStepSpec): TurnStep {
     kind: 'tool',
     // `code_execution` / `bash_code_execution` / `text_editor_*` are three
     // names for one thing the user cares about: the model's sandbox.
-    name: isSandboxTool(spec.name) ? 'Sandbox' : (spec.name ?? 'tool'),
+    name: isSandboxTool(spec.source, spec.name) ? 'Sandbox' : (spec.name ?? 'tool'),
     tag: toolTag(spec.source, spec.name, spec.serverName),
-    hint: toolHint(spec.name, spec.input),
+    hint: toolHint(spec.source, spec.name, spec.input),
     status: spec.status,
     durationMs: spec.durationMs ?? null,
-    body: isSandboxTool(spec.name) ? SANDBOX_NOTE : null,
+    body: isSandboxTool(spec.source, spec.name) ? SANDBOX_NOTE : null,
     args: stepArgs(spec),
     links,
     preview: spec.preview !== undefined && spec.preview !== null

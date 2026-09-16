@@ -170,21 +170,23 @@ describe('toolTag', () => {
 
 describe('toolHint', () => {
   it('quotes a query and plainly shows a target', () => {
-    expect(toolHint('search_feed_items', { q: 'CVE-2026-21887', limit: 20 })).toBe(
+    expect(toolHint('builtin', 'search_feed_items', { q: 'CVE-2026-21887', limit: 20 })).toBe(
       '"CVE-2026-21887"',
     )
-    expect(toolHint('fetch_article', { url: 'https://example.com/a', max_chars: 8000 })).toBe(
-      'https://example.com/a',
-    )
-    expect(toolHint('get_feed_item', { item_id: 131 })).toBe('item #131')
+    expect(
+      toolHint('builtin', 'fetch_article', { url: 'https://example.com/a', max_chars: 8000 }),
+    ).toBe('https://example.com/a')
+    expect(toolHint('builtin', 'get_feed_item', { item_id: 131 })).toBe('item #131')
   })
 
   it('collapses a multi-line argument to its first line', () => {
-    expect(toolHint('code_execution', { code: 'import json\nprint(1)' })).toBe('import json')
+    expect(toolHint('server', 'code_execution', { code: 'import json\nprint(1)' })).toBe(
+      'import json',
+    )
   })
 
   it('says nothing when the arguments have not arrived yet', () => {
-    expect(toolHint('search_feed_items', null)).toBe('')
+    expect(toolHint('builtin', 'search_feed_items', null)).toBe('')
   })
 })
 
@@ -591,6 +593,38 @@ describe('the sandbox card', () => {
       sandboxResult({ return_code: 1, stderr: "NameError: name 'boom' is not defined" }),
     )
     expect(step.preview).toBe("NameError: name 'boom' is not defined\nexit 1")
+  })
+
+  it('never dresses an MCP tool up as Anthropic\u2019s container', () => {
+    // MCP tool names are user-supplied: a filesystem server exposing
+    // `text_editor_write` is ordinary. Claiming its call ran in Anthropic's
+    // sandbox is a false provenance claim in the one card that exists so the
+    // work can be audited — a stdio server runs on the user's own machine.
+    const step = toolStep({
+      key: 'row-1',
+      name: 'mcp__filesystem__text_editor_write',
+      source: 'mcp',
+      serverName: 'filesystem',
+      input: { command: 'rm -rf /', path: '/etc' },
+      status: 'ok',
+    })
+    expect(step.name).toBe('mcp__filesystem__text_editor_write')
+    expect(step.tag).toBe('mcp · filesystem')
+    expect(step.body).toBeNull()
+    expect(step.args).toBe('{\n  "command": "rm -rf /",\n  "path": "/etc"\n}')
+  })
+
+  it('does not treat a local tool with a sandbox-ish name as the sandbox', () => {
+    const step = toolStep({
+      key: 'row-2',
+      name: 'run_code_execution',
+      source: 'builtin',
+      input: { code: 'print(1)' },
+      status: 'ok',
+    })
+    expect(step.name).toBe('run_code_execution')
+    expect(step.tag).toBe('local')
+    expect(step.body).toBeNull()
   })
 
   it('says so when a clean run printed nothing', () => {

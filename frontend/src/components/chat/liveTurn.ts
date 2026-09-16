@@ -437,7 +437,7 @@ export function activityLabel(
   if (name === 'web_fetch') {
     return 'Fetching a page…'
   }
-  if (isSandboxTool(name)) {
+  if (isSandboxTool(source, name)) {
     return 'Running code in the sandbox…'
   }
   if (name === 'search_feed_items') {

@@ -301,6 +301,15 @@ describe('activityLabel', () => {
     )
   })
 
+  it('does not call an MCP tool the sandbox because of its name', () => {
+    expect(
+      activityLabel('tool', { name: 'mcp__filesystem__text_editor_write', source: 'mcp' }),
+    ).toBe('Calling text_editor_write on filesystem…')
+    expect(activityLabel('tool', { name: 'run_code_execution', source: 'builtin' })).toBe(
+      'Calling run_code_execution…',
+    )
+  })
+
   it('names an MCP call by its tool and its server', () => {
     expect(activityLabel('tool', { name: 'mcp__files__read_text_file', source: 'mcp' })).toBe(
       'Calling read_text_file on files…',
