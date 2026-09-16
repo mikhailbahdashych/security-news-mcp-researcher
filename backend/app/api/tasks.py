@@ -17,9 +17,11 @@ import asyncio
 import logging
 
 # The bound lives with the turn registry, which makes the same promise about the
-# same kind of task. Imported rather than duplicated, and in this direction:
-# domain code under app/agent must never import the API layer.
-from app.agent.turns import CANCEL_WAIT_S
+# same kind of task. The *module* is imported, not the value: ``from ... import
+# CANCEL_WAIT_S`` copies the float at import time, so the two halves of the app
+# would drift apart the moment anything (a test, a setting) changed it. And in
+# this direction only: domain code under app/agent must never import the API layer.
+from app.agent import turns
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +75,7 @@ async def cancel_and_wait(key: str) -> bool:
     # asyncio.wait never re-raises the task's exception and never cancels the
     # caller, so a task that dies of anything (including the CancelledError we
     # just caused) is simply reported as done.
-    done, _pending = await asyncio.wait({task}, timeout=CANCEL_WAIT_S)
+    done, _pending = await asyncio.wait({task}, timeout=turns.CANCEL_WAIT_S)
     if not done:
         # Proceed anyway: the caller's work matters more than a wedged task, and
         # anything it still manages to write now fails inside run()'s safety net
@@ -81,7 +83,7 @@ async def cancel_and_wait(key: str) -> bool:
         logger.warning(
             "Task %s did not stop within %.0fs of being cancelled; continuing without it",
             key,
-            CANCEL_WAIT_S,
+            turns.CANCEL_WAIT_S,
         )
     else:
         logger.info("Cancelled and awaited in-flight task %s", key)
@@ -100,7 +102,6 @@ async def clear() -> None:
 
 
 __all__ = [
-    "CANCEL_WAIT_S",
     "cancel",
     "cancel_and_wait",
     "clear",

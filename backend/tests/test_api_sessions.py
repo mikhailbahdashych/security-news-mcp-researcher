@@ -846,7 +846,9 @@ async def test_delete_does_not_hang_on_a_task_that_ignores_cancellation(monkeypa
     CancelledError — and an unbounded await would park the DELETE behind it
     forever. The wait is capped; the delete goes ahead regardless.
     """
-    monkeypatch.setattr(task_registry, "CANCEL_WAIT_S", 0.05)
+    # Patched where it is *defined*: the notes path reads the turn registry's
+    # bound at call time, so this is the one knob and both waits honour it.
+    monkeypatch.setattr(turn_module, "CANCEL_WAIT_S", 0.05)
     await task_registry.clear()
 
     started = asyncio.Event()
