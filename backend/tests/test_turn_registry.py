@@ -494,3 +494,69 @@ async def test_starting_a_turn_drops_the_previous_one_from_the_recent_cache(sess
     assert registry.recent(session_id) is None
     assert registry.get(session_id) is second
     await second.task
+
+
+async def swallows_one_cancel(delay: float) -> AsyncIterator[ev.AgentEvent]:
+    """A turn that ignores the first cancel — the case the bounded waits exist for."""
+    swallowed = False
+    while True:
+        try:
+            await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            if swallowed:
+                raise
+            swallowed = True
+        yield ev.TextDelta(text="x")
+
+
+async def test_drain_is_bounded_by_one_cancel_wait_not_two(session_factory, monkeypatch):
+    """Shutdown gets ``CANCEL_WAIT_S`` in total, not once per wait.
+
+    ``drain`` waits twice — on the tasks, then on the cleanups they left behind —
+    and each wait used to start its own ten seconds. uvicorn's own graceful
+    timeout can be shorter than the sum, in which case the second wait is the one
+    that gets killed and the shutdown it was protecting never happens.
+    """
+    monkeypatch.setattr(turns_module, "CANCEL_WAIT_S", 0.1)
+    timeouts: list[float | None] = []
+    real_wait = asyncio.wait
+
+    async def recording_wait(aws, **kwargs):
+        timeouts.append(kwargs.get("timeout"))
+        return await real_wait(aws, **kwargs)
+
+    monkeypatch.setattr(asyncio, "wait", recording_wait)
+
+    registry = TurnRegistry()
+    # One turn that will not stop, so the wait on the tasks times out...
+    stubborn_id = await _new_session(session_factory)
+    stubborn = await registry.start(
+        session_id=stubborn_id,
+        session_factory=session_factory,
+        generator=swallows_one_cancel(0.02),
+        client=None,
+        prompt="a",
+        attachments=[],
+    )
+    # ...and one already cancelled turn parked in a slow ``close``, so the wait on
+    # the cleanups it left in ``_finishing`` times out too.
+    closing_id = await _new_session(session_factory)
+    closing = await registry.start(
+        session_id=closing_id,
+        session_factory=session_factory,
+        generator=slow_turn(50, 0.02),
+        client=SlowClosingClient(0.5),
+        prompt="b",
+        attachments=[],
+    )
+    await asyncio.sleep(0.02)
+    assert await registry.cancel(closing_id) is True
+    await asyncio.sleep(0.02)  # the cleanup is now inside client.close()
+
+    await registry.drain()
+
+    assert len(timeouts) == 2  # both waits ran...
+    assert sum(timeouts) <= turns_module.CANCEL_WAIT_S  # ...sharing one deadline
+
+    stubborn.task.cancel()
+    await asyncio.gather(stubborn.task, closing.task, return_exceptions=True)

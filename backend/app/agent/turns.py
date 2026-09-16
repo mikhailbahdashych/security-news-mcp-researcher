@@ -348,19 +348,29 @@ class TurnRegistry:
         return True
 
     async def drain(self) -> None:
-        """Cancel every turn and wait (bounded) — shutdown."""
+        """Cancel every turn and wait (bounded) — shutdown.
+
+        The two waits share **one** deadline. A wait each would let a shutdown take
+        ``2 × CANCEL_WAIT_S``, and the server's own graceful-shutdown timeout may be
+        shorter than that — in which case the second wait, the one protecting the
+        last rows, is exactly what gets killed.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + CANCEL_WAIT_S
         turns = [turn for turn in self._turns.values() if not turn.task.done()]
         for turn in turns:
             turn.task.cancel()
         if turns:
-            await asyncio.wait({turn.task for turn in turns}, timeout=CANCEL_WAIT_S)
+            await asyncio.wait(
+                {turn.task for turn in turns}, timeout=max(0.0, deadline - loop.time())
+            )
             for turn in turns:
                 if turn.task.done():
                     await self._finalise_cancelled(turn)
         # Turns already past ``done`` are no longer registered but may still be
         # writing their last row; the engine goes away right after this.
         if self._finishing:
-            await asyncio.wait(set(self._finishing), timeout=CANCEL_WAIT_S)
+            await asyncio.wait(set(self._finishing), timeout=max(0.0, deadline - loop.time()))
 
 
 async def mark_interrupted(session_factory: async_sessionmaker[AsyncSession]) -> int:
