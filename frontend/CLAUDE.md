@@ -202,8 +202,10 @@ a turn does not re-render differently the instant it is refetched.
   named `Sandbox`, tagged `sandbox` (not `code` — that never said *whose* machine ran
   it), hinted with the first line of `input.code`/`input.command` (or `container start`
   for the input-less block that opens the container), and its expanded body says in one
-  line what the sandbox is. Its result is read as `stdout`/`stderr`/`exit N` **only when
-  N ≠ 0**, `no output` when there is nothing — and never `encrypted_stdout`.
+  line what the sandbox is. Its `args` block is the `code`/`command` string **verbatim**,
+  not JSON — `{"code": "import json\n…"}` is the wire format, not source anyone can
+  audit. Its result is read as `stdout`/`stderr`/`exit N` **only when N ≠ 0**, `no output`
+  when there is nothing — and never `encrypted_stdout`.
 - Presentation helpers live here too: `hostOf`, `formatMs`, `formatTokens`, `toolTag`
   (`local`/`web`/`sandbox`/an MCP server name), `toolHint`, `whenLabel`.
 
@@ -242,10 +244,20 @@ every `code_execution` row with no code until a reload.
 `TurnProgress` and `activityLabel(activity, activeTool)`, with an elapsed counter from
 `lib/useElapsed.ts` + `formatElapsed`. It is the only thing moving between a tool result
 and the next output — settled rows show ticks, and a 20 s thinking phase after tools read
-as a hung page. A result clears `activeTool` only when the id matches: calls run in
-parallel and a sibling finishing first does not mean the turn stopped waiting. It renders
-only while `streaming` and never when `activity === 'writing'` (the text is its own
-progress report), so a stored turn never shows one.
+as a hung page. **`reading` means every call is back**: calls run in parallel, so while
+any tool step is still `running` the activity stays `tool` and follows whatever is left —
+"Reading results…" over a search still in flight is the kind of lie this line exists to
+stop telling. It renders only while `streaming` and never when `activity === 'writing'`
+(the text is its own progress report), so a stored turn never shows one.
+
+**`turnsBesideLive(turns, livePrompt)`** is what stops the question rendering twice. The
+backend persists the user row before the first token, so the refetch after `createSession`
+already carries a turn holding the question with nothing under it — which rendered above
+the live turn asking the same thing. It drops that turn only when it is **trailing**, has
+no answer, no steps and no error, and its `question` (already stripped of the server's
+"Attached feed items:" block) matches the prompt. It takes the prompt, not the whole
+`LiveTurn`, so the memo survives a turn's worth of deltas — and the live turn's `followUp`
+reads the filtered list, so the first question of a session stays an `h2`.
 
 **`settle` vs `reset`.** `ChatPage.send`'s `finally` invalidates the session queries and
 dispatches `settle`, not `reset`: a terminal error must stay on screen until the next
@@ -293,12 +305,13 @@ hand-rolled `.prose-chat` block in `src/index.css`, deliberately instead of
 
 ## Tests
 
-`npx vitest run` — **8 files, 109 tests**, `environment: 'node'`, so only pure modules
+`npx vitest run` — **8 files, 122 tests**, `environment: 'node'`, so only pure modules
 are covered: `lib/sse.test.ts` (frames split across chunks, multi-line data,
 heartbeats ignored), `api/chat.test.ts` (`blocksToText`, `groupTurns`,
 `stepsFromMessage`, `toolCallStatus`, source extraction, the sandbox card, the
-formatters), `components/chat/liveTurn.test.ts` (`isForeignSession`, the streamed
-server-tool input, the `activity` transitions, `activityLabel`, `formatElapsed`),
+formatters), `components/chat/liveTurn.test.ts` (`isForeignSession`, `turnsBesideLive`,
+the streamed server-tool input, the `activity` transitions, `activityLabel`,
+`formatElapsed`),
 `api/inbox.test.ts`, `components/ui/preferences.test.ts` (`parseStoredTheme`/
 `resolveTheme`, `parseRail`, `parseLayout`/`pageFromPath`),
 `components/ui/searchKeys.test.ts` (the shared overlay keyboard model),
