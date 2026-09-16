@@ -6,6 +6,7 @@ import {
   collectSources,
   formatMs,
   formatTokens,
+  groupSessionsByDay,
   groupTurns,
   parseSessionId,
   resendPayload,
@@ -17,9 +18,26 @@ import {
   whenLabel,
   type ChatMessage,
   type ContentBlock,
+  type ResearchSession,
   type ToolCallRow,
   type TurnAttachment,
 } from './chat'
+
+function session(overrides: Partial<ResearchSession> = {}): ResearchSession {
+  return {
+    id: 1,
+    title: 'A chat',
+    model: null,
+    archived: false,
+    total_input_tokens: 0,
+    total_output_tokens: 0,
+    created_at: '2026-09-16T09:00:00',
+    updated_at: '2026-09-16T09:00:00',
+    turn_status: 'idle',
+    turn_started_at: null,
+    ...overrides,
+  }
+}
 
 function row(overrides: Partial<ToolCallRow> = {}): ToolCallRow {
   return {
@@ -609,6 +627,35 @@ describe('whenLabel', () => {
 
   it('survives a timestamp it cannot read', () => {
     expect(whenLabel('not a date')).toBe('')
+  })
+})
+
+describe('groupSessionsByDay', () => {
+  it('has nothing to group when there are no chats', () => {
+    expect(groupSessionsByDay([])).toEqual([])
+  })
+
+  it('puts one day of chats under one header, in the order they arrived', () => {
+    const groups = groupSessionsByDay([
+      session({ id: 3, updated_at: '2026-09-16T18:00:00' }),
+      session({ id: 2, updated_at: '2026-09-16T09:00:00' }),
+    ])
+    expect(groups).toHaveLength(1)
+    expect(groups[0].label).toBe('16 Sep 2026')
+    // Newest first is the server's ordering, and this keeps it rather than
+    // sorting again: the list is paged, so a sort here would only ever see the
+    // rows loaded so far.
+    expect(groups[0].sessions.map((row) => row.id)).toEqual([3, 2])
+  })
+
+  it('opens a new group for each day, in the order the days arrive', () => {
+    const groups = groupSessionsByDay([
+      session({ id: 3, updated_at: '2026-09-16T18:00:00' }),
+      session({ id: 2, updated_at: '2026-09-15T23:00:00' }),
+      session({ id: 1, updated_at: '2026-09-15T08:00:00' }),
+    ])
+    expect(groups.map((group) => group.label)).toEqual(['16 Sep 2026', '15 Sep 2026'])
+    expect(groups.map((group) => group.sessions.map((row) => row.id))).toEqual([[3], [2, 1]])
   })
 })
 

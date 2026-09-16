@@ -1230,3 +1230,37 @@ export function whenLabel(timestamp: string): string {
   }
   return `${when.getDate()} ${MONTHS[when.getMonth()]} ${when.getFullYear()}`
 }
+
+/** A day's worth of chats, under the date they were last touched. */
+export interface SessionDay {
+  label: string
+  sessions: ResearchSession[]
+}
+
+/**
+ * The chat list, cut into days.
+ *
+ * The rail shows one date header per day rather than a date on every row: the
+ * list is the whole history, and a column of identical dates is noise on every
+ * row but the first of its day.
+ *
+ * Grouping is on `whenLabel` itself — the *rendered* day, in the viewer's zone —
+ * so a row can never sit under a header that disagrees with it. Input order is
+ * kept and never re-sorted: the server orders by `updated_at` and the list is
+ * paged, so sorting here would only order the rows loaded so far. A run of rows
+ * that comes back to a day already seen therefore opens a second group with the
+ * same label, which is the honest rendering of a list that arrived that way.
+ */
+export function groupSessionsByDay(sessions: ResearchSession[]): SessionDay[] {
+  const days: SessionDay[] = []
+  for (const session of sessions) {
+    const label = whenLabel(session.updated_at)
+    const current = days[days.length - 1]
+    if (current && current.label === label) {
+      current.sessions.push(session)
+    } else {
+      days.push({ label, sessions: [session] })
+    }
+  }
+  return days
+}
