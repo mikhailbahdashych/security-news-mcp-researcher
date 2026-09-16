@@ -15,8 +15,9 @@ import pytest
 from fakes.anthropic import ScriptedAnthropic, turn_text, turn_tool_use
 from httpx2 import ASGITransport
 from sse_util import event_names, payloads_for
-from test_api_sessions import create_session
+from test_api_sessions import create_session, finish_turn
 
+from app.agent import turns
 from app.api import streaming
 from app.api.deps import get_chat_client_factory
 from app.services import settings as settings_service
@@ -162,14 +163,36 @@ async def test_cancel_ends_a_subscribed_stream_with_cancelled_then_done(app, wit
 
 
 async def test_no_api_key_still_persists_the_question_and_streams_the_error(app):
+    """The error turn is three events long and is over before the page can attach.
+
+    It used to be unreachable: the registry had already forgotten the turn, so
+    ``/stream`` answered 204 and the user saw their question and no notice at all
+    — the very thing "persist the question first" exists to prevent. A turn stays
+    replayable for ``RECENT_TURN_S`` after it ends, so the error still arrives.
+    """
     async with _http(app) as http:
         session_id = await create_session(http)
         accepted = await http.post(f"/api/sessions/{session_id}/messages", json={"content": "q"})
         assert accepted.status_code == 202
+        await finish_turn(app, session_id)
+
         stream = await http.get(f"/api/sessions/{session_id}/stream")
-        # The log may already be closed and dropped: either the stream replays it
-        # or the turn is gone and the transcript has the question.
-        if stream.status_code == 200:
-            assert payloads_for(stream.text, "error")[0]["message"] == "no API key configured"
+        assert stream.status_code == 200
+        assert event_names(stream.text) == ["turn_started", "error", "done"]
+        assert payloads_for(stream.text, "error")[0]["message"] == "no API key configured"
         detail = (await http.get(f"/api/sessions/{session_id}")).json()
         assert detail["messages"][0]["kind"] == "user"
+
+
+async def test_a_turn_that_ended_long_ago_is_a_204_again(app, with_key, monkeypatch):
+    """The replay window is short on purpose: the transcript is the record."""
+    monkeypatch.setattr(turns, "RECENT_TURN_S", -1.0)
+    scripted = ScriptedAnthropic([turn_text("answer")])
+    app.dependency_overrides[get_chat_client_factory] = lambda: lambda _key: scripted
+
+    async with _http(app) as http:
+        session_id = await create_session(http)
+        await http.post(f"/api/sessions/{session_id}/messages", json={"content": "q"})
+        await finish_turn(app, session_id)
+
+        assert (await http.get(f"/api/sessions/{session_id}/stream")).status_code == 204

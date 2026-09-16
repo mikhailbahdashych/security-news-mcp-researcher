@@ -51,6 +51,13 @@ logger = logging.getLogger(__name__)
 #: layer, and the two waits are the same promise.
 CANCEL_WAIT_S = 10.0
 
+#: How long a turn stays replayable *after* it has ended. A turn can be over
+#: before the page that started it asks to watch it — an error-only turn is three
+#: events long and finishes inside the POST's own round trip — and without this the
+#: stream answered 204 and the error was never shown at all. Short on purpose: once
+#: the turn is over the transcript is the record, and this is only the hand-off.
+RECENT_TURN_S = 30.0
+
 CANCELLED_MESSAGE = "The turn was stopped before it finished."
 CRASHED_MESSAGE = "The turn failed unexpectedly; see the server log."
 
@@ -116,6 +123,10 @@ class TurnRegistry:
         #: registration. Checking without it let two concurrent POSTs both pass and
         #: start two turns on one transcript, the first of them unreachable.
         self._start_lock = asyncio.Lock()
+        #: The last turn each session finished, with the loop time it ended at, so
+        #: a subscriber that arrives a moment too late still gets the whole log.
+        #: One entry per session, replaced when that session starts another turn.
+        self._recent: dict[int, tuple[RunningTurn, float]] = {}
         #: The in-flight ``_finish`` calls, so a turn that is already past ``done``
         #: is still waited for at shutdown — and so the loop keeps a strong
         #: reference to every one of them.
@@ -132,6 +143,23 @@ class TurnRegistry:
 
     def running_ids(self) -> list[int]:
         return [sid for sid, turn in self._turns.items() if not turn.task.done()]
+
+    def recent(self, session_id: int, *, max_age_s: float | None = None) -> RunningTurn | None:
+        """The turn this session *just* finished, if it ended less than a window ago.
+
+        Its log is closed, so a subscriber replays it and ends immediately — which
+        is exactly what a page that asked to watch a turn that was already over
+        needs: the events, not a 204 and an empty screen.
+        """
+        entry = self._recent.get(session_id)
+        if entry is None:
+            return None
+        turn, ended_at = entry
+        window = RECENT_TURN_S if max_age_s is None else max_age_s
+        if asyncio.get_running_loop().time() - ended_at > window:
+            del self._recent[session_id]
+            return None
+        return turn
 
     # ----------------------------------------------------------------- writes
 
@@ -154,6 +182,9 @@ class TurnRegistry:
         async with self._start_lock:
             if self.is_running(session_id):
                 raise TurnAlreadyRunning(session_id)
+            # The turn that just ended is history the moment a new one starts: a
+            # subscriber must find *this* turn, not the previous one's log.
+            self._recent.pop(session_id, None)
 
             started_at = utcnow()
             log = TurnLog()
@@ -241,6 +272,9 @@ class TurnRegistry:
             return
         turn.finished = True
         self._forget(turn)
+        # Kept, briefly, so ``GET /stream`` can still replay a turn that ended
+        # during the POST that started it.
+        self._recent[turn.session_id] = (turn, asyncio.get_running_loop().time())
         if not turn.log.closed:
             if not saw_done:
                 # A turn that already said ``done`` was not stopped in any way the
@@ -344,6 +378,7 @@ async def mark_interrupted(session_factory: async_sessionmaker[AsyncSession]) ->
 __all__ = [
     "CANCELLED_MESSAGE",
     "CANCEL_WAIT_S",
+    "RECENT_TURN_S",
     "RunningTurn",
     "TurnAlreadyRunning",
     "TurnRegistry",

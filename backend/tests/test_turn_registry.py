@@ -424,3 +424,61 @@ async def test_a_turn_does_not_reorder_the_session_list(session_factory):
 
     await turn.task
     assert await _updated_at(session_factory, session_id) == before
+
+
+# ------------------------------------------------- the just-finished turn's log
+
+
+async def test_a_finished_turn_stays_replayable_for_a_short_while(session_factory, monkeypatch):
+    """A turn can be over before the page that started it asks to watch it.
+
+    An error-only turn is three events long, so it finishes inside the POST's own
+    round trip; with nothing kept, ``GET /stream`` answered 204 and the error was
+    never shown. The log outlives the registration for ``RECENT_TURN_S``.
+    """
+    registry = TurnRegistry()
+    session_id = await _new_session(session_factory)
+    turn = await registry.start(
+        session_id=session_id,
+        session_factory=session_factory,
+        generator=slow_turn(1, 0.01),
+        client=None,
+        prompt="a",
+        attachments=[],
+    )
+    await turn.task
+
+    assert registry.get(session_id) is None
+    assert registry.recent(session_id) is turn
+    assert turn.log.closed is True
+
+    monkeypatch.setattr(turns_module, "RECENT_TURN_S", -1.0)
+    assert registry.recent(session_id) is None
+
+
+async def test_starting_a_turn_drops_the_previous_one_from_the_recent_cache(session_factory):
+    """One entry per session, and the new turn is what ``/stream`` must find."""
+    registry = TurnRegistry()
+    session_id = await _new_session(session_factory)
+    first = await registry.start(
+        session_id=session_id,
+        session_factory=session_factory,
+        generator=slow_turn(1, 0.01),
+        client=None,
+        prompt="a",
+        attachments=[],
+    )
+    await first.task
+    assert registry.recent(session_id) is first
+
+    second = await registry.start(
+        session_id=session_id,
+        session_factory=session_factory,
+        generator=slow_turn(1, 0.01),
+        client=None,
+        prompt="b",
+        attachments=[],
+    )
+    assert registry.recent(session_id) is None
+    assert registry.get(session_id) is second
+    await second.task

@@ -395,11 +395,18 @@ async def stream_session(
 ) -> Response:
     """Attach to the running turn: replay from its start, then follow it.
 
-    A 204 means there is nothing in flight — the transcript is the record, and the
-    client should render that instead of waiting for events nobody will send.
+    A turn that *just* ended is served too, from the registry's short-lived
+    ``recent`` entry: a turn can be over before this request arrives — an
+    error-only turn is three events long and finishes inside the POST's own round
+    trip — and answering 204 there meant the user saw their question and no notice
+    at all. The closed log replays and the stream ends immediately.
+
+    A 204 means there is nothing in flight and nothing just ended — the transcript
+    is the record, and the client should render that instead of waiting for events
+    nobody will send.
     """
     await _load_session(session, session_id)
-    turn = registry.get(session_id)
+    turn = registry.get(session_id) or registry.recent(session_id)
     if turn is None:
         return Response(status_code=status.HTTP_204_NO_CONTENT)
     return EventSourceResponse(
