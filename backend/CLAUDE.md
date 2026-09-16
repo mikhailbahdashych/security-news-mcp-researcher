@@ -248,9 +248,10 @@ turn either: leaving the stream is not a cancel. `POST /sessions/{id}/cancel` an
 `pump_agent_events` registers the consuming task under a namespaced key and cancels it
 on disconnect or on a cancel POST.
 
-`session_key(id) -> "session:{id}"` and `app/api/notes.py::generation_key(gid) ->
-"note:{gid}"` are the two key shapes. `register(key, task)` raises `KeyError` if one is
-already running (chat answers **409**; a generation gets an `api_error` frame) ·
+`app/api/notes.py::generation_key(gid) -> "note:{gid}"` is the only key shape left —
+a chat turn is the `TurnRegistry`'s, not this module's. `register(key, task)` raises
+`KeyError` if one is already running (a generation gets an `api_error` frame; a second
+chat turn is the `TurnRegistry`'s own **409**) ·
 `is_running` · `cancel -> bool` · `cancel_and_wait` (bounded by `CANCEL_WAIT_S = 10`,
 which **lives in `app/agent/turns.py`**; `tasks.py` imports the *module* and reads
 `turns.CANCEL_WAIT_S` at call time, because `from ... import CANCEL_WAIT_S` copies the

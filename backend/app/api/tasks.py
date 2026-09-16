@@ -1,8 +1,10 @@
 """A process-wide registry of in-flight streaming tasks, so they can be cancelled.
 
-Keys are namespaced strings — ``"session:{id}"`` for a chat turn, and Task 6 will
-register ``"note:{generation_id}"`` for a notes generation — so one registry and
-one cancel endpoint pattern serve both.
+Keys are namespaced strings; ``app/api/notes.py::generation_key`` builds the only
+one left, ``"note:{generation_id}"``. A chat turn used to be registered here as
+``"session:{id}"`` and is not any more: it belongs to
+:class:`app.agent.turns.TurnRegistry`, which owns the task for the whole of its
+life rather than for the length of one request.
 
 Why this exists at all: **an SSE disconnect does not stop billing.** When the
 browser goes away, the LLM call keeps running server-side unless something
@@ -27,10 +29,6 @@ logger = logging.getLogger(__name__)
 
 _tasks: dict[str, asyncio.Task] = {}
 _lock = asyncio.Lock()
-
-
-def session_key(session_id: int) -> str:
-    return f"session:{session_id}"
 
 
 async def register(key: str, task: asyncio.Task) -> None:
@@ -107,6 +105,5 @@ __all__ = [
     "clear",
     "is_running",
     "register",
-    "session_key",
     "unregister",
 ]
