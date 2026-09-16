@@ -145,6 +145,11 @@ keystroke is its own request and its own cache entry. Used by `GlobalSearch`, `I
 `Notes`, `ChatPage` (the history filter) and the two item pickers
 (`AttachmentPicker`, `GenerateNotesDialog`).
 
+`lib/useElapsed.ts` — whole seconds since a timestamp, ticking once a second. The
+interval belongs to the component that shows the counter (`chat/TurnProgress`), which is
+mounted only while a turn is on the wire, so the clock is read at mount and never
+resynchronised.
+
 ## `lib/sse.ts` — the POST-SSE reader
 
 The chat turn is a **POST with a JSON body**, so `EventSource` (GET-only) is out.
@@ -191,18 +196,28 @@ a turn does not re-render differently the instant it is refetched.
   its **feed** ("The Hacker News"), taking the title from `collectFeedTitles` /
   `feedTitlesFromCache` — otherwise the same item was a publication in one turn and a
   domain in the next.
+- **The sandbox.** `code_execution` / `bash_code_execution` / `text_editor_*` are one
+  thing to the user: Anthropic's server-side container, which Opus 5 runs its own
+  `web_search`/`web_fetch` calls from. `isSandboxTool` is the single test; the row is
+  named `Sandbox`, tagged `sandbox` (not `code` — that never said *whose* machine ran
+  it), hinted with the first line of `input.code`/`input.command` (or `container start`
+  for the input-less block that opens the container), and its expanded body says in one
+  line what the sandbox is. Its result is read as `stdout`/`stderr`/`exit N` **only when
+  N ≠ 0**, `no output` when there is nothing — and never `encrypted_stdout`.
 - Presentation helpers live here too: `hostOf`, `formatMs`, `formatTokens`, `toolTag`
-  (`local`/`web`/`code`/an MCP server name), `toolHint`, `whenLabel`.
+  (`local`/`web`/`sandbox`/an MCP server name), `toolHint`, `whenLabel`.
 
-Components: `AnswerTurn`, `StepsCard`, `SourcesGrid`, `Composer`, `AttachmentPicker`,
-`HistoryDrawer`, `EmptyResearch`, `TurnError`, `Markdown`.
+Components: `AnswerTurn`, `StepsCard`, `TurnProgress`, `SourcesGrid`, `Composer`,
+`AttachmentPicker`, `HistoryDrawer`, `EmptyResearch`, `TurnError`, `Markdown`.
 
 ## Research: the `liveTurn` reducer
 
 `components/chat/liveTurn.ts` holds **only the in-flight turn**; once the turn ends the
 page refetches the session and the Query cache is the source of truth again.
-`LiveTurn = { sessionId, prompt, streaming, steps, text, interrupted, error, turn, usage }`;
-actions are `start`, `sse`, `failed`, `settle`, `reset`.
+`LiveTurn = { sessionId, prompt, streaming, steps, text, interrupted, error, turn, usage,
+activity, activeTool, startedAt }`; actions are `start`, `sse`, `failed`, `settle`,
+`reset`. `start` carries its own `startedAt` (`Date.now()` at the call site) so the
+reducer stays pure.
 
 `steps` is **one flat `LiveStep[]`** (thinking blocks and tool calls in arrival order),
 not "the thinking" plus "the cards" — a turn thinks, calls a tool, thinks again, and
@@ -215,14 +230,40 @@ it** (fragments are only valid JSON once concatenated); `tool_result`/
 `server_tool_result` patch the step by `tool_use_id`; `error` stores the payload;
 `done` clears `streaming`.
 
+**Server tools stream their input too.** `server_tool_use` opens with `input: {}` and the
+real arguments arrive as `input_json_delta` like any other tool's, so the reducer seeds
+`partialJson` with `''` (not `'{}'`, which would never concatenate into valid JSON) and
+`liveSteps` prefers the parsed buffer whenever it yields a **non-empty** object. An empty
+object is truthy: preferring `input` left every live `web_search` row with no query and
+every `code_execution` row with no code until a reload.
+
+**The progress line.** `activity` (`starting` → `thinking` → `tool` → `reading` →
+`writing`) plus `activeTool` is what `AnswerTurn` renders under the steps card, through
+`TurnProgress` and `activityLabel(activity, activeTool)`, with an elapsed counter from
+`lib/useElapsed.ts` + `formatElapsed`. It is the only thing moving between a tool result
+and the next output — settled rows show ticks, and a 20 s thinking phase after tools read
+as a hung page. A result clears `activeTool` only when the id matches: calls run in
+parallel and a sibling finishing first does not mean the turn stopped waiting. It renders
+only while `streaming` and never when `activity === 'writing'` (the text is its own
+progress report), so a stored turn never shows one.
+
 **`settle` vs `reset`.** `ChatPage.send`'s `finally` invalidates the session queries and
 dispatches `settle`, not `reset`: a terminal error must stay on screen until the next
 send. `settle` drops everything the refetched transcript can render and keeps only
 errors it cannot — `RENDERED_BY_TRANSCRIPT = {refusal, max_tokens}` are dropped because
 `errorFromStopReason` re-renders them; `cancelled`/`connection`/`rate_limit` survive.
-`reset` is for genuinely leaving the conversation. `live.sessionId` is stamped in
-`start` **before** `send` navigates to `/chat/:id`, so "the route changed" alone never
-drops a running turn.
+`reset` is for genuinely leaving the conversation.
+
+**`isForeignSession(live, routeSessionId)` is the only test for "the user left."** It is
+true only when the route names a *different* session; a route with **no** id is never
+foreign. react-router 7 wraps `BrowserRouter`'s location update in
+`React.startTransition`, so the urgent `start` dispatch renders **before** the navigation
+to `/chat/:id` lands — comparing `live.sessionId !== sessionId` reset the turn on the very
+first render of every chat started from the empty view (and of the Inbox's "Research
+these" handoff), and every SSE event after it landed on an invisible turn. Leaving
+deliberately still resets: `newChat`, the history drawer and `remove` all dispatch `reset`
+themselves. The one case this lets through is a browser-back to `/chat` mid-turn, where
+keeping the turn on screen is the lesser evil.
 
 **Stop needs both halves**: `abort.current?.abort()` stops the browser reading, and
 `POST /api/sessions/:id/cancel` stops the server billing.
@@ -252,10 +293,12 @@ hand-rolled `.prose-chat` block in `src/index.css`, deliberately instead of
 
 ## Tests
 
-`npx vitest run` — **7 files, 83 tests**, `environment: 'node'`, so only pure modules
+`npx vitest run` — **8 files, 109 tests**, `environment: 'node'`, so only pure modules
 are covered: `lib/sse.test.ts` (frames split across chunks, multi-line data,
 heartbeats ignored), `api/chat.test.ts` (`blocksToText`, `groupTurns`,
-`stepsFromMessage`, `toolCallStatus`, source extraction, the formatters),
+`stepsFromMessage`, `toolCallStatus`, source extraction, the sandbox card, the
+formatters), `components/chat/liveTurn.test.ts` (`isForeignSession`, the streamed
+server-tool input, the `activity` transitions, `activityLabel`, `formatElapsed`),
 `api/inbox.test.ts`, `components/ui/preferences.test.ts` (`parseStoredTheme`/
 `resolveTheme`, `parseRail`, `parseLayout`/`pageFromPath`),
 `components/ui/searchKeys.test.ts` (the shared overlay keyboard model),
