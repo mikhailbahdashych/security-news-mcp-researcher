@@ -106,7 +106,14 @@ export default function ArchivedChatsDialog({ onClose }: ArchivedChatsDialogProp
                   <p className="mt-px text-[10.5px] text-faint">{whenLabel(session.updated_at)}</p>
                 </div>
                 <div className="flex shrink-0 items-center gap-1.5">
-                  <Button size="sm" onClick={() => open(session.id)}>
+                  <Button
+                    size="sm"
+                    // Both actions go down with the row while it is saving:
+                    // opening a chat whose unarchive is still in flight raced
+                    // the navigation against the invalidation.
+                    disabled={busyId === session.id}
+                    onClick={() => open(session.id)}
+                  >
                     Open
                   </Button>
                   <Button

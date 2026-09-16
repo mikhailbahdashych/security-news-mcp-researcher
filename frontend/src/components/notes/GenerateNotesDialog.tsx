@@ -3,7 +3,7 @@ import { useCallback, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 
 import type { ErrorPayload } from '../../api/chat'
-import { fetchSessions } from '../../api/chat'
+import { fetchSessions, sessionsQueryKey } from '../../api/chat'
 import { fetchItems, type FeedItem } from '../../api/inbox'
 import {
   cancelGeneration,
@@ -93,11 +93,17 @@ export default function GenerateNotesDialog({
       }),
   })
 
-  // Its own key on purpose: the chat's history drawer caches `sessionsQueryKey` as an
-  // *infinite* query, and a plain useQuery sharing that key reads back
-  // `{pages: [...]}` — the dropdown would silently come up empty, and whichever
-  // of the two loaded second would find the wrong shape in the cache.
-  const sessions = useQuery({ queryKey: ['notes-picker-sessions'], queryFn: () => fetchSessions() })
+  // Its own leaf under the `['sessions']` prefix. It cannot share
+  // `sessionsListKey`: the rail's chat list caches that as an *infinite* query
+  // and a plain `useQuery` on the same key reads back `{pages: [...]}`, so
+  // whichever of the two loaded second would find the wrong shape and the
+  // dropdown would come up empty. But the clash is with that key, not with the
+  // prefix — and sitting under it is what makes a rename or a delete from the
+  // rail reach this dropdown, which a key of its own never did.
+  const sessions = useQuery({
+    queryKey: [...sessionsQueryKey, 'picker'],
+    queryFn: () => fetchSessions(),
+  })
   const settings = useQuery({ queryKey: settingsQueryKey, queryFn: fetchSettings })
 
   // Selected items always render, even when the current filter excludes them —

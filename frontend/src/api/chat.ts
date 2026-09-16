@@ -100,12 +100,14 @@ export const DEFAULT_SESSION_FILTERS: SessionFilters = { q: '', archived: 'false
  * The prefix every sessions list shares.
  *
  * Invalidating this one key refreshes every filtered variant below it, which is
- * what a rename, an archive or a delete needs — it cannot know which filter the
- * history drawer is showing.
+ * what a rename, an archive or a delete needs — it cannot know whether the rail's
+ * list or Settings' archived dialog is the one on screen.
  */
 export const sessionsQueryKey = ['sessions'] as const
+// `q` is trimmed here because `fetchSessions` trims it too: untrimmed, `'cve'`
+// and `'cve '` were two cache entries for one request.
 export const sessionsListKey = (filters: SessionFilters) =>
-  ['sessions', 'list', filters.archived, filters.q] as const
+  ['sessions', 'list', filters.archived, filters.q.trim()] as const
 export const sessionQueryKey = (id: number) => ['session', id] as const
 
 export function fetchSessions(
@@ -169,8 +171,8 @@ export const streamUrl = (id: number): string => `/api/sessions/${id}/stream`
 /**
  * Which sessions have a turn in flight.
  *
- * One key for the whole app: the rail's dot, the drawer's marks and the header
- * all read the same answer, and every place that starts or ends a turn
+ * One key for the whole app: the rail's dot, its chat list's marks and the chat
+ * header all read the same answer, and every place that starts or ends a turn
  * invalidates it. There is no interval — see `lib/useRunningTurns.ts`.
  */
 export const runningSessionsKey = ['sessions', 'running'] as const
@@ -1211,7 +1213,7 @@ const MONTHS = [
 ] as const
 
 /**
- * How the history drawer dates a chat: `16 Sep 2026`, always.
+ * How the app dates a chat: `16 Sep 2026`, always.
  *
  * Every row carries its exact date. "today" / "yesterday" / a weekday name read
  * well for the top of the list and told you nothing for the rest of it — and a
