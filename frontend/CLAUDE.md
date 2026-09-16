@@ -101,7 +101,9 @@ these rather than inventing a fifth slightly-different secondary button. Primiti
 
 - `Icon.tsx` is the whole icon set as inline paths (one 1.6 stroke weight in a 20×20
   box). **Do not add an icon library.** Icons are `aria-hidden`; an icon-only control
-  gets its label from `IconButton`, not from the glyph.
+  gets its label from `IconButton`, not from the glyph. `IconButton`'s props are
+  `ComponentPropsWithRef<'button'>`, so it **takes a `ref`** — `ChatPage` holds one on
+  the history opener so a click on it is not a click outside the drawer.
 - `modal.ts::useModalPanel(onClose)` is the keyboard contract every overlay owes:
   focus in on mount and back out on unmount, Escape from anywhere, Tab cycling inside
   the panel. Mount the panel **conditionally** — "open" is this hook's mount. A panel
@@ -313,6 +315,14 @@ before anything inside re-renders the node the event landed on. Nothing in this 
 renders into a portal, so the row menu and the delete dialog are DOM children of the
 panel and one `contains` check covers them.
 
+**Clicking away saves a rename in flight**; Escape discards it. It used to be the
+input's `onBlur` that saved, and closing on `pointerdown` took that away — the drawer
+unmounts before focus moves, and an element removed from the DOM fires no `blur`. So
+the handler commits first and closes second, through a `useEffectEvent` — which is
+also what keeps the `document` listener from re-subscribing on every keystroke. The
+`onClose` it is given is a `useCallback` in `ChatPage` for the same reason: an inline
+arrow re-subscribed the drawer's Escape listener on every streamed delta.
+
 **`/chat/:id` is parsed, not `Number()`d.** `api/chat.ts::parseSessionId(raw)` returns
 an id only for `/^\d+$/` and a positive safe integer; `Number('abc')` is `NaN` and
 `Number('1.5')` is `1.5`, and both reached the API, which answers **422** — a status
@@ -323,9 +333,12 @@ own, because a disabled query never errors.
 **A 404 from `GET /sessions/{id}` leaves the session.** `isNotFound(detail.error)`
 drives an effect that abandons the live turn, dispatches `reset` and calls
 `openSession(null, true)` — `navigate('/chat', {replace: true})` routed, a cleared
-`embeddedSessionId` embedded. Only a 404: a backend that is down keeps today's error
-on screen. No sessions-list invalidation — the list is `enabled: historyOpen` and the
-in-app delete already invalidates on success.
+`embeddedSessionId` embedded — and invalidates `sessionsQueryKey`, because the
+likeliest 404 is a chat deleted from another tab and the drawer's cached row would
+otherwise bounce the user for the 30 s of `staleTime`. Only a 404: a backend that is
+down keeps today's error on screen. The detail query overrides the app-wide
+`retry: 1` with `retry: (n, e) => !isNotFound(e) && n < 1`, or a dead id is asked for
+twice and the redirect waits out the backoff under the dead URL.
 
 **Stop needs both halves**: `abort.current?.abort()` stops the browser reading, and
 `POST /api/sessions/:id/cancel` stops the server billing. The id is the **turn's**
@@ -367,8 +380,10 @@ hand-rolled `.prose-chat` block in `src/index.css`, deliberately instead of
 
 ## Tests
 
-`npx vitest run` — **10 files, 160 tests**, `environment: 'node'`, so only pure modules
-are covered: `lib/sse.test.ts` (frames split across chunks, multi-line data,
+`npx vitest run` — **10 files, 160 tests**, `environment: 'node'`, `TZ` pinned to UTC
+(`test.env` in `vite.config.ts`, because the app renders the viewer's *local* day of a
+naive-UTC stamp and UTC+13/+14 roll a midday one over), so only pure modules are
+covered: `lib/sse.test.ts` (frames split across chunks, multi-line data,
 heartbeats ignored), `api/chat.test.ts` (`blocksToText`, `groupTurns`, `parseSessionId`,
 `stepsFromMessage`, `toolCallStatus`, source extraction, the sandbox card, the
 formatters), `components/chat/liveTurn.test.ts` (`isForeignSession`, `turnsBesideLive`,
