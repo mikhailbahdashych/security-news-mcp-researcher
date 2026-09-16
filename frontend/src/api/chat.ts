@@ -324,7 +324,7 @@ export interface TurnStep {
   key: string
   kind: 'thinking' | 'tool'
   name: string
-  /** `local` / `web` / `code` / `mcp · files`; thinking rows have none. */
+  /** `local` / `web` / `sandbox` / `mcp · files`; thinking rows have none. */
   tag: string | null
   /** The one line shown while the row is collapsed. */
   hint: string
@@ -362,6 +362,15 @@ export interface Turn {
   steps: TurnStep[]
   answer: string
   error: ErrorPayload | null
+  /**
+   * How many assistant messages were folded in.
+   *
+   * Not for rendering: it is how `turnsBesideLive` tells a question the model
+   * has not answered *yet* from one it answered with nothing. An assistant row
+   * exists whatever it contained, so zero means the turn never got a reply at
+   * all — which is the only state the live turn can be echoing.
+   */
+  replies: number
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -407,11 +416,38 @@ export function formatTokens(count: number): string {
 }
 
 /**
+ * Anthropic's server-side code interpreter, and the editor that shares its
+ * container.
+ *
+ * Opus 5 runs its own `web_search`/`web_fetch` calls from inside this, so the
+ * blocks turn up on most web turns and the user has to be able to tell them
+ * apart from anything running on their own machine.
+ *
+ * **The source is half the test.** MCP tool names are user-supplied and
+ * `text_editor_write` is an ordinary name for a filesystem server to expose —
+ * but a stdio MCP server runs on the user's own machine, so captioning its call
+ * "ran in Anthropic's sandbox" is a false provenance claim in the one card that
+ * exists so the work can be audited.
+ */
+export function isSandboxTool(
+  source: string | null | undefined,
+  name: string | null | undefined,
+): boolean {
+  const tool = name ?? ''
+  return source === 'server' && (tool.includes('code_execution') || tool.includes('text_editor'))
+}
+
+/** What the expanded sandbox row says before the code itself. */
+const SANDBOX_NOTE =
+  "Code the model ran in Anthropic's sandbox to post-process web search/fetch results."
+
+/**
  * The badge on a tool row.
  *
- * `local` and `web` are the two the user thinks in. `code` is Anthropic's code
- * interpreter, which Opus 5 uses as a container for its own web calls, so it
- * turns up often enough to deserve a name of its own rather than `server`.
+ * `local` and `web` are the two the user thinks in. `sandbox` is Anthropic's
+ * code interpreter, which Opus 5 uses as a container for its own web calls, so
+ * it turns up often enough to deserve a name of its own rather than `server` —
+ * and `code` was not one, because it never said *whose* machine ran it.
  */
 export function toolTag(
   source: string | null,
@@ -427,7 +463,7 @@ export function toolTag(
     if (tool === 'web_search' || tool === 'web_fetch') {
       return 'web'
     }
-    return tool.includes('code_execution') || tool.includes('text_editor') ? 'code' : 'server'
+    return isSandboxTool(source, tool) ? 'sandbox' : 'server'
   }
   return 'local'
 }
@@ -435,10 +471,19 @@ export function toolTag(
 /** The keys worth showing when a tool call is collapsed, most telling first. */
 const HINT_KEYS = ['q', 'query', 'url', 'path', 'command', 'code', 'item_id', 'id']
 
+/** A sandbox hint is one line of source, so it gets a tighter cut than prose. */
+const SANDBOX_HINT_LIMIT = 80
+
 /** A one-line summary of a tool's arguments. */
-export function toolHint(name: string | null, input: unknown): string {
+export function toolHint(source: string | null, name: string | null, input: unknown): string {
   if (!isRecord(input)) {
     return ''
+  }
+  if (isSandboxTool(source, name)) {
+    // An input-less `code_execution` block is the API allocating the container,
+    // not a call the model made with no arguments — `{}` said neither.
+    const source = str(input.code) ?? str(input.command)
+    return source ? firstLine(source, SANDBOX_HINT_LIMIT) : 'container start'
   }
   if (name === 'get_feed_item' && typeof input.item_id === 'number') {
     return `item #${input.item_id}`
@@ -460,6 +505,17 @@ export function toolHint(name: string | null, input: unknown): string {
   return scalars.map(([key, value]) => `${key}: ${value}`).join(' · ')
 }
 
+/**
+ * What a collapsed row says while its arguments are still on the wire.
+ *
+ * `input_json_delta` fragments are not JSON until the last one lands, so there
+ * is no key to read out of them — but a blank hint over a buffer that is
+ * visibly filling reads as "this tool was called with nothing".
+ */
+function streamingHint(raw: string | null | undefined): string {
+  return raw && raw.trim() !== '' ? '…' : ''
+}
+
 /** The first non-empty line, collapsed and cut to `limit`. */
 export function firstLine(text: string, limit = 200): string {
   const line = text.split('\n').find((candidate) => candidate.trim() !== '') ?? ''
@@ -477,6 +533,24 @@ function prettyJson(value: unknown): string | null {
   } catch {
     return null
   }
+}
+
+/**
+ * The expanded row's argument block.
+ *
+ * The sandbox is the exception: `{"code": "import json\\nresult = …"}` is the
+ * wire format, not source anyone can check, and the point of the card is that
+ * the work is auditable. So a sandbox step shows the code or the command
+ * verbatim, newlines and all, and everything else stays pretty-printed JSON.
+ */
+function stepArgs(spec: ToolStepSpec): string | null {
+  if (isSandboxTool(spec.source, spec.name) && isRecord(spec.input)) {
+    const source = str(spec.input.code) ?? str(spec.input.command)
+    if (source) {
+      return source
+    }
+  }
+  return prettyJson(spec.input) ?? str(spec.rawInput ?? null)
 }
 
 /** A local or MCP tool's output is a string under `content`. */
@@ -507,12 +581,40 @@ function linksFromResult(result: unknown): StepLink[] {
 }
 
 /**
+ * What a sandbox run actually did: what it printed, and how it ended.
+ *
+ * `exit 0` under an empty body read as a result when it is the absence of one,
+ * and `encrypted_stdout` — an opaque blob the API hands back for replay — is
+ * never shown.
+ */
+function summariseSandboxResult(content: Record<string, unknown>, code: number): string {
+  const lines: string[] = []
+  const stdout = str(content.stdout)
+  if (stdout) {
+    lines.push(truncate(stdout.trim()))
+  }
+  const stderr = str(content.stderr)
+  if (stderr) {
+    lines.push(truncate(stderr.trim()))
+  }
+  if (code !== 0) {
+    lines.push(`exit ${code}`)
+  }
+  return lines.length > 0 ? lines.join('\n') : 'no output'
+}
+
+/**
  * A server tool's result, flattened into something readable.
  *
  * The shapes are documented on the backend's `ServerToolResult`: a web fetch, a
  * code run and an error all come back as objects with nothing in common.
  */
 function summariseServerResult(content: Record<string, unknown>): string {
+  // `return_code` is what marks a sandbox run, and it is the only one of these
+  // shapes whose fields are worth reading on their own terms.
+  if (typeof content.return_code === 'number') {
+    return summariseSandboxResult(content, content.return_code)
+  }
   const lines: string[] = []
   const document = isRecord(content.content) ? content.content : null
   const title = document ? str(document.title) : null
@@ -530,17 +632,6 @@ function summariseServerResult(content: Record<string, unknown>): string {
   const errorMessage = str(content.error_message)
   if (errorMessage) {
     lines.push(errorMessage)
-  }
-  const stdout = str(content.stdout)
-  if (stdout) {
-    lines.push(stdout)
-  }
-  const stderr = str(content.stderr)
-  if (stderr) {
-    lines.push(stderr)
-  }
-  if (typeof content.return_code === 'number') {
-    lines.push(`exit ${content.return_code}`)
   }
   return lines.join('\n')
 }
@@ -708,13 +799,15 @@ export function toolStep(spec: ToolStepSpec): TurnStep {
   return {
     key: spec.key,
     kind: 'tool',
-    name: spec.name ?? 'tool',
+    // `code_execution` / `bash_code_execution` / `text_editor_*` are three
+    // names for one thing the user cares about: the model's sandbox.
+    name: isSandboxTool(spec.source, spec.name) ? 'Sandbox' : (spec.name ?? 'tool'),
     tag: toolTag(spec.source, spec.name, spec.serverName),
-    hint: toolHint(spec.name, spec.input),
+    hint: toolHint(spec.source, spec.name, spec.input) || streamingHint(spec.rawInput),
     status: spec.status,
     durationMs: spec.durationMs ?? null,
-    body: null,
-    args: prettyJson(spec.input) ?? str(spec.rawInput ?? null),
+    body: isSandboxTool(spec.source, spec.name) ? SANDBOX_NOTE : null,
+    args: stepArgs(spec),
     links,
     preview: spec.preview !== undefined && spec.preview !== null
       ? truncate(spec.preview)
@@ -916,6 +1009,7 @@ export function groupTurns(messages: ChatMessage[], knownTitles?: FeedTitles): T
         steps: [],
         answer: '',
         error: null,
+        replies: 0,
       })
       continue
     }
@@ -925,6 +1019,7 @@ export function groupTurns(messages: ChatMessage[], knownTitles?: FeedTitles): T
       // API, but a hand-edited database should not crash the page.
       continue
     }
+    turn.replies += 1
     turn.steps.push(...stepsFromMessage(message, feedTitles))
     const text = blocksToText(message.content_json).trim()
     if (text) {

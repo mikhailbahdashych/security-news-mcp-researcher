@@ -3,7 +3,6 @@ import { PILL, cx } from '../ui/classes'
 import Composer from './Composer'
 
 interface EmptyResearchProps {
-  streaming: boolean
   /** The split view's right pane: it did not ask for the caret. */
   embedded: boolean
   attached: FeedItem[]
@@ -22,9 +21,14 @@ const SUGGESTIONS = [
   "Draft Monday's meeting notes",
 ]
 
-/** The page before there is anything to read. */
+/**
+ * The page before there is anything to read.
+ *
+ * Never on screen while a turn streams: `ChatPage`'s `empty` requires no live
+ * prompt, and a streaming turn always has one. So nothing here takes a
+ * `streaming` flag — the composer and the chips cannot be reached mid-turn.
+ */
 export default function EmptyResearch({
-  streaming,
   embedded,
   attached,
   onAttach,
@@ -46,7 +50,7 @@ export default function EmptyResearch({
           // wrong for a pane that merely appeared beside it — the caret would
           // jump out of whatever they were reading on the left.
           autoFocus={!embedded}
-          streaming={streaming}
+          streaming={false}
           attached={attached}
           onAttach={onAttach}
           onDetach={onDetach}
@@ -60,11 +64,10 @@ export default function EmptyResearch({
             <button
               key={suggestion}
               type="button"
-              disabled={streaming}
               onClick={() => onSend(suggestion)}
               className={cx(
                 PILL,
-                'transition-colors duration-150 hover:border-faint hover:text-ink disabled:opacity-40',
+                'transition-colors duration-150 hover:border-faint hover:text-ink',
               )}
             >
               {suggestion}
