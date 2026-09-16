@@ -7,6 +7,7 @@ import {
   formatMs,
   formatTokens,
   groupTurns,
+  resendPayload,
   stepsFromMessage,
   toolCallStatus,
   toolHint,
@@ -14,7 +15,9 @@ import {
   toolTag,
   whenLabel,
   type ChatMessage,
+  type ContentBlock,
   type ToolCallRow,
+  type TurnAttachment,
 } from './chat'
 
 function row(overrides: Partial<ToolCallRow> = {}): ToolCallRow {
@@ -699,5 +702,38 @@ describe('the sandbox card', () => {
         status: 'ok',
       }).args,
     ).toBe('{\n  "q": "kev"\n}')
+  })
+})
+
+/** A stored user row, with the "Attached feed items:" block the server appends. */
+function userMessage(id: number, text: string, attachments: TurnAttachment[]): ChatMessage {
+  const blocks: ContentBlock[] = [{ type: 'text', text }]
+  if (attachments.length > 0) {
+    blocks.push({
+      type: 'text',
+      text: [
+        'Attached feed items:',
+        ...attachments.map((item) => `- id ${item.id} · ${item.title} · ${item.url ?? ''}`),
+      ].join('\n'),
+    })
+  }
+  return message({ id, role: 'user', kind: 'user', content_json: blocks })
+}
+
+function assistantText(id: number, text: string): ChatMessage {
+  return message({ id, content_json: [{ type: 'text', text }] })
+}
+
+describe('resendPayload', () => {
+  it('rebuilds the last question and its attachments', () => {
+    const messages = [
+      userMessage(1, 'first', []),
+      assistantText(2, 'a'),
+      userMessage(3, 'second', [{ id: 9, title: 'Item nine', url: 'https://example.test/9' }]),
+    ]
+    expect(resendPayload(messages)).toEqual({ content: 'second', attached_item_ids: [9] })
+  })
+  it('is null with no user message', () => {
+    expect(resendPayload([])).toBeNull()
   })
 })

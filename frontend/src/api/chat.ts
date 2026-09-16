@@ -1,6 +1,15 @@
 import { apiDelete, apiGet, apiPatch, apiPost } from './client'
 import { parseUtc } from '../lib/dates'
 
+/**
+ * Where the session's own turn stands, server-side.
+ *
+ * A turn belongs to the session, not to the page that started it: it keeps
+ * running with nobody watching, so the row is what tells a page arriving late
+ * whether to attach. `interrupted` is a turn a backend restart cut short.
+ */
+export type TurnStatus = 'idle' | 'running' | 'interrupted'
+
 export interface ResearchSession {
   id: number
   title: string | null
@@ -10,6 +19,9 @@ export interface ResearchSession {
   total_output_tokens: number
   created_at: string
   updated_at: string
+  turn_status: TurnStatus
+  /** Naive UTC, like every other timestamp — and null unless a turn is running. */
+  turn_started_at: string | null
 }
 
 export interface SessionPage {
@@ -133,7 +145,56 @@ export const cancelTurn = (id: number): Promise<{ cancelled: boolean }> =>
 
 export const messagesUrl = (id: number): string => `/api/sessions/${id}/messages`
 
-/** The SSE payloads, mirroring the backend's wire contract. */
+/** `POST /sessions/:id/messages`: the turn was accepted and is already running. */
+export interface TurnAccepted {
+  turn_id: string
+  session_id: number
+  /** Naive UTC. */
+  started_at: string
+}
+
+/**
+ * Ask a question. The answer is *not* on this response.
+ *
+ * The POST answers 202 as soon as the turn is running server-side; watching it
+ * is a separate attachment to `streamUrl`, which is what lets the turn outlive
+ * the page that asked.
+ */
+export const startTurn = (
+  id: number,
+  body: { content: string; attached_item_ids: number[] },
+): Promise<TurnAccepted> => apiPost<TurnAccepted>(`/sessions/${id}/messages`, body)
+
+/** The turn's event stream: replayed from its first event, then followed live. */
+export const streamUrl = (id: number): string => `/api/sessions/${id}/stream`
+
+/**
+ * Which sessions have a turn in flight.
+ *
+ * One key for the whole app: the rail's dot, the drawer's marks and the header
+ * all read the same answer, and every place that starts or ends a turn
+ * invalidates it. There is no interval — see `lib/useRunningTurns.ts`.
+ */
+export const runningSessionsKey = ['sessions', 'running'] as const
+
+export const fetchRunningSessions = (): Promise<{ session_ids: number[] }> =>
+  apiGet<{ session_ids: number[] }>('/sessions/running')
+
+// The SSE payloads, mirroring the backend's wire contract.
+
+/**
+ * The first event of every turn log, produced by the registry rather than the
+ * runner: what a page that did not start this turn needs to draw it — the
+ * question, its chips and the elapsed counter's zero.
+ */
+export interface TurnStartedPayload {
+  turn_id: string
+  session_id: number
+  prompt: string
+  attachments: TurnAttachment[]
+  /** Naive UTC. */
+  started_at: string
+}
 export interface TurnStartPayload {
   turn: number
 }
@@ -948,6 +1009,26 @@ export function attachmentsFromMessage(message: ChatMessage): TurnAttachment[] {
     })
   }
   return attachments
+}
+
+/**
+ * What "Send again" re-sends after an interrupted turn: the last question as
+ * typed, and the ids of the items that were pinned to it.
+ *
+ * The ids are read back off the block the server wrote, because the ones the
+ * browser sent are long gone by the time the page is reloaded.
+ */
+export function resendPayload(
+  messages: ChatMessage[],
+): { content: string; attached_item_ids: number[] } | null {
+  const last = [...messages].reverse().find((message) => message.kind === 'user')
+  if (!last) {
+    return null
+  }
+  return {
+    content: questionFromMessage(last),
+    attached_item_ids: attachmentsFromMessage(last).map((attachment) => attachment.id),
+  }
 }
 
 /**

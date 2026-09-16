@@ -15,6 +15,7 @@ import {
   type Turn,
   type TurnAttachment,
   type TurnEndPayload,
+  type TurnStartedPayload,
   type TurnStartPayload,
   type TurnStep,
 } from '../../api/chat'
@@ -160,6 +161,9 @@ export type LiveAction =
       attachments: TurnAttachment[]
       token: number
     }
+  // Joining a turn this page did not start. It carries no prompt: that arrives
+  // in the replayed `turn_started`, which is the log's first event.
+  | { kind: 'attach'; sessionId: number; token: number }
   | { kind: 'sse'; event: string; payload: unknown; token: number }
   | { kind: 'failed'; error: ErrorPayload; token: number }
   | { kind: 'settle'; token: number }
@@ -221,7 +225,12 @@ function patchTool(steps: LiveStep[], toolUseId: string, patch: Partial<LiveTool
 }
 
 export function liveTurnReducer(state: LiveTurn, action: LiveAction): LiveTurn {
-  if (action.kind !== 'reset' && action.kind !== 'start' && action.token !== state.token) {
+  if (
+    action.kind !== 'reset' &&
+    action.kind !== 'start' &&
+    action.kind !== 'attach' &&
+    action.token !== state.token
+  ) {
     // A late frame from a turn the user has already left behind.
     return state
   }
@@ -237,6 +246,19 @@ export function liveTurnReducer(state: LiveTurn, action: LiveAction): LiveTurn {
         attachments: action.attachments,
         streaming: true,
         startedAt: action.startedAt,
+      }
+    case 'attach':
+      // Streaming with nothing to show yet: that is what keeps the composer
+      // disabled and the progress line honest while the log replays. The clock
+      // has to start somewhere — `turn_started` corrects it to the server's own
+      // start time one event later.
+      return {
+        ...emptyTurn,
+        token: action.token,
+        sessionId: action.sessionId,
+        streaming: true,
+        activity: 'starting',
+        startedAt: Date.now(),
       }
     case 'failed':
       return { ...state, streaming: false, error: action.error }
@@ -255,6 +277,22 @@ export function liveTurnReducer(state: LiveTurn, action: LiveAction): LiveTurn {
 
   const { event, payload } = action
   switch (event) {
+    case 'turn_started': {
+      // The log's opening event, replayed to everyone who attaches. It is what
+      // fills in a turn this page did not start — and, for the page that did,
+      // it restates what `start` already set.
+      const started = payload as TurnStartedPayload
+      return {
+        ...state,
+        sessionId: started.session_id,
+        prompt: started.prompt,
+        attachments: started.attachments ?? [],
+        // Server times are naive UTC, so the zone designator has to be put back
+        // on or the counter is out by the browser's offset.
+        startedAt: Date.parse(`${started.started_at}Z`),
+        activity: 'starting',
+      }
+    }
     case 'turn_start':
       return {
         ...state,

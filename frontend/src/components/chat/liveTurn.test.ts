@@ -594,3 +594,39 @@ describe('showsProgress', () => {
     expect(showsProgress(true, undefined)).toBe(false)
   })
 })
+
+describe('attaching to a running turn', () => {
+  it('turn_started fills the turn the way start does', () => {
+    let state = liveTurnReducer(emptyTurn, { kind: 'attach', sessionId: 12, token: 3 })
+    expect(state.streaming).toBe(true)
+    expect(state.prompt).toBeNull()
+    state = liveTurnReducer(state, {
+      kind: 'sse',
+      token: 3,
+      event: 'turn_started',
+      payload: {
+        turn_id: 'abc',
+        session_id: 12,
+        prompt: 'what happened?',
+        attachments: [{ id: 3, title: 'An item', url: 'https://example.test/a' }],
+        started_at: '2026-09-16T10:00:00',
+      },
+    })
+    expect(state.prompt).toBe('what happened?')
+    expect(state.attachments).toEqual([{ id: 3, title: 'An item', url: 'https://example.test/a' }])
+    expect(state.startedAt).toBe(Date.parse('2026-09-16T10:00:00Z'))
+    expect(state.sessionId).toBe(12)
+    expect(state.activity).toBe('starting')
+  })
+
+  it('a turn_started from a stale token is ignored', () => {
+    const state = liveTurnReducer(emptyTurn, { kind: 'attach', sessionId: 12, token: 3 })
+    const next = liveTurnReducer(state, {
+      kind: 'sse',
+      token: 2,
+      event: 'turn_started',
+      payload: { turn_id: 'x', session_id: 12, prompt: 'p', attachments: [], started_at: '2026-09-16T10:00:00' },
+    })
+    expect(next).toBe(state)
+  })
+})
