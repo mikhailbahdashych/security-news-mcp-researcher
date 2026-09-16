@@ -169,13 +169,16 @@ export default function ChatList({ activeId }: ChatListProps) {
     <div className="mt-1.5 flex min-h-0 flex-1 flex-col">
       <div className="mx-1 mb-2 h-px bg-line" />
 
+      {/* `tone="bg"` because the rail is `bg-panel`, and no size override: two
+          padding utilities on one element are resolved by the stylesheet's own
+          order rather than by the class list, so "smaller" would be a coin toss. */}
       <Input
         type="search"
+        tone="bg"
         value={search}
         placeholder="Filter chats…"
         aria-label="Filter chats"
         onChange={(event) => setSearch(event.target.value)}
-        className="px-2.5 py-1 text-[11.5px]"
       />
 
       <div ref={scroller} className="-mx-1 mt-1.5 min-h-0 flex-1 overflow-y-auto px-1">
@@ -187,7 +190,9 @@ export default function ChatList({ activeId }: ChatListProps) {
         />
 
         {days.map((day) => (
-          <div key={day.label}>
+          // Keyed on the first row, not on the label: two runs of the same day
+          // can arrive as two groups, and duplicate keys are React's own bug.
+          <div key={day.sessions[0].id}>
             <p className={cx(SECTION_LABEL, 'px-1.5 pt-2.5 pb-1')}>{day.label}</p>
 
             {day.sessions.map((session) => {
@@ -206,7 +211,7 @@ export default function ChatList({ activeId }: ChatListProps) {
                           commit(session.id)
                         }
                       }}
-                      className="px-2 py-1 text-[11.5px]"
+                      tone="bg"
                     />
                   </div>
                 )
