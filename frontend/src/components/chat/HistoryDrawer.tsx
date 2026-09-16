@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type RefObject } from 'react'
+import { useEffect, useEffectEvent, useRef, useState, type RefObject } from 'react'
 
 import { whenLabel, type ResearchSession } from '../../api/chat'
 import { ApiError } from '../../api/client'
@@ -98,6 +98,36 @@ export default function HistoryDrawer({
     return () => document.removeEventListener('keydown', onKey)
   }, [editingId, menuId, onClose, pendingDelete])
 
+  const commit = (id: number) => {
+    const title = draft.trim()
+    setEditingId(null)
+    if (title) {
+      onRename(id, title)
+    }
+  }
+
+  /**
+   * What a click outside the drawer does: **save a rename in flight, then close**.
+   *
+   * Clicking away used to save, because the click blurred the title input and
+   * `onBlur` committed it. Closing on `pointerdown` took that away — the drawer
+   * unmounts before the browser moves focus, and an element removed from the DOM
+   * fires no `blur`, so the typed title vanished with no feedback. Saving is the
+   * behaviour to keep: the user typed it, and Escape is right there to discard.
+   * (Escape stays a one-layer-at-a-time unwind; clicking away closes outright,
+   * which is what the gesture asks for.)
+   *
+   * `useEffectEvent`, so the listener below sees the current `editingId` and
+   * `draft` without re-subscribing to `document` on every keystroke and every
+   * parent render.
+   */
+  const closeFromOutside = useEffectEvent(() => {
+    if (editingId !== null) {
+      commit(editingId)
+    }
+    onClose()
+  })
+
   // A click anywhere else closes the drawer — the panel covers the left edge of
   // the answer column, and reaching for the text under it had to go via the
   // header button.
@@ -108,25 +138,16 @@ export default function HistoryDrawer({
   // the document, which `contains` reads as outside. Everything the drawer owns
   // — the row menu, its dismissal overlay and the delete dialog — is a DOM child
   // of the panel (nothing here renders into a portal), so one `contains` check
-  // covers all of it. Escape is untouched: it unwinds one layer at a time, and
-  // this closes outright, which is what clicking away asks for.
+  // covers all of it.
   useEffect(() => {
     const onPointerDown = (event: PointerEvent) => {
       if (isOutside(event.target as Node | null, panelRef.current, openerRef?.current ?? null)) {
-        onClose()
+        closeFromOutside()
       }
     }
     document.addEventListener('pointerdown', onPointerDown, true)
     return () => document.removeEventListener('pointerdown', onPointerDown, true)
-  }, [onClose, openerRef])
-
-  const commit = (id: number) => {
-    const title = draft.trim()
-    setEditingId(null)
-    if (title) {
-      onRename(id, title)
-    }
-  }
+  }, [openerRef])
 
   const startEditing = (session: ResearchSession) => {
     setDraft(session.title ?? '')

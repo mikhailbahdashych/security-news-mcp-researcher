@@ -146,6 +146,11 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
     queryKey: sessionQueryKey(sessionId ?? 0),
     queryFn: () => fetchSession(sessionId as number),
     enabled: sessionId !== null,
+    // The app-wide default is `retry: 1`, which asked a known-dead id for a
+    // second time and delayed the redirect below by the ~1 s backoff — long
+    // enough to show the empty new-chat view under the dead URL. A 404 is an
+    // answer, not a blip; everything else still gets its one retry.
+    retry: (failureCount, error) => !isNotFound(error) && failureCount < 1,
   })
 
   // The configured model, for the composer's "what will answer this" line. The
@@ -189,15 +194,16 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
   // every other failure keeps the error on screen, because a backend that is
   // down is not a session that is gone.
   //
-  // The sessions list needs no invalidation. It is `enabled: historyOpen`, so it
-  // is usually not even mounted on this path, and the two ways a row can go
-  // stale already refresh it: the in-app delete invalidates on success, and a
-  // row deleted elsewhere is a stale cache this redirect does not make worse.
+  // The sessions list is refreshed too. The likeliest source of a 404 is the chat
+  // having been deleted from another tab, and the drawer's cached list — 30 s of
+  // `staleTime` — still holds the row: without this, clicking it bounces the user
+  // back to `/chat` with no explanation, and clicking it again does the same.
   const missingSession = isNotFound(detail.error)
   useEffect(() => {
     if (!missingSession) {
       return
     }
+    void queryClient.invalidateQueries({ queryKey: sessionsQueryKey })
     abandonTurn(liveSession)
     dispatch({ kind: 'reset' })
     // Routed: navigate. Embedded: the URL belongs to the other pane, so this
@@ -208,7 +214,7 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
     // was keyed on, so clearing it is what stops the effect running again.
     // oxlint-disable-next-line react/set-state-in-effect
     openSession(null, true)
-  }, [abandonTurn, liveSession, missingSession, openSession])
+  }, [abandonTurn, liveSession, missingSession, openSession, queryClient])
 
   // Clear the handover off the history entry so a reload does not re-attach.
   useEffect(() => {
@@ -386,6 +392,11 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
     }
   }, [live.sessionId, sessionId])
 
+  // Stable, because the drawer's Escape listener is subscribed to `document` for
+  // as long as this prop is unchanged: an inline arrow re-subscribed it on every
+  // render, and during a streaming turn this page renders many times a second.
+  const closeHistory = useCallback(() => setHistoryOpen(false), [])
+
   const newChat = useCallback(() => {
     abandonTurn(live.sessionId)
     dispatch({ kind: 'reset' })
@@ -491,7 +502,7 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
           onArchive={(id, archived) => archive.mutate({ id, archived })}
           onDelete={(id) => remove.mutateAsync(id).then(() => undefined)}
           onLoadMore={() => void sessions.fetchNextPage()}
-          onClose={() => setHistoryOpen(false)}
+          onClose={closeHistory}
           openerRef={historyButton}
         />
       ) : null}
