@@ -1,11 +1,16 @@
-import type { ButtonHTMLAttributes } from 'react'
+import type { ButtonHTMLAttributes, RefAttributes } from 'react'
 
 import Icon, { type IconName } from './Icon'
 import { cx } from './classes'
 
 export type IconButtonTone = 'default' | 'accent' | 'amber' | 'danger'
 
-export interface IconButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
+export interface IconButtonProps
+  extends ButtonHTMLAttributes<HTMLButtonElement>,
+    // React 19: a function component takes `ref` as an ordinary prop, and the
+    // spread below passes it straight to the <button>. The drawer's opener
+    // needs one so a click on it does not count as a click outside.
+    RefAttributes<HTMLButtonElement> {
   icon: IconName
   /** Required: an icon-only control has no other name for a screen reader. */
   label: string

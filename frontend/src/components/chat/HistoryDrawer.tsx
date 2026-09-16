@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState, type RefObject } from 'react'
 
 import { whenLabel, type ResearchSession } from '../../api/chat'
 import { ApiError } from '../../api/client'
@@ -9,6 +9,7 @@ import Icon from '../ui/Icon'
 import IconButton from '../ui/IconButton'
 import Input from '../ui/Input'
 import { cx } from '../ui/classes'
+import { isOutside } from '../ui/modal'
 
 interface HistoryDrawerProps {
   sessions: ResearchSession[]
@@ -30,6 +31,12 @@ interface HistoryDrawerProps {
   onDelete: (id: number) => Promise<void>
   onLoadMore: () => void
   onClose: () => void
+  /**
+   * The button that opened the drawer, so a click on it is not "outside".
+   * Without it the opener's `pointerdown` closes the drawer and its `click`
+   * reopens it, and the toggle never appears to do anything.
+   */
+  openerRef?: RefObject<HTMLButtonElement | null>
 }
 
 /**
@@ -57,7 +64,9 @@ export default function HistoryDrawer({
   onDelete,
   onLoadMore,
   onClose,
+  openerRef,
 }: HistoryDrawerProps) {
+  const panelRef = useRef<HTMLDivElement>(null)
   const [editingId, setEditingId] = useState<number | null>(null)
   const [menuId, setMenuId] = useState<number | null>(null)
   const [draft, setDraft] = useState('')
@@ -88,6 +97,28 @@ export default function HistoryDrawer({
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
   }, [editingId, menuId, onClose, pendingDelete])
+
+  // A click anywhere else closes the drawer — the panel covers the left edge of
+  // the answer column, and reaching for the text under it had to go via the
+  // header button.
+  //
+  // `pointerdown`, in the capture phase, so the decision is made on the way down
+  // and before anything inside re-renders the node the event landed on: a
+  // `click` handler that removed its own row would leave a target no longer in
+  // the document, which `contains` reads as outside. Everything the drawer owns
+  // — the row menu, its dismissal overlay and the delete dialog — is a DOM child
+  // of the panel (nothing here renders into a portal), so one `contains` check
+  // covers all of it. Escape is untouched: it unwinds one layer at a time, and
+  // this closes outright, which is what clicking away asks for.
+  useEffect(() => {
+    const onPointerDown = (event: PointerEvent) => {
+      if (isOutside(event.target as Node | null, panelRef.current, openerRef?.current ?? null)) {
+        onClose()
+      }
+    }
+    document.addEventListener('pointerdown', onPointerDown, true)
+    return () => document.removeEventListener('pointerdown', onPointerDown, true)
+  }, [onClose, openerRef])
 
   const commit = (id: number) => {
     const title = draft.trim()
@@ -131,6 +162,7 @@ export default function HistoryDrawer({
 
   return (
     <div
+      ref={panelRef}
       className="absolute top-[49px] bottom-0 left-0 z-20 flex w-[262px] flex-col border-r border-line bg-panel shadow-[8px_0_24px_rgba(0,0,0,0.06)]"
     >
       <div className="border-b border-line p-2.5">

@@ -86,6 +86,10 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
   const turnSeq = useRef(0)
   const scroller = useRef<HTMLDivElement>(null)
   const bottom = useRef<HTMLDivElement>(null)
+  // The drawer closes on a click outside itself, and the button that opens it is
+  // not "outside" — otherwise pressing it while open closes and reopens the
+  // drawer in one gesture.
+  const historyButton = useRef<HTMLButtonElement>(null)
 
   /**
    * Leave the turn on the wire: stop it, stop it being billed, and disown it.
@@ -386,6 +390,7 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
     <section className="relative flex h-full flex-col overflow-hidden bg-bg text-ink">
       <header className="flex h-[49px] shrink-0 items-center gap-2 border-b border-line px-4">
         <IconButton
+          ref={historyButton}
           icon="history"
           label="Chat history"
           size={16}
@@ -438,6 +443,7 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
           onDelete={(id) => remove.mutateAsync(id).then(() => undefined)}
           onLoadMore={() => void sessions.fetchNextPage()}
           onClose={() => setHistoryOpen(false)}
+          openerRef={historyButton}
         />
       ) : null}
 
