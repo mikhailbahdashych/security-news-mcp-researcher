@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db.models import Feed, FeedItem
 from app.services import feeds as feeds_service
+from app.services import url_guard
 from tests.feed_fixtures import routes_transport, xml_response
 
 RSS_URL = "https://example.test/feed.xml"
@@ -18,6 +19,8 @@ ATOM_URL = "https://atom.example.test/feed.xml"
 GUIDLESS_URL = "https://guidless.test/feed.xml"
 BOZO_URL = "https://sloppy.test/feed.xml"
 BROKEN_URL = "https://broken.test/feed.xml"
+EMPTY_URL = "https://quiet.test/feed.xml"
+BIG_URL = "https://big.test/feed.xml"
 
 
 async def add_feed(session: AsyncSession, url: str, **kwargs) -> Feed:
@@ -268,3 +271,276 @@ async def test_unknown_ids_are_ignored_rather_than_failing(
 
     assert result.results == []
     assert result.total_new == 0
+
+
+async def test_a_feed_with_no_entries_is_not_an_error(
+    db_session: AsyncSession, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A well-formed feed that has published nothing yet fetched fine.
+
+    Recording that as an error is how an error column stops being worth reading.
+    """
+    feed = await add_feed(db_session, EMPTY_URL)
+    transport = routes_transport({EMPTY_URL: xml_response("empty_rss.xml")})
+
+    result = await feeds_service.refresh_feeds(session_factory, None, transport=transport)
+
+    assert result.results[0].error is None
+    assert result.results[0].new_items == 0
+    await db_session.refresh(feed)
+    assert feed.last_status == "ok"
+    assert feed.last_error is None
+    # The feed's own metadata is still worth keeping from an empty document.
+    assert feed.title == "Quiet Advisories"
+    assert feed.site_url == "https://quiet.example.test/"
+
+
+async def test_a_403_is_reported_as_bot_protection(
+    db_session: AsyncSession, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A bare "HTTP 403" reads as a bad URL; this one says what actually happened."""
+    feed = await add_feed(db_session, BROKEN_URL)
+    challenge = "<html><title>Just a moment...</title><script>secret-token</script></html>"
+    transport = routes_transport({BROKEN_URL: httpx2.Response(403, text=challenge)})
+
+    result = await feeds_service.refresh_feeds(session_factory, None, transport=transport)
+
+    assert result.results[0].error == feeds_service.BOT_PROTECTION_ERROR
+    await db_session.refresh(feed)
+    assert feed.last_status == "error"
+    assert "bot protection" in feed.last_error
+    # The challenge page itself is never stored or shown.
+    assert "secret-token" not in feed.last_error
+
+
+async def test_a_403_is_retried_with_a_browser_fingerprint(
+    db_session: AsyncSession, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    feed = await add_feed(db_session, BROKEN_URL)
+    blocked = routes_transport({BROKEN_URL: httpx2.Response(403, text="denied")})
+    browser = routes_transport({BROKEN_URL: xml_response("sample_rss.xml")})
+
+    result = await feeds_service.refresh_feeds(
+        session_factory, None, transport=blocked, impersonate_transport=browser
+    )
+
+    assert result.results[0].error is None
+    assert result.results[0].new_items == 3
+    assert len(browser.requests) == 1
+    await db_session.refresh(feed)
+    assert feed.last_status == "ok"
+
+
+async def test_a_403_the_browser_retry_cannot_fix_is_still_reported(
+    db_session: AsyncSession, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    await add_feed(db_session, BROKEN_URL)
+    blocked = routes_transport({BROKEN_URL: httpx2.Response(403, text="denied")})
+    also_blocked = routes_transport({BROKEN_URL: httpx2.Response(403, text="denied")})
+
+    result = await feeds_service.refresh_feeds(
+        session_factory, None, transport=blocked, impersonate_transport=also_blocked
+    )
+
+    assert result.results[0].error == feeds_service.BOT_PROTECTION_ERROR
+    assert len(also_blocked.requests) == 1
+
+
+async def test_only_a_403_triggers_the_browser_retry(
+    db_session: AsyncSession, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A 500 is the site being broken, not the site refusing this client."""
+    await add_feed(db_session, BROKEN_URL)
+    failing = routes_transport({BROKEN_URL: httpx2.Response(500, text="boom")})
+    browser = routes_transport({BROKEN_URL: xml_response("sample_rss.xml")})
+
+    result = await feeds_service.refresh_feeds(
+        session_factory, None, transport=failing, impersonate_transport=browser
+    )
+
+    assert result.results[0].error == "HTTP 500"
+    assert browser.requests == []
+
+
+async def test_the_browser_retry_is_never_built_behind_a_mock_transport(
+    db_session: AsyncSession,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without this rule, any fixture returning 403 would put the suite on the network."""
+    await add_feed(db_session, BROKEN_URL)
+    built = []
+    monkeypatch.setattr(
+        feeds_service,
+        "build_impersonating_client",
+        lambda *args, **kwargs: built.append(args) or None,
+    )
+    transport = routes_transport({BROKEN_URL: httpx2.Response(403, text="denied")})
+
+    result = await feeds_service.refresh_feeds(session_factory, None, transport=transport)
+
+    assert result.results[0].error == feeds_service.BOT_PROTECTION_ERROR
+    assert built == []
+
+
+def _big_feed(entry_count: int) -> bytes:
+    entries = "".join(
+        f"<item><title>Advisory {n}</title>"
+        f"<link>https://big.test/{n}</link>"
+        f"<guid>urn:big:{n}</guid></item>"
+        for n in range(entry_count)
+    )
+    return (
+        '<?xml version="1.0" encoding="utf-8"?>'
+        '<rss version="2.0"><channel><title>Big</title>'
+        f"<link>https://big.test/</link>{entries}</channel></rss>"
+    ).encode()
+
+
+async def test_a_feed_larger_than_one_insert_chunk_is_ingested_whole(
+    db_session: AsyncSession, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """More rows than SQLite would take as one multi-VALUES INSERT's worth of parameters."""
+    entry_count = feeds_service.INSERT_CHUNK_ROWS * 2 + 137
+    feed = await add_feed(db_session, BIG_URL)
+    transport = routes_transport(
+        {
+            BIG_URL: httpx2.Response(
+                200,
+                content=_big_feed(entry_count),
+                headers={"content-type": "application/rss+xml"},
+            )
+        }
+    )
+
+    result = await feeds_service.refresh_feeds(session_factory, None, transport=transport)
+
+    assert result.results[0].error is None
+    assert result.results[0].new_items == entry_count
+    assert len(await items_of(db_session, feed.id)) == entry_count
+
+    # And a second pass still inserts nothing: dedup survives chunking.
+    again = await feeds_service.refresh_feeds(session_factory, None, transport=transport)
+    assert again.total_new == 0
+
+
+async def test_the_feed_path_applies_the_feed_byte_ceiling(
+    db_session: AsyncSession,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Feeds get MAX_FEED_BYTES, not the smaller article ceiling — several are ~13 MB."""
+    await add_feed(db_session, RSS_URL)
+    transport = routes_transport({RSS_URL: xml_response("sample_rss.xml")})
+    seen: list[int] = []
+    real_fetch = feeds_service.fetch_guarded
+
+    async def spy(client, url, **kwargs):  # noqa: ANN001, ANN202
+        seen.append(kwargs["max_bytes"])
+        return await real_fetch(client, url, **kwargs)
+
+    monkeypatch.setattr(feeds_service, "fetch_guarded", spy)
+    await feeds_service.refresh_feeds(session_factory, None, transport=transport)
+
+    assert seen == [url_guard.MAX_FEED_BYTES]
+    assert url_guard.MAX_FEED_BYTES > url_guard.MAX_FETCH_BYTES
+
+
+async def test_the_feed_byte_ceiling_is_enforced(
+    db_session: AsyncSession,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ceiling is a real limit on the feed path, not just a number passed along."""
+    feed = await add_feed(db_session, BIG_URL)
+    monkeypatch.setattr(feeds_service, "MAX_FEED_BYTES", 256)
+    transport = routes_transport(
+        {
+            BIG_URL: httpx2.Response(
+                200,
+                content=_big_feed(100),
+                headers={"content-type": "application/rss+xml"},
+            )
+        }
+    )
+
+    result = await feeds_service.refresh_feeds(session_factory, None, transport=transport)
+
+    assert "larger than 256 bytes" in result.results[0].error
+    await db_session.refresh(feed)
+    assert feed.last_status == "error"
+    assert await items_of(db_session, feed.id) == []
+
+
+async def test_the_guard_still_validates_every_hop_on_the_browser_retry(
+    db_session: AsyncSession, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """The impersonated path is not a way around the SSRF guard.
+
+    It is a different TLS stack, not a different policy: fetch_guarded still drives
+    it, so a redirect towards the link-local metadata service is refused there
+    exactly as it is on the ordinary client.
+    """
+    feed = await add_feed(db_session, BROKEN_URL)
+    blocked = routes_transport({BROKEN_URL: httpx2.Response(403, text="denied")})
+    browser = routes_transport(
+        {
+            BROKEN_URL: httpx2.Response(
+                302, headers={"location": "http://169.254.169.254/latest/meta-data/"}
+            )
+        }
+    )
+
+    result = await feeds_service.refresh_feeds(
+        session_factory, None, transport=blocked, impersonate_transport=browser
+    )
+
+    assert "not a public address" in result.results[0].error
+    # The redirect was never followed: only the first hop was ever requested.
+    assert [str(r.url) for r in browser.requests] == [BROKEN_URL]
+    await db_session.refresh(feed)
+    assert feed.last_status == "error"
+
+
+@pytest.mark.parametrize("status", [401, 404, 429, 500, 503])
+async def test_no_status_but_403_triggers_the_browser_retry(
+    db_session: AsyncSession,
+    session_factory: async_sessionmaker[AsyncSession],
+    status: int,
+) -> None:
+    """403 is "we refuse this client"; the rest are answers about the resource."""
+    await add_feed(db_session, BROKEN_URL)
+    failing = routes_transport({BROKEN_URL: httpx2.Response(status, text="nope")})
+    browser = routes_transport({BROKEN_URL: xml_response("sample_rss.xml")})
+
+    result = await feeds_service.refresh_feeds(
+        session_factory, None, transport=failing, impersonate_transport=browser
+    )
+
+    assert result.results[0].error == f"HTTP {status}"
+    assert browser.requests == []
+
+
+async def test_a_broken_feeds_salvaged_metadata_is_not_adopted(
+    db_session: AsyncSession, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Whatever feedparser scrapes out of a document it could not parse is not a name."""
+    feed = await add_feed(db_session, BROKEN_URL)
+    # Well-formed enough for feedparser to find a title, malformed enough to bozo
+    # out with no entries at all.
+    half_broken = b"<?xml version='1.0'?><rss><channel><title>Salvaged</title></rss"
+    transport = routes_transport(
+        {
+            BROKEN_URL: httpx2.Response(
+                200, content=half_broken, headers={"content-type": "text/xml"}
+            )
+        }
+    )
+
+    result = await feeds_service.refresh_feeds(session_factory, None, transport=transport)
+
+    assert result.results[0].error
+    await db_session.refresh(feed)
+    assert feed.last_status == "error"
+    assert feed.title is None
+    assert feed.site_url is None

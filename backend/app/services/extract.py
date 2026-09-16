@@ -5,6 +5,9 @@ it through trafilatura to get readable markdown. Two properties matter:
 
 * trafilatura is synchronous and does real parsing work, so it runs on a worker
   thread exactly like feedparser does.
+* A 403 is retried once through the browser-TLS client, exactly as on the feed
+  path: a site that will not serve its feed to a non-browser client will not serve
+  its articles to one either.
 * A paywall, a consent wall or a JavaScript-rendered page yields a few words of
   boilerplate rather than an article. Storing that would be worse than storing
   nothing — the note generator would summarise "Please enable JavaScript". Anything
@@ -24,7 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import FeedItem, utcnow
 from app.services import settings as settings_service
-from app.services.http import build_client
+from app.services.http import build_client, build_impersonating_client
 from app.services.url_guard import MAX_FETCH_BYTES, GuardError, fetch_guarded
 
 logger = logging.getLogger(__name__)
@@ -86,25 +89,59 @@ def _truncate(text: str, max_chars: int) -> tuple[str, bool]:
     return text, False
 
 
+async def _fetch_article(
+    client: httpx2.AsyncClient,
+    url: str,
+    timeout_s: int,
+    impersonate_transport: httpx2.AsyncBaseTransport | None,
+    allow_browser_retry: bool,
+) -> httpx2.Response:
+    """Fetch one article, retrying a 403 with a browser TLS fingerprint.
+
+    The same rule as the feed path, for the same reason: the sites that refuse a
+    non-browser client refuse it for their article pages too, and without this the
+    inbox would ingest CISA's advisories and then fall back to the RSS teaser for
+    every one of them.
+    """
+    # Nobody typed this URL — it came out of a feed, and from Task 4 it can come out
+    # of the model — so every hop is checked, the first included.
+    response = await fetch_guarded(client, url, max_bytes=MAX_FETCH_BYTES, validate_first_hop=True)
+    if response.status_code != 403 or not allow_browser_retry:
+        return response
+
+    browser = build_impersonating_client(timeout_s, transport=impersonate_transport)
+    if browser is None:
+        return response
+    logger.info("Article %s answered 403; retrying with a browser TLS fingerprint", url)
+    async with browser:
+        # fetch_guarded returns a fully-read response, so the body survives the
+        # client being closed here.
+        return await fetch_guarded(browser, url, max_bytes=MAX_FETCH_BYTES, validate_first_hop=True)
+
+
 async def extract_article(
     url: str,
     max_chars: int = DEFAULT_MAX_CHARS,
     timeout_s: int = 15,
     *,
     transport: httpx2.AsyncBaseTransport | None = None,
+    impersonate_transport: httpx2.AsyncBaseTransport | None = None,
 ) -> ExtractResult:
     """Fetch ``url`` and return its article text as markdown.
 
     Never raises for a network or parsing problem: a failure is an ``ExtractResult``
     with ``ok=False`` and a short ``reason``, because "this one page would not
     extract" is an ordinary outcome, not an error the request should die on.
+
+    ``transport`` and ``impersonate_transport`` are the seams the tests use to serve
+    fixtures. As on the feed path, a caller that supplies ``transport`` alone gets
+    no browser retry, so a 403 fixture can never reach the network.
     """
+    allow_browser_retry = impersonate_transport is not None or transport is None
     try:
         async with build_client(timeout_s, transport=transport) as client:
-            # Nobody typed this URL — it came out of a feed, and from Task 4 it can
-            # come out of the model — so every hop is checked, the first included.
-            response = await fetch_guarded(
-                client, url, max_bytes=MAX_FETCH_BYTES, validate_first_hop=True
+            response = await _fetch_article(
+                client, url, timeout_s, impersonate_transport, allow_browser_retry
             )
             response.raise_for_status()
             html = response.text
@@ -142,6 +179,7 @@ async def extract_item(
     max_chars: int = DEFAULT_MAX_CHARS,
     timeout_s: int | None = None,
     transport: httpx2.AsyncBaseTransport | None = None,
+    impersonate_transport: httpx2.AsyncBaseTransport | None = None,
 ) -> ItemExtractResult:
     """Extract one feed item's article into ``content_text``.
 
@@ -162,7 +200,13 @@ async def extract_item(
     if timeout_s is None:
         timeout_s = await settings_service.get_int(session, "feed_timeout_s")
 
-    result = await extract_article(item.url, max_chars, timeout_s, transport=transport)
+    result = await extract_article(
+        item.url,
+        max_chars,
+        timeout_s,
+        transport=transport,
+        impersonate_transport=impersonate_transport,
+    )
     if not result.ok or not result.text:
         return ItemExtractResult(item=item, extracted=False, fallback=True, reason=result.reason)
 
