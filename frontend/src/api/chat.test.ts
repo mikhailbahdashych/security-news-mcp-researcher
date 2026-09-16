@@ -521,21 +521,51 @@ describe('formatting', () => {
 })
 
 describe('whenLabel', () => {
-  const now = new Date(2026, 8, 14, 12, 0, 0)
-
-  it('names the last two days rather than dating them', () => {
-    // Midday, because the stored timestamps are naive UTC and a late-evening
-    // one crosses into the next day for anyone east of Greenwich.
-    expect(whenLabel('2026-09-14T06:39:23', now)).toBe('today')
-    expect(whenLabel('2026-09-13T12:00:00', now)).toBe('yesterday')
+  // Midday throughout, because the stored timestamps are naive UTC and a
+  // late-evening one crosses into the next day for anyone east of Greenwich.
+  it('dates every row, day then month then year', () => {
+    expect(whenLabel('2026-09-16T12:00:00')).toBe('16 Sep 2026')
+    expect(whenLabel('2025-12-31T12:00:00')).toBe('31 Dec 2025')
   })
 
-  it('falls back to a date once the week is out', () => {
-    expect(whenLabel('2026-09-01T09:00:00', now)).toBe('Sep 1')
+  it('writes the day without a leading zero', () => {
+    expect(whenLabel('2026-09-01T12:00:00')).toBe('1 Sep 2026')
+  })
+
+  it('dates the last two days rather than naming them', () => {
+    const today = new Date()
+    const stamp = (date: Date) =>
+      `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}-${String(
+        date.getUTCDate(),
+      ).padStart(2, '0')}T12:00:00`
+    const yesterday = new Date(today.getTime() - 86_400_000)
+    expect(whenLabel(stamp(today))).toMatch(/^\d{1,2} [A-Z][a-z]{2} \d{4}$/)
+    expect(whenLabel(stamp(yesterday))).toMatch(/^\d{1,2} [A-Z][a-z]{2} \d{4}$/)
+  })
+
+  it('names the month in English whatever the browser locale is', () => {
+    const months = [
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec',
+    ]
+    months.forEach((month, index) => {
+      const at = String(index + 1).padStart(2, '0')
+      expect(whenLabel(`2026-${at}-15T12:00:00`)).toBe(`15 ${month} 2026`)
+    })
   })
 
   it('survives a timestamp it cannot read', () => {
-    expect(whenLabel('not a date', now)).toBe('')
+    expect(whenLabel('not a date')).toBe('')
   })
 })
 
