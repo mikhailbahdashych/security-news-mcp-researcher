@@ -10,6 +10,7 @@ import {
   stepsFromMessage,
   toolCallStatus,
   toolHint,
+  toolStep,
   toolTag,
   whenLabel,
   type ChatMessage,
@@ -157,9 +158,12 @@ describe('toolTag', () => {
     expect(toolTag('mcp', 'mcp__files__read_text_file', null)).toBe('mcp · files')
   })
 
-  it('separates the code interpreter from the web tools it wraps', () => {
-    expect(toolTag('server', 'code_execution')).toBe('code')
-    expect(toolTag('server', 'bash_code_execution')).toBe('code')
+  it('separates the sandbox from the web tools it wraps', () => {
+    // `code` said nothing: the user's question is "where did this run", and the
+    // answer is Anthropic's sandbox container, not the local machine.
+    expect(toolTag('server', 'code_execution')).toBe('sandbox')
+    expect(toolTag('server', 'bash_code_execution')).toBe('sandbox')
+    expect(toolTag('server', 'text_editor_code_execution')).toBe('sandbox')
     expect(toolTag('server', 'something_new')).toBe('server')
   })
 })
@@ -510,5 +514,87 @@ describe('whenLabel', () => {
 
   it('survives a timestamp it cannot read', () => {
     expect(whenLabel('not a date', now)).toBe('')
+  })
+})
+
+describe('the sandbox card', () => {
+  /** The shape a `code_execution` result is persisted and streamed in. */
+  function sandboxResult(overrides: Record<string, unknown> = {}) {
+    return {
+      content: { content: [], return_code: 0, stdout: '', stderr: '', ...overrides },
+    }
+  }
+
+  function sandboxStep(input: Record<string, unknown> | null, result?: unknown) {
+    return toolStep({
+      key: 'live-1',
+      name: 'code_execution',
+      source: 'server',
+      input,
+      status: 'ok',
+      result,
+    })
+  }
+
+  it('calls the row Sandbox and explains what it is', () => {
+    const step = sandboxStep({ code: 'import json\nresult = await web_search({})' })
+    expect(step.name).toBe('Sandbox')
+    expect(step.tag).toBe('sandbox')
+    expect(step.body).toBe(
+      "Code the model ran in Anthropic's sandbox to post-process web search/fetch results.",
+    )
+  })
+
+  it('hints with the first line of the code or the command', () => {
+    expect(sandboxStep({ code: 'import json\nresult = await web_search({})' }).hint).toBe(
+      'import json',
+    )
+    expect(
+      toolStep({
+        key: 'live-2',
+        name: 'bash_code_execution',
+        source: 'server',
+        input: { command: 'ls -la /tmp' },
+        status: 'ok',
+      }).hint,
+    ).toBe('ls -la /tmp')
+  })
+
+  it('cuts a long line of code down to a row', () => {
+    const step = sandboxStep({ code: `result = await web_search({"query": "${'a'.repeat(200)}"})` })
+    expect(step.hint.length).toBeLessThanOrEqual(81)
+    expect(step.hint.endsWith('…')).toBe(true)
+  })
+
+  it('names the empty block for what it is', () => {
+    // A `code_execution` block with no input at all is the API allocating the
+    // container; it is not a call the model made with no arguments.
+    expect(sandboxStep({}).hint).toBe('container start')
+  })
+
+  it('says nothing while the arguments are still streaming', () => {
+    expect(sandboxStep(null).hint).toBe('')
+  })
+
+  it('shows what the code printed, and never the encrypted copy', () => {
+    const step = sandboxStep(
+      { code: 'print(1)' },
+      sandboxResult({ stdout: '3 results\n', encrypted_stdout: 'AAAABBBBCCCC' }),
+    )
+    expect(step.preview).toBe('3 results')
+    expect(step.preview).not.toContain('AAAABBBBCCCC')
+  })
+
+  it('reports a failure with its stderr and its exit code', () => {
+    const step = sandboxStep(
+      { code: 'boom()' },
+      sandboxResult({ return_code: 1, stderr: "NameError: name 'boom' is not defined" }),
+    )
+    expect(step.preview).toBe("NameError: name 'boom' is not defined\nexit 1")
+  })
+
+  it('says so when a clean run printed nothing', () => {
+    // `exit 0` on its own read as a result; it is the absence of one.
+    expect(sandboxStep({}, sandboxResult()).preview).toBe('no output')
   })
 })
