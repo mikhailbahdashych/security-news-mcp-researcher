@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app import __version__
+from app.agent.turns import TurnRegistry, mark_interrupted
 from app.api import api_router
 from app.config import Settings
 from app.config import settings as default_settings
@@ -44,6 +45,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     await init_db(engine, app.state.session_factory)
 
+    # A turn is a task in *this* process, so one that was running when the last
+    # process stopped can never be resumed — the row would otherwise claim a turn
+    # is in flight forever, and the Chat page would wait for events nobody sends.
+    interrupted = await mark_interrupted(app.state.session_factory)
+    if interrupted:
+        logger.warning(
+            "%d research turn(s) were running when the process last stopped; marked interrupted",
+            interrupted,
+        )
+
     # An optional import, so nothing else in the app can say it is missing — and
     # what it costs is invisible until a feed is refreshed: the 403 retry simply
     # never happens. The live case was a --reload dev server that picked up the
@@ -57,6 +68,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        # Before the engine goes: a turn still running writes rows as it ends.
+        registry: TurnRegistry | None = getattr(app.state, "turn_registry", None)
+        if registry is not None:
+            await registry.drain()
         manager: McpManager | None = getattr(app.state, "mcp_manager", None)
         if manager is not None:
             await manager.aclose()
@@ -84,6 +99,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Created empty and never connected here: the configured servers are read from
     # the database on first use, and the manager is what the lifespan closes.
     app.state.mcp_manager = McpManager()
+    # Here rather than in the lifespan for the same reason: it holds nothing until
+    # a turn starts, and the test suite (which skips the lifespan) needs one too.
+    app.state.turn_registry = TurnRegistry()
 
     if settings.cors_origins:
         app.add_middleware(

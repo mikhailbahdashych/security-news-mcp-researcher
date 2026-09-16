@@ -209,4 +209,22 @@ class TurnRegistry:
             await asyncio.wait({turn.task for turn in turns}, timeout=CANCEL_WAIT_S)
 
 
-__all__ = ["CANCELLED_MESSAGE", "RunningTurn", "TurnAlreadyRunning", "TurnRegistry"]
+async def mark_interrupted(session_factory: async_sessionmaker[AsyncSession]) -> int:
+    """Startup: a row still ``running`` belongs to a process that died mid-turn."""
+    async with session_factory() as session:
+        result = await session.execute(
+            update(ResearchSession)
+            .where(ResearchSession.turn_status == "running")
+            .values(turn_status="interrupted")
+        )
+        await session.commit()
+        return int(result.rowcount or 0)
+
+
+__all__ = [
+    "CANCELLED_MESSAGE",
+    "RunningTurn",
+    "TurnAlreadyRunning",
+    "TurnRegistry",
+    "mark_interrupted",
+]

@@ -100,6 +100,59 @@ async def test_init_db_seeds_defaults_once(db_engine, db_session):
     )
 
 
+async def test_init_db_adds_columns_a_previous_release_did_not_have(tmp_path: Path):
+    """A database from an older release keeps its rows and gains the new columns.
+
+    There is no migration tool, and this file holds the user's API key, feeds and
+    chat history — "delete it and start again" is not an answer. ``init_db`` adds
+    whatever ``ADDED_COLUMNS`` says is missing.
+    """
+    db_path = tmp_path / "old" / "app.db"
+    db_path.parent.mkdir(parents=True)
+    connection = sqlite3.connect(db_path)
+    try:
+        # research_sessions exactly as it was before the turn-state columns.
+        connection.execute(
+            """
+            CREATE TABLE research_sessions (
+                id INTEGER NOT NULL PRIMARY KEY,
+                title TEXT,
+                model TEXT,
+                archived BOOLEAN NOT NULL,
+                total_input_tokens INTEGER NOT NULL,
+                total_output_tokens INTEGER NOT NULL,
+                created_at DATETIME NOT NULL,
+                updated_at DATETIME NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            "INSERT INTO research_sessions VALUES "
+            "(1, 'Kept', 'claude-opus-5', 0, 0, 0, '2026-09-01 10:00:00', '2026-09-01 10:00:00')"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    application = create_app(Settings(db_path=db_path, static_dir=tmp_path / "absent"))
+    async with application.router.lifespan_context(application):
+        async with httpx2.AsyncClient(
+            transport=ASGITransport(app=application), base_url="http://test"
+        ) as client:
+            listed = (await client.get("/api/sessions")).json()["sessions"]
+
+    assert [row["title"] for row in listed] == ["Kept"]
+    assert listed[0]["turn_status"] == "idle"
+    assert listed[0]["turn_started_at"] is None
+
+    connection = sqlite3.connect(db_path)
+    try:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(research_sessions)")}
+    finally:
+        connection.close()
+    assert {"turn_status", "turn_started_at"} <= columns
+
+
 async def test_engine_creates_the_parent_directory(tmp_path: Path):
     db_path = tmp_path / "nested" / "dir" / "app.db"
     engine = create_db_engine(db_path)
