@@ -12,6 +12,7 @@ from app.mcp.config import (
     load_servers,
     parse_config,
     redact,
+    redact_text,
     save_servers,
     to_public_json,
 )
@@ -129,3 +130,28 @@ def test_redact_keeps_keys_and_drops_values() -> None:
 def test_repr_never_leaks_a_header_value() -> None:
     config = parse_config({"mcpServers": {"remote": HTTP}})[0]
     assert "s3cret" not in repr(config)
+
+
+def test_repr_never_leaks_a_token_in_the_url() -> None:
+    """A repr ends up in tracebacks, and a hosted server's credential is as
+    likely to be in the query string as in a header."""
+    config = parse_config(
+        {"mcpServers": {"remote": {"url": "https://example.com/mcp?key=s3cret"}}}
+    )[0]
+
+    rendered = repr(config)
+
+    assert "s3cret" not in rendered
+    # Still says which server it is: the point is diagnosis, not silence.
+    assert "https://example.com/mcp?***" in rendered
+
+
+def test_redact_text_takes_out_userinfo_and_query_strings() -> None:
+    assert redact_text("https://user:pw@example.com/mcp") == "https://***@example.com/mcp"
+    assert redact_text("GET https://example.com/mcp?token=abc failed") == (
+        "GET https://example.com/mcp?*** failed"
+    )
+    # Nothing to hide, nothing changed — including a bare question mark in prose.
+    assert redact_text("connection refused. Is the server running?") == (
+        "connection refused. Is the server running?"
+    )

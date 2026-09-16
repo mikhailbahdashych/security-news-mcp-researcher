@@ -366,8 +366,10 @@ async def run(
     is what note generation needs.
 
     Safe to ``aclose()`` at any point: whatever has already been committed stays
-    committed, a terminal ``cancelled`` error plus ``done`` are emitted if the
-    consumer is still listening, and ``CancelledError`` is re-raised.
+    committed, and ``CancelledError`` is re-raised so the task really dies. It
+    emits **no terminal event on cancellation** — a cancelled generator cannot
+    yield — so the ``error(cancelled)`` + ``done`` pair the client sees comes from
+    the layer that owns the stream, ``app.api.streaming.pump_agent_events``.
     """
     if persist and session_id is None:
         raise ValueError("session_id is required when persist=True")

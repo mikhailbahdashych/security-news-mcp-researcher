@@ -206,6 +206,25 @@ async def test_patch_rejects_an_empty_payload_and_an_empty_body(client, session_
     assert (await client.patch(f"/api/notes/{note_id}", json={"body_md": ""})).status_code == 422
 
 
+async def test_patch_rejects_a_title_that_is_only_whitespace(client, session_factory):
+    """``min_length`` ran on the raw string while the route stored the stripped
+    one, so "   " was accepted and saved as a blank title."""
+    note_id = await make_note(session_factory)
+
+    response = await client.patch(f"/api/notes/{note_id}", json={"title": "   "})
+
+    assert response.status_code == 422
+    assert (await client.get(f"/api/notes/{note_id}")).json()["title"] == "Weekly notes"
+
+
+async def test_patch_stores_the_stripped_title(client, session_factory):
+    note_id = await make_note(session_factory)
+
+    body = (await client.patch(f"/api/notes/{note_id}", json={"title": "  Renamed  "})).json()
+
+    assert body["title"] == "Renamed"
+
+
 async def test_patch_unknown_note_is_a_404(client):
     assert (await client.patch("/api/notes/9999", json={"title": "x"})).status_code == 404
 

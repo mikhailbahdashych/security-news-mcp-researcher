@@ -1,8 +1,13 @@
 """Key/value settings store and the API-key masking helper."""
 
+import logging
+from typing import get_args
+
 import pytest
 
+from app.agent.providers import turn_settings
 from app.config import Settings
+from app.schemas.settings import Effort, ThinkingDisplay
 from app.services import settings as settings_service
 
 
@@ -152,3 +157,51 @@ async def test_key_source_names_the_winning_source(db_session, monkeypatch):
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-fromenv1234")
     assert await settings_service.get_key_source(db_session, empty) == "env"
+
+
+# ------------------------------------------- values from a closed set (get_choice)
+
+
+def test_the_allowed_values_are_the_ones_the_api_promises():
+    """The store is TEXT, so the coercion needs its own list — but a list that
+    drifts from the response model would coerce a value the API then rejects."""
+    assert settings_service.ALLOWED_VALUES["effort"] == get_args(Effort)
+    assert settings_service.ALLOWED_VALUES["thinking_display"] == get_args(ThinkingDisplay)
+
+
+async def test_get_choice_returns_a_stored_value_from_the_set(db_session):
+    await settings_service.set_value(db_session, "effort", "low")
+
+    assert await settings_service.get_choice(db_session, "effort") == "low"
+
+
+@pytest.mark.parametrize(
+    ("key", "stored", "expected"),
+    [("effort", "turbo", "high"), ("thinking_display", "loud", "summarized")],
+)
+async def test_get_choice_falls_an_unknown_value_back_to_the_default(
+    db_session, caplog, key, stored, expected
+):
+    await settings_service.set_value(db_session, key, stored)
+
+    with caplog.at_level(logging.WARNING, logger="app.services.settings"):
+        assert await settings_service.get_choice(db_session, key) == expected
+
+    # Silent coercion is the failure mode: the row is left alone, so the only
+    # trace that the stored value is being ignored is this line.
+    assert key in caplog.text
+    assert "falling back" in caplog.text
+    # Reading is not repairing.
+    assert await settings_service.get(db_session, key) == stored
+
+
+async def test_a_turn_reads_the_same_coerced_values_as_the_settings_page(db_session):
+    """The bug: `GET /api/settings` coerced `effort` for display while the turn
+    sent the raw value, so the page said "high" and every message 400'd."""
+    await settings_service.set_value(db_session, "effort", "turbo")
+    await settings_service.set_value(db_session, "thinking_display", "loud")
+
+    resolved = await turn_settings(db_session)
+
+    assert resolved["effort"] == "high"
+    assert resolved["thinking_display"] == "summarized"

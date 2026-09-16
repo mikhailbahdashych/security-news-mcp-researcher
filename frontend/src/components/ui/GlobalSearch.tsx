@@ -10,9 +10,11 @@ import {
   type SearchResults,
 } from '../../api/search'
 import useDebouncedValue from '../../lib/useDebouncedValue'
+import { excerptFromMarkdown } from '../notes/excerpt'
 import { formatNoteDate } from '../notes/noteDate'
 import { OVERLAY_BACKDROP, OVERLAY_PANEL, SECTION_LABEL, cx } from './classes'
 import { useModalPanel } from './modal'
+import { searchKeyAction } from './searchKeys'
 
 const DEBOUNCE_MS = 250
 
@@ -114,22 +116,47 @@ function SearchOverlay({ query, onQueryChange, onClose }: SearchOverlayProps) {
     [navigate, onClose],
   )
 
-  // Escape and Tab belong to `useModalPanel`, which listens on the document, so
-  // they work from a result button as well as from the input.
-  const onKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
-    if (flat.length === 0) {
+  /**
+   * Bring row `index` into view, and take focus with it if focus is already in
+   * the list.
+   *
+   * That condition is the whole trick: arrowing from the input must not pull
+   * focus out of the field the user is still typing into, but arrowing from a
+   * result button has to move focus too — otherwise the highlight and the
+   * focus ring end up on different rows and Enter has to pick one of them.
+   */
+  const followHighlight = useCallback(
+    (index: number) => {
+      const panel = panelRef.current
+      const row = panel?.querySelector<HTMLElement>(`[data-hit-index="${index}"]`)
+      if (!row) {
+        return
+      }
+      const focused = document.activeElement
+      if (focused instanceof HTMLElement && focused.dataset.hitIndex !== undefined) {
+        row.focus()
+      } else {
+        row.scrollIntoView({ block: 'nearest' })
+      }
+    },
+    [panelRef],
+  )
+
+  // On the panel, not the input: a result button has focus after one Tab, and
+  // the arrow keys have to keep working there. Escape and Tab belong to
+  // `useModalPanel`, which listens on the document.
+  const onKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    const action = searchKeyAction(event.key, activeIndex, flat.length)
+    if (action === null) {
       return
     }
-    if (event.key === 'ArrowDown') {
-      event.preventDefault()
-      setActiveIndex((current) => (current + 1) % flat.length)
-    } else if (event.key === 'ArrowUp') {
-      event.preventDefault()
-      setActiveIndex((current) => (current - 1 + flat.length) % flat.length)
-    } else if (event.key === 'Enter') {
-      event.preventDefault()
-      openHit(flat[activeIndex] ?? flat[0])
+    event.preventDefault()
+    if (action.kind === 'open') {
+      openHit(flat[action.index])
+      return
     }
+    setActiveIndex(action.index)
+    followHighlight(action.index)
   }
 
   return (
@@ -146,6 +173,7 @@ function SearchOverlay({ query, onQueryChange, onClose }: SearchOverlayProps) {
         role="dialog"
         aria-modal="true"
         aria-label="Search items, chats and notes"
+        onKeyDown={onKeyDown}
         className={cx(OVERLAY_PANEL, 'w-full max-w-[560px] overflow-hidden')}
       >
         <input
@@ -160,7 +188,6 @@ function SearchOverlay({ query, onQueryChange, onClose }: SearchOverlayProps) {
             // results: the keystroke is what invalidated the old selection.
             setActiveIndex(0)
           }}
-          onKeyDown={onKeyDown}
           // No focus ring: it is focused the moment the panel appears, and a
           // ring on the thing you are already typing into says nothing.
           className="w-full border-b border-line bg-transparent px-4 py-3.5 text-[14px] text-ink outline-none focus-visible:outline-none"
@@ -176,6 +203,7 @@ function SearchOverlay({ query, onQueryChange, onClose }: SearchOverlayProps) {
             activeIndex={activeIndex}
             query={trimmed}
             onPick={openHit}
+            onHighlight={setActiveIndex}
           />
         </div>
       </div>
@@ -192,6 +220,7 @@ interface PanelProps {
   activeIndex: number
   query: string
   onPick: (hit: SearchHit) => void
+  onHighlight: (index: number) => void
 }
 
 function Panel({
@@ -203,6 +232,7 @@ function Panel({
   activeIndex,
   query,
   onPick,
+  onHighlight,
 }: PanelProps) {
   if (!ready) {
     return (
@@ -245,8 +275,10 @@ function Panel({
                     key={`${hit.type}-${hit.id}`}
                     hit={hit}
                     query={query}
+                    index={start + index}
                     active={flat.length > 0 && start + index === activeIndex}
                     onPick={onPick}
+                    onHighlight={onHighlight}
                   />
                 ))}
               </ul>
@@ -261,14 +293,21 @@ function Panel({
 interface HitRowProps {
   hit: SearchHit
   query: string
+  /** Position in the flat list, which is what the keyboard walks. */
+  index: number
   active: boolean
   onPick: (hit: SearchHit) => void
+  onHighlight: (index: number) => void
 }
 
-function HitRow({ hit, query, active, onPick }: HitRowProps) {
+function HitRow({ hit, query, index, active, onPick, onHighlight }: HitRowProps) {
+  // A note's snippet is the head of its Markdown source — "## ChainDrop npm
+  // Worm **What happened** — …" — exactly what the notes list runs through
+  // `excerptFromMarkdown`. The other two kinds are already plain text.
+  const text = hit.type === 'note' ? excerptFromMarkdown(hit.snippet) : hit.snippet
   // A hit that matched on its title has the title as its best snippet too, and
   // the same sentence twice in a row reads as a rendering bug.
-  const snippet = hit.snippet === hit.title ? '' : hit.snippet
+  const snippet = text === hit.title ? '' : text
   const meta = [snippet, hit.timestamp ? formatNoteDate(hit.timestamp) : '']
     .filter(Boolean)
     .join(' · ')
@@ -277,7 +316,11 @@ function HitRow({ hit, query, active, onPick }: HitRowProps) {
     <li>
       <button
         type="button"
+        data-hit-index={index}
         onClick={() => onPick(hit)}
+        // Tab is still allowed to move through the rows; this is what keeps the
+        // highlight on the row it lands on, so Enter opens what is focused.
+        onFocus={() => onHighlight(index)}
         className={cx(
           'flex w-full flex-col items-start gap-px px-4 py-[7px] text-left transition-colors duration-150',
           active ? 'bg-hover' : 'hover:bg-hover',

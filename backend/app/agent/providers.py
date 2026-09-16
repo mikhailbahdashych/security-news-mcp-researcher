@@ -41,8 +41,10 @@ async def turn_settings(
     return {
         "api_key": await settings_service.get_effective_api_key(session, settings),
         "model": await settings_service.get_str(session, "model"),
-        "effort": await settings_service.get_str(session, "effort"),
-        "thinking_display": await settings_service.get_str(session, "thinking_display"),
+        # Coerced, not raw: a hand-edited row would otherwise be sent verbatim
+        # and 400 every message while the Settings page showed the default.
+        "effort": await settings_service.get_choice(session, "effort"),
+        "thinking_display": await settings_service.get_choice(session, "thinking_display"),
         "max_tool_turns": await settings_service.get_int(session, "max_tool_turns"),
         "system_prompt_extra": await settings_service.get_str(session, "system_prompt_extra"),
     }

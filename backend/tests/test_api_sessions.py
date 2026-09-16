@@ -14,7 +14,7 @@ import pytest
 from fakes.anthropic import ScriptedAnthropic, turn_text, turn_tool_use
 from httpx2 import ASGITransport
 from sqlalchemy import func, select
-from sse_util import parse_sse
+from sse_util import parse_sse, payloads_for
 
 from app.agent import persistence
 from app.api import tasks as task_registry
@@ -235,6 +235,35 @@ async def test_patch_renames_and_bumps_updated_at(client):
     assert renamed.status_code == 200
     assert renamed.json()["title"] == "Renamed"
     assert renamed.json()["updated_at"] > before
+
+
+async def test_a_patch_that_changes_nothing_leaves_the_ordering_alone(client):
+    """The sidebar is ordered by ``updated_at``, so a no-op PATCH that bumped it
+    reordered the user's history for nothing — a rename dialog opened and
+    confirmed unchanged used to float the thread to the top."""
+    session_id = await create_session(client)
+    stamp = (
+        await client.patch(f"/api/sessions/{session_id}", json={"title": "Same"})
+    ).json()["updated_at"]
+
+    again = await client.patch(
+        f"/api/sessions/{session_id}", json={"title": "  Same  ", "archived": False}
+    )
+    empty = await client.patch(f"/api/sessions/{session_id}", json={})
+
+    assert again.json()["title"] == "Same"
+    assert again.json()["updated_at"] == stamp
+    assert empty.json()["updated_at"] == stamp
+
+
+async def test_archiving_still_bumps_updated_at(client):
+    session_id = await create_session(client)
+    before = (await client.get(f"/api/sessions/{session_id}")).json()["session"]["updated_at"]
+
+    archived = await client.patch(f"/api/sessions/{session_id}", json={"archived": True})
+
+    assert archived.json()["archived"] is True
+    assert archived.json()["updated_at"] > before
 
 
 async def test_patch_with_an_empty_title_clears_it(client):
@@ -559,7 +588,12 @@ async def test_cancel_stops_a_running_turn_and_keeps_what_was_persisted(
         response = await stream
         events = [name for name, _ in parse_sse(response.text)]
         assert events[-1] == "done"
-        assert "error" in events
+        # Which error: `cancelled` is a closed-set type the UI renders as "Stopped",
+        # and asserting only that *an* error arrived would pass on an api_error
+        # raised by the teardown itself.
+        assert [payload["type"] for payload in payloads_for(response.text, "error")] == [
+            "cancelled"
+        ]
 
         detail = (await http.get(f"/api/sessions/{session_id}")).json()
         # The user message committed before the first LLM call, so it survives.

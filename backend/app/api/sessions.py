@@ -173,14 +173,20 @@ async def update_session(
     """
     research = await _load_session(session, session_id)
     changes = payload.model_dump(exclude_unset=True)
+    moved = False
     if "title" in changes:
-        research.title = (changes["title"] or "").strip() or None
+        title = (changes["title"] or "").strip() or None
+        moved = moved or title != research.title
+        research.title = title
     if changes.get("archived") is not None:
+        moved = moved or changes["archived"] != research.archived
         research.archived = changes["archived"]
-    # Set explicitly rather than leaning on ``onupdate``: the sidebar is ordered
-    # by this column, so a rename should float the thread back to the top even
-    # when the new title happens to equal the old one.
-    research.updated_at = utcnow()
+    # Set explicitly rather than leaning on ``onupdate``, and only when something
+    # actually moved: the sidebar is ordered by this column, so a PATCH that
+    # changes nothing — a rename to the title it already had, a body with no
+    # fields in it — must not reorder the user's history.
+    if moved:
+        research.updated_at = utcnow()
     await session.commit()
     await session.refresh(research)
     return SessionRead.model_validate(research)

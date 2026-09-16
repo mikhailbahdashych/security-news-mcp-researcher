@@ -354,8 +354,10 @@ async def update_note(note_id: int, payload: NoteUpdate, session: DbSession) -> 
     """Apply a hand edit. Sources and the template used are never touched — they
     describe how the note was produced, which editing it does not change."""
     note = await _load_note(session, note_id)
+    # Already stripped by the schema, which validates the stored shape rather
+    # than the typed one.
     if payload.title is not None:
-        note.title = payload.title.strip()
+        note.title = payload.title
     if payload.body_md is not None:
         note.body_md = payload.body_md
     # Set explicitly rather than leaning on ``onupdate``: saving an edit that

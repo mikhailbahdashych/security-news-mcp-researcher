@@ -59,6 +59,19 @@ const toDraft = (settings: AppSettings): Draft => ({
   feed_timeout_s: settings.feed_timeout_s,
 })
 
+/**
+ * The current value as an option of its own, when it is not one of ours.
+ *
+ * A `<select>` whose value matches no option renders as the first one, so a
+ * stored "turbo" would show as "low" — and the next save would write that back
+ * as though the user had chosen it. The API coerces an off-union value to the
+ * default before it ever gets here; this is the second lock, for a response from
+ * an older build or a hand-edited database.
+ */
+function UnknownOption({ value, options }: { value: string; options: readonly string[] }) {
+  return options.includes(value) ? null : <option value={value}>{value} (unknown value)</option>
+}
+
 /** Settings looks the same in both panes: it edits app state, not a selection. */
 export default function SettingsPage(_props: EmbeddablePageProps) {
   const settingsQuery = useQuery({ queryKey: settingsQueryKey, queryFn: fetchSettings })
@@ -177,6 +190,7 @@ function SettingsForm({ settings }: { settings: AppSettings }) {
               value={draft.effort}
               onChange={(event) => edit('effort', event.target.value as Effort)}
             >
+              <UnknownOption value={draft.effort} options={EFFORTS} />
               {EFFORTS.map((value) => (
                 <option key={value} value={value}>
                   {value}
@@ -196,6 +210,7 @@ function SettingsForm({ settings }: { settings: AppSettings }) {
               value={draft.thinking_display}
               onChange={(event) => edit('thinking_display', event.target.value as ThinkingDisplay)}
             >
+              <UnknownOption value={draft.thinking_display} options={THINKING_DISPLAYS} />
               {THINKING_DISPLAYS.map((value) => (
                 <option key={value} value={value}>
                   {value}
@@ -329,15 +344,12 @@ function LayoutSection() {
   const navigate = useNavigate()
   const uid = useId()
 
-  // The left pane is the router's pane, so the URL — not the stored preference —
-  // is what is actually on screen there. Reading the preference let the select
-  // name a page other than the one next to it, and picking that page back wrote
-  // the value it already had, moving nothing.
+  // The left pane is the router's pane, so the URL is the only statement of
+  // what it shows — and this select names and moves it, which is why Settings
+  // reads the location and navigates even when it is the embedded pane. See the
+  // carve-out in `PageHost.tsx`.
   const leftPane = pageFromPath(location.pathname)
-  const openOnTheLeft = (page: PageKey) => {
-    layout.setPaneA(page)
-    navigate(routeForPage(page))
-  }
+  const openOnTheLeft = (page: PageKey) => navigate(routeForPage(page))
 
   return (
     <SettingsSection title="Layout" description="Show two pages side by side in one window.">

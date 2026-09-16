@@ -6,12 +6,18 @@ through ``PUT /api/settings`` and is only ever read back masked.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from fastapi import APIRouter
 
 from app.api.deps import AnthropicClient, AppSettings, DbSession
-from app.schemas.settings import SettingsRead, SettingsUpdate, TestKeyResult
+from app.schemas.settings import (
+    Effort,
+    SettingsRead,
+    SettingsUpdate,
+    TestKeyResult,
+    ThinkingDisplay,
+)
 from app.services import anthropic_models
 from app.services import settings as settings_service
 
@@ -29,8 +35,14 @@ async def _read(session: DbSession, settings: AppSettings) -> SettingsRead:
     api_key = await settings_service.get_str(session, "anthropic_api_key")
     return SettingsRead(
         model=await settings_service.get_str(session, "model"),
-        effort=await settings_service.get_str(session, "effort"),
-        thinking_display=await settings_service.get_str(session, "thinking_display"),
+        # Coerced in the service, not here, so that the turn settings read the
+        # same value this page shows — see `settings_service.ALLOWED_VALUES`.
+        # The frontend keeps its own "(unknown value)" option regardless:
+        # neither side trusts the other to have coerced first.
+        effort=cast(Effort, await settings_service.get_choice(session, "effort")),
+        thinking_display=cast(
+            ThinkingDisplay, await settings_service.get_choice(session, "thinking_display")
+        ),
         # "a key is stored in *this database*" — deliberately not "a key is
         # usable", which is what ``key_source`` answers: an ``ANTHROPIC_API_KEY``
         # from the environment or .env works without anything being stored.

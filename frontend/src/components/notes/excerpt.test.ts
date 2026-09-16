@@ -40,6 +40,44 @@ describe('excerptFromMarkdown', () => {
     )
   })
 
+  it('drops a code fence and keeps the code', () => {
+    // The fence line is markup; the lines inside it are the only words the row
+    // has. Dropping the block entirely leaves a code-first note with a blank
+    // excerpt, and a stray ``` reads as corruption.
+    expect(
+      excerptFromMarkdown('Run this:\n\n```bash\nnpm audit fix\n```\n\nThen redeploy.'),
+    ).toBe('Run this: npm audit fix Then redeploy.')
+    // An excerpt is a fixed-length slice, so the closing fence is often missing.
+    expect(excerptFromMarkdown('```js\nconst x = 1')).toBe('const x = 1')
+  })
+
+  it('reads a setext heading as its own text', () => {
+    expect(excerptFromMarkdown('ChainDrop npm worm\n==================\n\nOn 4 August.')).toBe(
+      'ChainDrop npm worm On 4 August.',
+    )
+    expect(excerptFromMarkdown('Root cause\n----------\n\nAn unpinned action.')).toBe(
+      'Root cause An unpinned action.',
+    )
+  })
+
+  it('unwraps reference links and drops their definitions', () => {
+    expect(
+      excerptFromMarkdown('See [the advisory][acme] and [CVE-2026-1234][].\n\n[acme]: https://x.test/a'),
+    ).toBe('See the advisory and CVE-2026-1234.')
+  })
+
+  it('reads a task list as its items', () => {
+    expect(excerptFromMarkdown('- [ ] Patch the gateway\n- [x] Rotate the keys')).toBe(
+      'Patch the gateway Rotate the keys',
+    )
+  })
+
+  it('reads a table as its cells, without the rules between them', () => {
+    expect(
+      excerptFromMarkdown('| CVE | Severity |\n| --- | --- |\n| CVE-2026-1234 | critical |'),
+    ).toBe('CVE Severity CVE-2026-1234 critical')
+  })
+
   it('has nothing to say about nothing', () => {
     expect(excerptFromMarkdown('')).toBe('')
     expect(excerptFromMarkdown('\n\n##\n')).toBe('')
