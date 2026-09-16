@@ -81,8 +81,36 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
   const [sessionSearch, setSessionSearch] = useState('')
   const [showArchived, setShowArchived] = useState(false)
   const abort = useRef<AbortController | null>(null)
+  // Which send owns the live state. Bumped whenever a turn is abandoned, so a
+  // reader that is still running cannot write to the turn that replaced it.
+  const turnSeq = useRef(0)
   const scroller = useRef<HTMLDivElement>(null)
   const bottom = useRef<HTMLDivElement>(null)
+
+  /**
+   * Leave the turn on the wire: stop it, stop it being billed, and disown it.
+   *
+   * Every "leave this conversation" path used to dispatch `reset` alone. That
+   * cleared `streaming`, which re-enabled the composer while the stream was
+   * still running — and when the abandoned turn finally ended, its `finally`
+   * nulled the *new* turn's controller (killing Stop) and dispatched `settle`,
+   * wiping a question, its steps and its streamed text off the screen mid-turn.
+   * Bumping the token is what makes those late dispatches no-ops.
+   */
+  const abandonTurn = useCallback((cancelSessionId: number | null) => {
+    turnSeq.current += 1
+    const controller = abort.current
+    abort.current = null
+    if (!controller) {
+      return
+    }
+    // Both halves, as everywhere else: the abort stops the browser reading and
+    // the endpoint stops the server finishing — and billing — an Opus turn.
+    controller.abort()
+    if (cancelSessionId !== null) {
+      void cancelTurn(cancelSessionId).catch(() => undefined)
+    }
+  }, [])
 
   const debouncedSessionSearch = useDebouncedValue(sessionSearch)
   const sessionFilters = useMemo<SessionFilters>(
@@ -121,11 +149,13 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
   // id at all. Reading that as "the user left" reset every turn started from the
   // empty view on its first render.
   const staleSession = isForeignSession(live, sessionId)
+  const liveSession = live.sessionId
   useEffect(() => {
     if (staleSession) {
+      abandonTurn(liveSession)
       dispatch({ kind: 'reset' })
     }
-  }, [staleSession])
+  }, [abandonTurn, liveSession, staleSession])
 
   // Clear the handover off the history entry so a reload does not re-attach.
   useEffect(() => {
@@ -193,7 +223,9 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
       queryClient.invalidateQueries({ queryKey: sessionsQueryKey })
       if (id === sessionId) {
         // Without this the deleted session's terminal error would follow the
-        // user onto the blank /chat view.
+        // user onto the blank /chat view — and its stream would keep running
+        // against a session that no longer exists.
+        abandonTurn(live.sessionId)
         dispatch({ kind: 'reset' })
         openSession(null)
       }
@@ -202,11 +234,21 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
 
   const send = useCallback(
     async (text: string) => {
+      // A send supersedes whatever is on the wire rather than racing it.
+      abandonTurn(live.sessionId)
+      const token = turnSeq.current
+      // Every dispatch below belongs to *this* send. Creating a session is an
+      // await, so the user can leave before the stream even opens.
+      const mine = () => turnSeq.current === token
+
       let id = sessionId
       if (id === null) {
         const created = await createSession({})
         id = created.id
         await queryClient.invalidateQueries({ queryKey: sessionsQueryKey })
+        if (!mine()) {
+          return
+        }
         openSession(id, true)
       }
 
@@ -221,6 +263,7 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
         sessionId: id,
         startedAt: Date.now(),
         attachments: chips,
+        token,
       })
 
       const controller = new AbortController()
@@ -238,7 +281,7 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
             } catch {
               return
             }
-            dispatch({ kind: 'sse', event, payload })
+            dispatch({ kind: 'sse', event, payload, token })
           },
         })
       } catch (error) {
@@ -246,6 +289,7 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
           dispatch({
             kind: 'failed',
             error: { type: 'cancelled', message: 'Stopped.', category: null },
+            token,
           })
         } else {
           const payload: ErrorPayload = {
@@ -253,37 +297,49 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
             message: error instanceof Error ? error.message : String(error),
             category: null,
           }
-          dispatch({ kind: 'failed', error: payload })
+          dispatch({ kind: 'failed', error: payload, token })
         }
       } finally {
-        abort.current = null
+        if (mine()) {
+          abort.current = null
+        }
         // The Query cache becomes the source of truth again once the turn ends.
+        // Worth doing even for an abandoned turn: it still wrote to the session.
         await queryClient.invalidateQueries({ queryKey: sessionQueryKey(id) })
         await queryClient.invalidateQueries({ queryKey: sessionsQueryKey })
         // `settle`, not `reset`: a refusal, a stop or a connection failure has to
         // stay on screen until the next send, or the user is left looking at
-        // their own question with nothing under it.
-        dispatch({ kind: 'settle' })
+        // their own question with nothing under it. Re-checked after the awaits,
+        // which are long enough for the user to have left.
+        if (mine()) {
+          dispatch({ kind: 'settle', token })
+        }
       }
     },
-    [attached, openSession, queryClient, sessionId],
+    [abandonTurn, attached, live.sessionId, openSession, queryClient, sessionId],
   )
 
   const stop = useCallback(() => {
     // Both halves are needed: the abort stops the browser reading, and the
     // endpoint stops the server billing. An SSE disconnect alone does neither.
     abort.current?.abort()
-    if (sessionId !== null) {
-      void cancelTurn(sessionId).catch(() => undefined)
+    // The turn's own session, not the route's. A browser-back to `/chat`
+    // mid-turn leaves the turn on screen with its Stop button and no id in the
+    // URL, and this branch is what made that state reachable — cancelling
+    // `sessionId` there cancelled nothing and the server billed the whole turn.
+    const cancelId = live.sessionId ?? sessionId
+    if (cancelId !== null) {
+      void cancelTurn(cancelId).catch(() => undefined)
     }
-  }, [sessionId])
+  }, [live.sessionId, sessionId])
 
   const newChat = useCallback(() => {
+    abandonTurn(live.sessionId)
     dispatch({ kind: 'reset' })
     setAttached([])
     setHistoryOpen(false)
     openSession(null)
-  }, [openSession])
+  }, [abandonTurn, live.sessionId, openSession])
 
   const allSessions = sessions.data?.pages.flatMap((page) => page.sessions) ?? []
   // Which row is mid-write, so the drawer can grey it out while it saves.
@@ -372,6 +428,7 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
           onSearchChange={setSessionSearch}
           onShowArchivedChange={setShowArchived}
           onOpen={(id) => {
+            abandonTurn(live.sessionId)
             dispatch({ kind: 'reset' })
             setHistoryOpen(false)
             openSession(id)

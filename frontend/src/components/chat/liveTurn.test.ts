@@ -19,15 +19,24 @@ const PINNED: TurnAttachment[] = [
   { id: 7, title: 'Akira ransomware hits VPN appliances', url: 'https://example.com/akira' },
 ]
 
+/** The token `send` stamps on every dispatch belonging to one turn. */
+const TURN = 1
+
 const START: LiveAction = {
   kind: 'start',
   prompt: 'What broke this week?',
   sessionId: 12,
   startedAt: 1_000,
   attachments: [],
+  token: TURN,
 }
 
-const sse = (event: string, payload: unknown): LiveAction => ({ kind: 'sse', event, payload })
+const sse = (event: string, payload: unknown, token = TURN): LiveAction => ({
+  kind: 'sse',
+  event,
+  payload,
+  token,
+})
 
 function apply(actions: LiveAction[], from: LiveTurn = emptyTurn): LiveTurn {
   return actions.reduce(liveTurnReducer, from)
@@ -151,7 +160,7 @@ describe('activity', () => {
   })
 
   it('drops them again once the transcript can render them', () => {
-    const live = apply([{ ...START, attachments: PINNED }, { kind: 'settle' }])
+    const live = apply([{ ...START, attachments: PINNED }, { kind: 'settle', token: TURN }])
     expect(live.attachments).toEqual([])
     expect(apply([{ ...START, attachments: PINNED }, { kind: 'reset' }]).attachments).toEqual([])
   })
@@ -342,6 +351,58 @@ describe('activity', () => {
     ])
     expect(live.streaming).toBe(false)
     expect(live.activity).toBe('thinking')
+  })
+})
+
+describe('turn scoping', () => {
+  /** The second turn, as `send` would stamp it after abandoning the first. */
+  const SECOND: LiveAction = { ...START, prompt: 'And the KEV catalog?', token: 2 }
+
+  it('ignores a settle from the turn that was abandoned', () => {
+    // Send, leave mid-turn, send again: the first stream is still open, and its
+    // `finally` used to wipe the second turn's question, steps and text off the
+    // screen while that one was still streaming.
+    const live = apply([START, SECOND, { kind: 'settle', token: TURN }])
+    expect(live.prompt).toBe('And the KEV catalog?')
+    expect(live.streaming).toBe(true)
+  })
+
+  it('ignores events from the turn that was abandoned', () => {
+    const live = apply([
+      START,
+      SECOND,
+      sse('text_delta', { text: 'From the first turn.' }, TURN),
+      sse('text_delta', { text: 'From the second.' }, 2),
+    ])
+    expect(live.text).toBe('From the second.')
+  })
+
+  it('ignores a failure from the turn that was abandoned', () => {
+    // The dying stream's error frame used to land on the fresh state and render
+    // a context-free banner over a turn that had nothing to do with it.
+    const live = apply([
+      START,
+      SECOND,
+      { kind: 'failed', error: { type: 'connection', message: 'boom', category: null }, token: TURN },
+    ])
+    expect(live.error).toBeNull()
+    expect(live.streaming).toBe(true)
+  })
+
+  it('still settles and fails the turn it belongs to', () => {
+    expect(apply([START, { kind: 'settle', token: TURN }]).prompt).toBeNull()
+    const failed = apply([
+      START,
+      { kind: 'failed', error: { type: 'cancelled', message: 'Stopped.', category: null }, token: TURN },
+    ])
+    expect(failed.error?.type).toBe('cancelled')
+    expect(failed.streaming).toBe(false)
+  })
+
+  it('resets whatever is on screen, whichever turn it belongs to', () => {
+    // Leaving is the user's decision, not a late frame's: `reset` carries no
+    // token precisely so it cannot be ignored.
+    expect(apply([START, SECOND, { kind: 'reset' }])).toEqual(emptyTurn)
   })
 })
 

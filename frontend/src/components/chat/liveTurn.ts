@@ -121,6 +121,17 @@ export interface LiveTurn {
   activeTool: ActiveTool | null
   /** `Date.now()` when `start` was dispatched, for the elapsed counter. */
   startedAt: number
+  /**
+   * Which send this state belongs to.
+   *
+   * A stream does not stop because the user walked away from it: leaving a
+   * conversation mid-turn and asking something else leaves the first reader
+   * still running, and its late frames — a delta, an error, the `settle` in its
+   * `finally` — used to land on the turn that replaced it and wipe it off the
+   * screen mid-stream. `send` stamps every dispatch with the token it claimed,
+   * and anything carrying an older one is a message from a turn that is over.
+   */
+  token: number
 }
 
 export const emptyTurn: LiveTurn = {
@@ -137,6 +148,7 @@ export const emptyTurn: LiveTurn = {
   activity: 'starting',
   activeTool: null,
   startedAt: 0,
+  token: 0,
 }
 
 export type LiveAction =
@@ -146,10 +158,13 @@ export type LiveAction =
       sessionId: number
       startedAt: number
       attachments: TurnAttachment[]
+      token: number
     }
-  | { kind: 'sse'; event: string; payload: unknown }
-  | { kind: 'failed'; error: ErrorPayload }
-  | { kind: 'settle' }
+  | { kind: 'sse'; event: string; payload: unknown; token: number }
+  | { kind: 'failed'; error: ErrorPayload; token: number }
+  | { kind: 'settle'; token: number }
+  // `reset` is the user leaving, not a frame arriving, so it carries no token
+  // and can never be ignored.
   | { kind: 'reset' }
 
 /**
@@ -206,12 +221,17 @@ function patchTool(steps: LiveStep[], toolUseId: string, patch: Partial<LiveTool
 }
 
 export function liveTurnReducer(state: LiveTurn, action: LiveAction): LiveTurn {
+  if (action.kind !== 'reset' && action.kind !== 'start' && action.token !== state.token) {
+    // A late frame from a turn the user has already left behind.
+    return state
+  }
   switch (action.kind) {
     case 'reset':
       return emptyTurn
     case 'start':
       return {
         ...emptyTurn,
+        token: action.token,
         sessionId: action.sessionId,
         prompt: action.prompt,
         attachments: action.attachments,
