@@ -143,8 +143,6 @@ export const deleteSession = (id: number): Promise<void> => apiDelete<void>(`/se
 export const cancelTurn = (id: number): Promise<{ cancelled: boolean }> =>
   apiPost<{ cancelled: boolean }>(`/sessions/${id}/cancel`)
 
-export const messagesUrl = (id: number): string => `/api/sessions/${id}/messages`
-
 /** `POST /sessions/:id/messages`: the turn was accepted and is already running. */
 export interface TurnAccepted {
   turn_id: string
