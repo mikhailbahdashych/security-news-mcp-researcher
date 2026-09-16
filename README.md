@@ -11,21 +11,37 @@ make up          # docker compose up --build
 ```
 
 Then open <http://localhost:8000>. Data lives in the named `appdata` volume, so it
-survives `docker compose down`.
+survives `docker compose down`. The port is `PORT` from the repo-root `.env` (or the
+shell); `docker compose` publishes and passes the same number, so `PORT=9000 make up`
+serves on <http://localhost:9000>. `PORT` must be 1024 or above.
+
+The container runs as the non-root user `app` (uid 1000), which owns `/data`. The
+image's entrypoint (`docker/entrypoint.sh`) starts as root only long enough to check
+who owns `/data`; an `appdata` volume created by an earlier, root-running image is
+chowned once, then the entrypoint drops to `app` with `setpriv` and starts the server.
+An existing volume therefore keeps working with no manual step. If you run the image
+with `--user`, nothing is chowned and ownership is yours to manage
+(`docker compose run --rm --user root app chown -R app:app /data` fixes it by hand).
 
 ## Local development
 
 Two terminals:
 
 ```sh
-make dev-api     # FastAPI with reload on :8000
-make dev-web     # Vite dev server on :5173, proxying /api to :8000
+make dev-api     # uv run python -m app --reload — binds 127.0.0.1:$PORT (default 8000)
+make dev-web     # Vite dev server on :5173, proxying /api to $PORT
 ```
 
-Then open <http://localhost:5173>.
+Then open <http://localhost:5173>. The backend reads `PORT` from the environment or
+the repo-root `.env`; Vite reads only the environment, so a port set in `.env` alone
+needs `PORT=... make dev-web` as well.
 
 Prerequisites: [uv](https://docs.astral.sh/uv/) and Node 22+.
-Copy `.env.example` to `.env` if you want to override defaults.
+Copy `.env.example` to `.env` if you want to override defaults. `CORS_ORIGINS` takes a
+comma-separated list (`CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173`) as
+well as a JSON array; `*` is refused. Leave it empty unless a browser on some other
+origin has to call the API: Docker serves the SPA same-origin, and `make dev-web`
+proxies `/api` through Vite.
 
 ## The Anthropic API key
 
@@ -53,6 +69,41 @@ summary stays as the fallback. **Seed defaults** adds a starter set of security
 sources (The Hacker News, BleepingComputer, Krebs on Security, CISA advisories, SANS
 ISC, Google Project Zero).
 
+## Research chat
+
+**Research** streams an answer and shows its working: a STEPS card with the reasoning
+and every tool call in the order they happened, and a SOURCES grid of what the answer
+can be traced back to. The model can search and read your inbox, use Anthropic's
+server-side web search and fetch (both toggleable in Settings), and call any tool from
+a configured MCP server. Attach inbox items to a question from the composer, or send a
+multi-select straight from the Inbox with **Research these**. **Stop** both aborts the
+browser's read and tells the server to stop the turn, so it stops billing too. Refresh
+mid-turn and the transcript is still there — it is written as the turn progresses.
+
+## Meeting notes
+
+**Notes** turns starred items and/or a research session into one Markdown document,
+following the template in Settings (five headings per item by default). Generation is
+streamed and can be stopped; it writes **nothing** unless it finishes, so a refusal or
+a stop leaves no half-note behind. A saved note records its sources — the items it was
+asked about, plus any page the model deliberately fetched or actually cited. Edit it in
+place, **Copy** it, or **Download** it as `.md`.
+
+## Search and history
+
+`Cmd/Ctrl+K` searches your feed items, research sessions and notes at once, and a hit
+opens that entity — an item deep-links into the Inbox filtered to the same query.
+A session matches on anything said inside it, not just its title, so a CVE mentioned in
+the middle of a long answer is findable. Sessions can be renamed, archived (hidden from
+the sidebar by default) and deleted; deleting one keeps any notes generated from it.
+
+## The window
+
+The left rail collapses to icons or expands to labels, and the theme follows your OS
+until you pick one — both remembered. **Settings → Layout** turns on **split screen**,
+which puts two of the four pages side by side in one window: the left pane is the one
+with the URL and the back button, the right one is a second view for reference.
+
 ## Outbound fetch safety
 
 Everything the server fetches is influenced by someone else: a feed is third-party
@@ -70,6 +121,13 @@ One exemption: the **first hop of a feed URL you typed yourself** is not checked
 Pointing this app at a FreshRSS or Miniflux instance on your own LAN is a legitimate
 setup, and you are the one who configured it. Everything that URL redirects to is
 still checked, and article URLs — which nobody typed — are checked from the first hop.
+
+The app identifies itself honestly (`SecurityNewsResearcher/0.1`, not a browser).
+Two of the default sources sit behind bot protection that refuses non-browser TLS
+clients: when a feed or article fetch comes back `403`, the app retries it once
+through a browser-TLS client (`curl_cffi`), with the same guard, redirect checks and
+size caps. A `403` that survives the retry is shown on the feed as
+"blocked by the site's bot protection".
 
 ## MCP servers
 
@@ -168,7 +226,7 @@ make lint        # backend: uv run ruff check ., then frontend: npm run lint (ox
 | ----------- | ------------------------------------------------------- |
 | `backend/`  | FastAPI app (`app/`), tests, uv-managed dependencies     |
 | `frontend/` | Vite + React + TypeScript SPA, built into `frontend/dist` |
-| `docs/`     | Design notes                                             |
+| `docs/`     | `DESIGN.md` (design record), `ROADMAP.md` (backlog)       |
 
 In Docker the SPA is built and served by the backend from `/app/static`, so the whole
 app is one container on one port.
