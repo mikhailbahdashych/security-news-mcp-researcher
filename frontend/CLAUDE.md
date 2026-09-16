@@ -313,6 +313,13 @@ before anything inside re-renders the node the event landed on. Nothing in this 
 renders into a portal, so the row menu and the delete dialog are DOM children of the
 panel and one `contains` check covers them.
 
+**`/chat/:id` is parsed, not `Number()`d.** `api/chat.ts::parseSessionId(raw)` returns
+an id only for `/^\d+$/` and a positive safe integer; `Number('abc')` is `NaN` and
+`Number('1.5')` is `1.5`, and both reached the API, which answers **422** — a status
+the 404 path cannot act on, so the page sat on a dead URL. Null keeps the detail query
+disabled, and a routed `:id` that parsed to null navigates to `/chat` (replace) on its
+own, because a disabled query never errors.
+
 **A 404 from `GET /sessions/{id}` leaves the session.** `isNotFound(detail.error)`
 drives an effect that abandons the live turn, dispatches `reset` and calls
 `openSession(null, true)` — `navigate('/chat', {replace: true})` routed, a cleared
@@ -360,9 +367,9 @@ hand-rolled `.prose-chat` block in `src/index.css`, deliberately instead of
 
 ## Tests
 
-`npx vitest run` — **10 files, 156 tests**, `environment: 'node'`, so only pure modules
+`npx vitest run` — **10 files, 160 tests**, `environment: 'node'`, so only pure modules
 are covered: `lib/sse.test.ts` (frames split across chunks, multi-line data,
-heartbeats ignored), `api/chat.test.ts` (`blocksToText`, `groupTurns`,
+heartbeats ignored), `api/chat.test.ts` (`blocksToText`, `groupTurns`, `parseSessionId`,
 `stepsFromMessage`, `toolCallStatus`, source extraction, the sandbox card, the
 formatters), `components/chat/liveTurn.test.ts` (`isForeignSession`, `turnsBesideLive`,
 the streamed server-tool input, the `activity` transitions, turn scoping, `activityLabel`,

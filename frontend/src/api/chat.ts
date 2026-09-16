@@ -1073,6 +1073,24 @@ export function citationFor(
   return sources.find((source) => normalizeUrl(source.url) === target) ?? null
 }
 
+/**
+ * The session id a `/chat/:id` route names, or null when it names nothing that
+ * could be one.
+ *
+ * `Number()` is too generous to be the router's gate: `Number('abc')` is `NaN`,
+ * `Number('1.5')` is `1.5` and `Number('-3')` is `-3`, and all three used to be
+ * sent to the API, which answers **422** — not the 404 the missing-session path
+ * knows how to handle, so the page sat on a dead URL showing an error. Ids are
+ * SQLite rowids, so the whole of a valid one is digits and it is positive.
+ */
+export function parseSessionId(raw: string | undefined): number | null {
+  if (raw === undefined || !/^\d+$/.test(raw)) {
+    return null
+  }
+  const id = Number(raw)
+  return Number.isSafeInteger(id) && id > 0 ? id : null
+}
+
 const MONTHS = [
   'Jan',
   'Feb',

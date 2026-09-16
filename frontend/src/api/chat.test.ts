@@ -7,6 +7,7 @@ import {
   formatMs,
   formatTokens,
   groupTurns,
+  parseSessionId,
   stepsFromMessage,
   toolCallStatus,
   toolHint,
@@ -517,6 +518,33 @@ describe('formatting', () => {
   it('groups milliseconds without a comma', () => {
     expect(formatMs(412)).toBe('412 ms')
     expect(formatMs(2108)).toBe('2 108 ms')
+  })
+})
+
+describe('parseSessionId', () => {
+  it('reads a plain positive integer', () => {
+    expect(parseSessionId('5')).toBe(5)
+    expect(parseSessionId('1204')).toBe(1204)
+  })
+
+  it('rejects anything that is not all digits', () => {
+    // These reached the API as `NaN`, `1.5` and `-3`, where FastAPI answers 422
+    // — not the 404 the missing-session path knows what to do with.
+    expect(parseSessionId('abc')).toBeNull()
+    expect(parseSessionId('1.5')).toBeNull()
+    expect(parseSessionId('-3')).toBeNull()
+    expect(parseSessionId('12a')).toBeNull()
+    expect(parseSessionId(' 7')).toBeNull()
+  })
+
+  it('rejects an id no row could carry', () => {
+    expect(parseSessionId('0')).toBeNull()
+    expect(parseSessionId('99999999999999999999')).toBeNull()
+  })
+
+  it('is null for a route with no id at all', () => {
+    expect(parseSessionId(undefined)).toBeNull()
+    expect(parseSessionId('')).toBeNull()
   })
 })
 

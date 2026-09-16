@@ -12,6 +12,7 @@ import {
   formatTokens,
   groupTurns,
   messagesUrl,
+  parseSessionId,
   renameSession,
   sessionQueryKey,
   sessionsListKey,
@@ -57,7 +58,12 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
   // view's right pane) the URL belongs to the other pane, so it is local state
   // and every "open this session" goes through `openSession` instead.
   const [embeddedSessionId, setEmbeddedSessionId] = useState<number | null>(null)
-  const sessionId = embedded ? embeddedSessionId : params.id ? Number(params.id) : null
+  // `parseSessionId`, not `Number()`: the router matches `:id` against anything,
+  // and `Number('abc')` is `NaN`, `Number('1.5')` is `1.5`. Those went to the API
+  // and came back 422, which the 404 path below cannot act on. Null here keeps
+  // the detail query disabled, so the bad request is never made at all.
+  const routeSessionId = parseSessionId(params.id)
+  const sessionId = embedded ? embeddedSessionId : routeSessionId
 
   const openSession = useCallback(
     (id: number | null, replace = false) => {
@@ -161,6 +167,19 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
       dispatch({ kind: 'reset' })
     }
   }, [abandonTurn, liveSession, staleSession])
+
+  // ...and an id the router accepted but nothing could ever have owned goes back
+  // to `/chat` on its own, since a disabled query never errors and the page would
+  // otherwise render the empty new-chat view under a URL that says `/chat/abc`.
+  // Routed only: the embedded pane does not read the URL, and the id it does read
+  // is a number already. There is no live state to drop — a route that never
+  // named a session cannot have started a turn on one.
+  const badRouteId = !embedded && params.id !== undefined && routeSessionId === null
+  useEffect(() => {
+    if (badRouteId) {
+      navigate('/chat', { replace: true })
+    }
+  }, [badRouteId, navigate])
 
   // A session that is not there — a hand-typed id, a stale bookmark, a tab left
   // open while the chat was deleted from another one. The empty view under
