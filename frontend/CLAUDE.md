@@ -216,10 +216,12 @@ Components: `AnswerTurn`, `StepsCard`, `TurnProgress`, `SourcesGrid`, `Composer`
 
 `components/chat/liveTurn.ts` holds **only the in-flight turn**; once the turn ends the
 page refetches the session and the Query cache is the source of truth again.
-`LiveTurn = { sessionId, prompt, streaming, steps, text, interrupted, error, turn, usage,
-activity, activeTool, startedAt }`; actions are `start`, `sse`, `failed`, `settle`,
-`reset`. `start` carries its own `startedAt` (`Date.now()` at the call site) so the
-reducer stays pure.
+`LiveTurn = { sessionId, prompt, attachments, streaming, steps, text, interrupted, error,
+turn, usage, activity, activeTool, startedAt }`; actions are `start`, `sse`, `failed`,
+`settle`, `reset`. `start` carries its own `startedAt` (`Date.now()` at the call site) so
+the reducer stays pure, and the `attachments` the question was sent with — they live on
+the stored user row, which `turnsBesideLive` hides for the length of the turn, so without
+a copy here the chips vanished the moment the user pressed Enter.
 
 `steps` is **one flat `LiveStep[]`** (thinking blocks and tool calls in arrival order),
 not "the thinking" plus "the cards" — a turn thinks, calls a tool, thinks again, and
@@ -257,7 +259,8 @@ the live turn asking the same thing. It drops that turn only when it is **traili
 no answer, no steps and no error, and its `question` (already stripped of the server's
 "Attached feed items:" block) matches the prompt. It takes the prompt, not the whole
 `LiveTurn`, so the memo survives a turn's worth of deltas — and the live turn's `followUp`
-reads the filtered list, so the first question of a session stays an `h2`.
+reads the filtered list, so the first question of a session stays an `h2`. Hiding that row
+is also why `start` has to carry the attachments.
 
 **`settle` vs `reset`.** `ChatPage.send`'s `finally` invalidates the session queries and
 dispatches `settle`, not `reset`: a terminal error must stay on screen until the next
@@ -305,7 +308,7 @@ hand-rolled `.prose-chat` block in `src/index.css`, deliberately instead of
 
 ## Tests
 
-`npx vitest run` — **8 files, 122 tests**, `environment: 'node'`, so only pure modules
+`npx vitest run` — **8 files, 124 tests**, `environment: 'node'`, so only pure modules
 are covered: `lib/sse.test.ts` (frames split across chunks, multi-line data,
 heartbeats ignored), `api/chat.test.ts` (`blocksToText`, `groupTurns`,
 `stepsFromMessage`, `toolCallStatus`, source extraction, the sandbox card, the

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import type { Turn } from '../../api/chat'
+import type { Turn, TurnAttachment } from '../../api/chat'
 import {
   activityLabel,
   emptyTurn,
@@ -14,11 +14,16 @@ import {
   type LiveTurn,
 } from './liveTurn'
 
+const PINNED: TurnAttachment[] = [
+  { id: 7, title: 'Akira ransomware hits VPN appliances', url: 'https://example.com/akira' },
+]
+
 const START: LiveAction = {
   kind: 'start',
   prompt: 'What broke this week?',
   sessionId: 12,
   startedAt: 1_000,
+  attachments: [],
 }
 
 const sse = (event: string, payload: unknown): LiveAction => ({ kind: 'sse', event, payload })
@@ -108,6 +113,20 @@ describe('server tool input', () => {
 })
 
 describe('activity', () => {
+  it('carries the items pinned to the question it is answering', () => {
+    // The chips live on the stored user row, which `turnsBesideLive` now hides
+    // for the length of the turn — so the live turn has to show them itself, or
+    // they blink out the moment the user presses Enter and return at settle.
+    const live = apply([{ ...START, attachments: PINNED }])
+    expect(live.attachments).toEqual(PINNED)
+  })
+
+  it('drops them again once the transcript can render them', () => {
+    const live = apply([{ ...START, attachments: PINNED }, { kind: 'settle' }])
+    expect(live.attachments).toEqual([])
+    expect(apply([{ ...START, attachments: PINNED }, { kind: 'reset' }]).attachments).toEqual([])
+  })
+
   it('starts as starting and stamps when the turn began', () => {
     const live = apply([START])
     expect(live.activity).toBe('starting')

@@ -13,6 +13,7 @@ import {
   type ToolUseInputPayload,
   type ToolUseStartPayload,
   type Turn,
+  type TurnAttachment,
   type TurnEndPayload,
   type TurnStartPayload,
   type TurnStep,
@@ -85,6 +86,14 @@ export interface LiveTurn {
   sessionId: number | null
   /** The text of the user message being answered, echoed straight back. */
   prompt: string | null
+  /**
+   * The inbox items pinned to that question.
+   *
+   * They are stored on the user row, which `turnsBesideLive` hides for the
+   * length of the turn — so the live turn carries its own copy, or the chips
+   * blink out the moment the user presses Enter and only come back at settle.
+   */
+  attachments: TurnAttachment[]
   streaming: boolean
   /**
    * Reasoning and tool calls in arrival order.
@@ -117,6 +126,7 @@ export interface LiveTurn {
 export const emptyTurn: LiveTurn = {
   sessionId: null,
   prompt: null,
+  attachments: [],
   streaming: false,
   steps: [],
   text: '',
@@ -130,7 +140,13 @@ export const emptyTurn: LiveTurn = {
 }
 
 export type LiveAction =
-  | { kind: 'start'; prompt: string; sessionId: number; startedAt: number }
+  | {
+      kind: 'start'
+      prompt: string
+      sessionId: number
+      startedAt: number
+      attachments: TurnAttachment[]
+    }
   | { kind: 'sse'; event: string; payload: unknown }
   | { kind: 'failed'; error: ErrorPayload }
   | { kind: 'settle' }
@@ -189,6 +205,7 @@ export function liveTurnReducer(state: LiveTurn, action: LiveAction): LiveTurn {
         ...emptyTurn,
         sessionId: action.sessionId,
         prompt: action.prompt,
+        attachments: action.attachments,
         streaming: true,
         startedAt: action.startedAt,
       }

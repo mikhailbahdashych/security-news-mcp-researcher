@@ -211,8 +211,17 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
       }
 
       const itemIds = attached.map((item) => item.id)
+      // The chips ride along on the live turn: they are stored on the user row,
+      // and `turnsBesideLive` hides that row until the turn settles.
+      const chips = attached.map((item) => ({ id: item.id, title: item.title, url: item.url }))
       setAttached([])
-      dispatch({ kind: 'start', prompt: text, sessionId: id, startedAt: Date.now() })
+      dispatch({
+        kind: 'start',
+        prompt: text,
+        sessionId: id,
+        startedAt: Date.now(),
+        attachments: chips,
+      })
 
       const controller = new AbortController()
       abort.current = controller
@@ -401,7 +410,7 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
               {liveTurnVisible ? (
                 <AnswerTurn
                   question={live.prompt ?? ''}
-                  attachments={[]}
+                  attachments={live.attachments}
                   steps={steps}
                   answer={live.text}
                   error={live.error}
