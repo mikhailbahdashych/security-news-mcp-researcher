@@ -1,5 +1,5 @@
 import { useInfiniteQuery } from '@tanstack/react-query'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 
 import {
@@ -17,18 +17,8 @@ import Icon from '../ui/Icon'
 import IconButton from '../ui/IconButton'
 import Input from '../ui/Input'
 import { SECTION_LABEL, cx } from '../ui/classes'
-import { menuPosition, type MenuPosition } from '../ui/menuPosition'
+import { menuPosition, type MenuPosition, type TriggerRect } from '../ui/menuPosition'
 import { useSessionActions } from './useSessionActions'
-
-/**
- * The rendered height of the three-item row menu, near enough.
- *
- * It only decides whether the menu hangs below its button or flips above it, so
- * a couple of pixels either way changes nothing; measuring for real would mean
- * rendering the menu off-screen first, which is a second paint to answer a
- * question this constant already answers.
- */
-const ROW_MENU_HEIGHT = 92
 
 export interface ChatListProps {
   /** The chat the routed pane has open, so its row reads as current. */
@@ -55,9 +45,13 @@ export default function ChatList({ activeId }: ChatListProps) {
   const navigate = useNavigate()
   const [search, setSearch] = useState('')
   const [editingId, setEditingId] = useState<number | null>(null)
-  // The open row menu, and where on the screen it was put. It is placed in
-  // viewport coordinates, so the id alone is not enough to draw it.
-  const [menu, setMenu] = useState<{ id: number; at: MenuPosition } | null>(null)
+  // The open row menu: which row, the trigger's box (kept, so the menu can be
+  // re-placed once its real height is known) and where on the screen it went. It
+  // is placed in viewport coordinates, so the id alone is not enough to draw it.
+  const [menu, setMenu] = useState<{ id: number; rect: TriggerRect; at: MenuPosition } | null>(
+    null,
+  )
+  const menuRef = useRef<HTMLDivElement>(null)
   const [draft, setDraft] = useState('')
   const [pendingDelete, setPendingDelete] = useState<ResearchSession | null>(null)
   const [deleting, setDeleting] = useState(false)
@@ -139,10 +133,35 @@ export default function ChatList({ activeId }: ChatListProps) {
     return () => document.removeEventListener('keydown', onKey)
   }, [editingId, menu, pendingDelete])
 
+  /**
+   * Place the menu again, from its own rendered height.
+   *
+   * The first placement happens on the click, before the menu exists, so it has
+   * no height to weigh against the bottom of the window — a hard-coded guess
+   * would have to be re-guessed the day a fourth item is added. So it is placed
+   * as though it had none, and corrected here from the real element.
+   * `useLayoutEffect` runs after the DOM is written and **before the browser
+   * paints**, so the provisional position is never seen.
+   *
+   * It cannot loop: the second pass measures the same element at the same height
+   * and computes the same `top`, and an unchanged position is not written back.
+   */
+  useLayoutEffect(() => {
+    const node = menuRef.current
+    if (menu === null || !node) {
+      return
+    }
+    const at = menuPosition(menu.rect, node.offsetHeight, window.innerHeight)
+    if (at.top !== menu.at.top || at.left !== menu.at.left) {
+      setMenu({ ...menu, at })
+    }
+  }, [menu])
+
   // A menu placed in viewport coordinates does not travel with the row it
   // belongs to, so scrolling the list closes it rather than leaving it floating
-  // beside whatever scrolled into its place. Capture, because the scroll is the
-  // scroller's own event and does not bubble to `document`.
+  // beside whatever scrolled into its place — and so does resizing the window,
+  // which moves the row out from under it just as effectively. Capture on the
+  // scroll, because that is the scroller's own event and does not bubble.
   useEffect(() => {
     const node = scroller.current
     if (menu === null || !node) {
@@ -150,7 +169,11 @@ export default function ChatList({ activeId }: ChatListProps) {
     }
     const close = () => setMenu(null)
     node.addEventListener('scroll', close, true)
-    return () => node.removeEventListener('scroll', close, true)
+    window.addEventListener('resize', close)
+    return () => {
+      node.removeEventListener('scroll', close, true)
+      window.removeEventListener('resize', close)
+    }
   }, [menu])
 
   const startEditing = (session: ResearchSession) => {
@@ -161,11 +184,14 @@ export default function ChatList({ activeId }: ChatListProps) {
 
   /** Open this row's menu under its button, or close it if it is already open. */
   const toggleMenu = (id: number, button: HTMLButtonElement) => {
-    const rect = button.getBoundingClientRect()
+    const { top, bottom, left } = button.getBoundingClientRect()
+    const rect = { top, bottom, left }
     setMenu((current) =>
       current?.id === id
         ? null
-        : { id, at: menuPosition(rect, ROW_MENU_HEIGHT, window.innerHeight) },
+        : // Height 0 for now: the layout effect above measures the menu and
+          // re-places it before this ever reaches the screen.
+          { id, rect, at: menuPosition(rect, 0, window.innerHeight) },
     )
   }
 
@@ -223,14 +249,20 @@ export default function ChatList({ activeId }: ChatListProps) {
           isPending={sessions.isPending}
           isError={sessions.isError}
           isEmpty={days.length === 0}
-          searching={search.trim() !== ''}
+          // The debounced value, not the typed one: judged on `search` the
+          // list said "No chats match." up to 300ms before the query that could
+          // have matched had even been sent.
+          searching={debouncedSearch.trim() !== ''}
         />
 
         {days.map((day) => (
           // Keyed on the first row, not on the label: two runs of the same day
           // can arrive as two groups, and duplicate keys are React's own bug.
           <div key={day.sessions[0].id}>
-            <p className={cx(SECTION_LABEL, 'px-1.5 pt-2.5 pb-1')}>{day.label}</p>
+            {/* `normal-case` against `SECTION_LABEL`'s `uppercase`: the other
+                signposts in this app are words, and `16 SEP 2026` is a date
+                shouted at you. */}
+            <p className={cx(SECTION_LABEL, 'px-1.5 pt-2.5 pb-1 normal-case')}>{day.label}</p>
 
             {day.sessions.map((session) => {
               const busy = busyId === session.id
@@ -293,7 +325,11 @@ export default function ChatList({ activeId }: ChatListProps) {
                     disabled={busy}
                     onClick={(event) => toggleMenu(session.id, event.currentTarget)}
                     className={cx(
-                      'absolute top-1 right-0.5 p-1 opacity-0 transition-opacity duration-150',
+                      // No padding override: `IconButton` already sets `p-1.5`,
+                      // and two padding utilities on one element are resolved by
+                      // the stylesheet's order, not the class list's — `p-1`
+                      // here looked like 4px and painted 6px.
+                      'absolute top-1 right-0.5 opacity-0 transition-opacity duration-150',
                       'group-hover:opacity-100 focus-visible:opacity-100',
                       menu?.id === session.id && 'opacity-100',
                     )}
@@ -311,14 +347,27 @@ export default function ChatList({ activeId }: ChatListProps) {
                           become the containing block for `fixed` and clip it
                           again. The rail's width transition is not one. */}
                       <div
+                        ref={menuRef}
                         style={{ top: menu.at.top, left: menu.at.left }}
                         className="fixed z-40 w-[138px] overflow-hidden rounded-[8px] border border-line bg-panel py-1 shadow-[0_8px_24px_rgba(0,0,0,0.16)]"
                       >
                         <MenuItem icon="edit" onClick={() => startEditing(session)}>
                           Rename
                         </MenuItem>
+                        {/* Archiving is never urgent, and a chat with a turn in
+                            flight has somewhere it belongs: the rail's list is
+                            where that turn stays findable, and archiving would
+                            take it out of every list at once while it ran on.
+                            Stop it first — Stop and Delete are this app's only
+                            two cancels, and neither of them is Archive. */}
                         <MenuItem
                           icon="archive"
+                          disabled={running.has(session.id)}
+                          title={
+                            running.has(session.id)
+                              ? 'This chat has a turn running. Stop it before archiving.'
+                              : undefined
+                          }
                           onClick={() => {
                             setMenu(null)
                             archive(session.id, true)
@@ -404,21 +453,29 @@ function RowMeta({ busy, running }: { busy: boolean; running: boolean }) {
 function MenuItem({
   icon,
   danger = false,
+  disabled = false,
+  title,
   onClick,
   children,
 }: {
   icon: 'edit' | 'archive' | 'trash'
   danger?: boolean
+  /** Greyed out, with a `title` saying why — never silently missing. */
+  disabled?: boolean
+  title?: string
   onClick: () => void
   children: string
 }) {
   return (
     <button
       type="button"
+      disabled={disabled}
+      title={title}
       onClick={onClick}
       className={cx(
-        'flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-[12px] transition-colors duration-150 hover:bg-hover',
-        danger ? 'text-muted hover:text-red' : 'text-ink',
+        'flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-[12px] transition-colors duration-150',
+        disabled ? 'cursor-not-allowed text-faint' : 'hover:bg-hover',
+        !disabled && (danger ? 'text-muted hover:text-red' : 'text-ink'),
       )}
     >
       <Icon name={icon} size={13} className="shrink-0 text-faint" />
