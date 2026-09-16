@@ -18,6 +18,17 @@ const NAV_ICONS: Record<PageKey, IconName> = {
   settings: 'settings',
 }
 
+/**
+ * The top nav: the three destinations, in `PAGE_KEYS` order.
+ *
+ * Settings is not one of them — it sits in the bottom group with the theme and
+ * the collapse toggles, because it is the app's own knobs rather than a fourth
+ * place to look at security news. Derived from `PAGE_KEYS` rather than spelled
+ * out, so a page added there appears here without a second edit; `PAGE_KEYS`
+ * itself keeps its order for the layout selects.
+ */
+const TOP_NAV = PAGE_KEYS.filter((page) => page !== 'settings')
+
 export interface RailProps {
   expanded: boolean
   onToggleExpanded: () => void
@@ -35,8 +46,8 @@ export interface RailProps {
  * The left rail.
  *
  * Collapsed to icons by default and widened on request, rather than hidden
- * behind a hamburger: the four destinations never change, and at 58px they cost
- * less room than the button that would hide them.
+ * behind a hamburger: the destinations never change, and at 58px they cost less
+ * room than the button that would hide them.
  */
 export default function Rail({
   expanded,
@@ -83,7 +94,7 @@ export default function Rail({
       <div className="mx-1 my-1 h-px bg-line" />
 
       <nav className="flex flex-col gap-1.5">
-        {PAGE_KEYS.map((page) => (
+        {TOP_NAV.map((page) => (
           <RailButton
             key={page}
             expanded={expanded}
@@ -98,6 +109,15 @@ export default function Rail({
       </nav>
 
       <div className="mt-auto flex flex-col gap-1.5">
+        <RailButton
+          expanded={expanded}
+          icon={NAV_ICONS.settings}
+          label={PAGE_LABELS.settings}
+          title={PAGE_LABELS.settings}
+          active={isActive('settings')}
+          busy={busyPages.has('settings')}
+          onClick={() => onNavigate('settings')}
+        />
         <RailButton
           expanded={expanded}
           icon={theme === 'dark' ? 'sun' : 'moon'}

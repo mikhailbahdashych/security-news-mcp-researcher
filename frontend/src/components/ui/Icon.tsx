@@ -50,11 +50,19 @@ const GLYPHS = {
       </>
     ),
   },
+  // A cog, not a sun. The prototype's `settings` glyph was a circle with eight
+  // detached rays — the same drawing as `sun` two entries down, so the rail's
+  // bottom group read as "light mode" twice. This one is a single closed outline
+  // whose eight teeth are attached to the body, on a 24 grid because the teeth
+  // need the extra room to survive at 18px. `strokeWidth` is scaled with the
+  // grid (1.6 x 24/20) so it still paints at the set's one weight.
   settings: {
+    viewBox: '0 0 24 24',
+    strokeWidth: 1.9,
     body: (
       <>
-        <circle cx="10" cy="10" r="2.6" />
-        <path d="M10 2.8v2.4M10 14.8v2.4M2.8 10h2.4M14.8 10h2.4M4.9 4.9l1.7 1.7M13.4 13.4l1.7 1.7M15.1 4.9l-1.7 1.7M6.6 13.4l-1.7 1.7" />
+        <path d="M10.51 5.78 L10.83 3.08 L13.17 3.08 L13.49 5.78 A6.4 6.4 0 0 1 15.34 6.54 L17.48 4.86 L19.14 6.52 L17.46 8.66 A6.4 6.4 0 0 1 18.22 10.51 L20.92 10.83 L20.92 13.17 L18.22 13.49 A6.4 6.4 0 0 1 17.46 15.34 L19.14 17.48 L17.48 19.14 L15.34 17.46 A6.4 6.4 0 0 1 13.49 18.22 L13.17 20.92 L10.83 20.92 L10.51 18.22 A6.4 6.4 0 0 1 8.66 17.46 L6.52 19.14 L4.86 17.48 L6.54 15.34 A6.4 6.4 0 0 1 5.78 13.49 L3.08 13.17 L3.08 10.83 L5.78 10.51 A6.4 6.4 0 0 1 6.54 8.66 L4.86 6.52 L6.52 4.86 L8.66 6.54 A6.4 6.4 0 0 1 10.51 5.78 Z" />
+        <circle cx="12" cy="12" r="2.9" />
       </>
     ),
   },
