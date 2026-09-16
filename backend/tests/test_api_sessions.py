@@ -774,3 +774,10 @@ async def test_delete_still_returns_204_when_the_turn_will_not_stop(
 
     async with session_factory() as session:
         assert await session.scalar(select(func.count()).select_from(ResearchSession)) == 0
+
+
+async def test_a_new_session_reports_an_idle_turn(client):
+    session_id = await create_session(client)
+    body = (await client.get(f"/api/sessions/{session_id}")).json()["session"]
+    assert body["turn_status"] == "idle"
+    assert body["turn_started_at"] is None

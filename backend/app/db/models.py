@@ -125,6 +125,11 @@ class ResearchSession(Base):
     archived: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     total_input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     total_output_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    #: ``idle`` | ``running`` | ``interrupted``. ``running`` is written when a turn's
+    #: task starts and ``idle`` when it ends however it ends; ``interrupted`` is
+    #: written at startup for rows still ``running`` — the process died mid-turn.
+    turn_status: Mapped[str] = mapped_column(Text, nullable=False, default="idle")
+    turn_started_at: Mapped[datetime | None] = mapped_column(DateTime)
     created_at: Mapped[datetime] = _created_at()
     updated_at: Mapped[datetime] = _updated_at()
 
