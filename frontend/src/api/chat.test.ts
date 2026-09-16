@@ -232,6 +232,26 @@ describe('stepsFromMessage', () => {
   })
 })
 
+describe('groupTurns replies', () => {
+  it('counts the assistant messages folded into each turn', () => {
+    const turns = groupTurns([
+      message({ id: 1, role: 'user', kind: 'user', content_json: [{ type: 'text', text: 'Hi' }] }),
+      message({ id: 2, content_json: [] }),
+      message({ id: 3, content_json: [{ type: 'text', text: 'Hello.' }] }),
+      message({ id: 4, role: 'user', kind: 'user', content_json: [{ type: 'text', text: 'Again' }] }),
+    ])
+    expect(turns.map((turn) => turn.replies)).toEqual([2, 0])
+  })
+
+  it('does not count a tool_result message as a reply', () => {
+    const turns = groupTurns([
+      message({ id: 1, role: 'user', kind: 'user', content_json: [{ type: 'text', text: 'Hi' }] }),
+      message({ id: 2, kind: 'tool_result', content_json: [] }),
+    ])
+    expect(turns[0].replies).toBe(0)
+  })
+})
+
 describe('groupTurns', () => {
   const turns = () =>
     groupTurns([

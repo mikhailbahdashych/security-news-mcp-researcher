@@ -427,6 +427,7 @@ describe('turnsBesideLive', () => {
       steps: [],
       answer: '',
       error: null,
+      replies: 0,
       ...overrides,
     }
   }
@@ -474,6 +475,14 @@ describe('turnsBesideLive', () => {
 
   it('keeps a trailing turn that ended in an error', () => {
     const turns = [turn({ error: { type: 'refusal', message: 'No.', category: null } })]
+    expect(turnsBesideLive(turns, 'What broke this week?')).toEqual(turns)
+  })
+
+  it('keeps a turn the assistant replied to, even if the reply said nothing', () => {
+    // The text match alone could hide a real earlier turn when the same
+    // question is asked twice. A stored assistant row — however empty — means
+    // the turn happened, so only a question with no reply at all is a candidate.
+    const turns = [turn({ replies: 1 })]
     expect(turnsBesideLive(turns, 'What broke this week?')).toEqual(turns)
   })
 

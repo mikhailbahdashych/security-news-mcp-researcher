@@ -403,9 +403,10 @@ export function isForeignSession(live: LiveTurn, routeSessionId: number | null):
  * follows `createSession` already carries a turn holding the question and
  * nothing else — which rendered above the live turn asking the very same thing,
  * and the user saw their question twice, once as a heading and once as a
- * follow-up. Only a *trailing* turn qualifies, and only one with no assistant
- * content at all: the same question asked twice in a session is a real turn, and
- * so is one that failed before it answered.
+ * follow-up. Only a *trailing* turn qualifies, and only one the assistant has
+ * not replied to at all (`replies === 0`, not merely "replied with nothing"):
+ * the same question asked twice in a session is a real turn, and so is one that
+ * failed before it answered.
  *
  * Takes the prompt rather than the whole `LiveTurn` so a memo on it survives a
  * turn's worth of deltas — the turn object is replaced on every one of them.
@@ -415,7 +416,11 @@ export function turnsBesideLive(turns: Turn[], livePrompt: string | null): Turn[
     return turns
   }
   const last = turns[turns.length - 1]
-  const unanswered = last.answer === '' && last.steps.length === 0 && last.error === null
+  // `replies === 0` is the load-bearing half: an assistant row exists whatever
+  // it contained, so a turn that was answered — even with nothing — is a turn
+  // that happened, and the text match on its own could have hidden it.
+  const unanswered =
+    last.replies === 0 && last.answer === '' && last.steps.length === 0 && last.error === null
   // `question` is what `groupTurns` already stripped of the "Attached feed
   // items:" block the server appends, so it is the comparable half.
   return unanswered && last.question.trim() === livePrompt.trim() ? turns.slice(0, -1) : turns

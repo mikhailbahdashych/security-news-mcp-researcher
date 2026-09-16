@@ -362,6 +362,15 @@ export interface Turn {
   steps: TurnStep[]
   answer: string
   error: ErrorPayload | null
+  /**
+   * How many assistant messages were folded in.
+   *
+   * Not for rendering: it is how `turnsBesideLive` tells a question the model
+   * has not answered *yet* from one it answered with nothing. An assistant row
+   * exists whatever it contained, so zero means the turn never got a reply at
+   * all — which is the only state the live turn can be echoing.
+   */
+  replies: number
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1000,6 +1009,7 @@ export function groupTurns(messages: ChatMessage[], knownTitles?: FeedTitles): T
         steps: [],
         answer: '',
         error: null,
+        replies: 0,
       })
       continue
     }
@@ -1009,6 +1019,7 @@ export function groupTurns(messages: ChatMessage[], knownTitles?: FeedTitles): T
       // API, but a hand-edited database should not crash the page.
       continue
     }
+    turn.replies += 1
     turn.steps.push(...stepsFromMessage(message, feedTitles))
     const text = blocksToText(message.content_json).trim()
     if (text) {
