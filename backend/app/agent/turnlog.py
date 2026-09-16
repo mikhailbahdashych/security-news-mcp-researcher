@@ -21,8 +21,10 @@ class TurnLog:
     def __init__(self) -> None:
         self._events: list[ev.AgentEvent] = []
         self._closed = False
-        self._changed = asyncio.Condition()
-        self._wakeups: set[asyncio.Task[None]] = set()
+        #: Flipped by every append and by ``close``; a waiter clears it and
+        #: re-checks. An ``asyncio.Event`` may be built outside a running loop, so
+        #: a log can be created and closed anywhere.
+        self._changed = asyncio.Event()
 
     @property
     def events(self) -> list[ev.AgentEvent]:
@@ -43,24 +45,11 @@ class TurnLog:
         self._notify()
 
     def _notify(self) -> None:
-        # Called from the owning task, on the loop; the condition's lock is only
-        # ever contended by waiters, so this never blocks the writer.
-        async def wake() -> None:
-            async with self._changed:
-                self._changed.notify_all()
-
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            # No loop, so no subscribers: a log built and closed outside one has
-            # nothing to wake.
-            return
-        # The loop only holds a weak reference to a task, so an unreferenced wake
-        # can be collected before it runs — and a waiter would then sleep until
-        # the next append instead of seeing this one.
-        task = loop.create_task(wake())
-        self._wakeups.add(task)
-        task.add_done_callback(self._wakeups.discard)
+        # Synchronous, and free: every waiter parked in ``subscribe`` is resumed on
+        # the next loop pass. A turn is thousands of events long, so waking them
+        # through a scheduled task each time cost a task — and hundreds of
+        # milliseconds of loop time — per turn for nothing.
+        self._changed.set()
 
     async def subscribe(self) -> AsyncIterator[ev.AgentEvent]:
         """Every event so far, then each new one, until the log is closed."""
@@ -71,12 +60,13 @@ class TurnLog:
                 index += 1
             if self._closed:
                 return
-            async with self._changed:
-                # Re-check under the lock: a notify that landed between the
-                # length check and the wait would otherwise be missed.
-                if index < len(self._events) or self._closed:
-                    continue
-                await self._changed.wait()
+            # Clear first, then re-check, then wait — with no await in between, so
+            # an append can only land before the check (seen now) or after the
+            # clear (which sets the flag again and returns the wait immediately).
+            self._changed.clear()
+            if index < len(self._events) or self._closed:
+                continue
+            await self._changed.wait()
 
 
 __all__ = ["TurnLog"]

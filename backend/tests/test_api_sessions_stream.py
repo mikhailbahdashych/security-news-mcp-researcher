@@ -47,11 +47,13 @@ async def test_post_returns_202_and_the_turn_finishes_with_no_one_listening(app,
         assert listed == {"session_ids": [session_id]}
 
         # Nobody attaches. The turn must still complete and persist its answer.
+        # Polled on the row rather than on the registry: a turn is forgotten the
+        # moment it says ``done``, a breath before its row is idled.
         for _ in range(50):
             await asyncio.sleep(0.02)
-            if not app.state.turn_registry.is_running(session_id):
+            detail = (await http.get(f"/api/sessions/{session_id}")).json()
+            if detail["session"]["turn_status"] == "idle":
                 break
-        detail = (await http.get(f"/api/sessions/{session_id}")).json()
         assert detail["session"]["turn_status"] == "idle"
         assert [m["kind"] for m in detail["messages"]] == ["user", "assistant"]
         assert (await http.get("/api/sessions/running")).json() == {"session_ids": []}

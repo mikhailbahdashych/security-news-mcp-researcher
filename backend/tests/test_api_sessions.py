@@ -20,6 +20,7 @@ import pytest
 from fakes.anthropic import ScriptedAnthropic, turn_text, turn_tool_use
 from httpx2 import ASGITransport
 from sqlalchemy import func, select
+from sqlalchemy.exc import OperationalError
 from sse_util import parse_sse, payloads_for
 
 from app.agent import persistence
@@ -684,6 +685,27 @@ async def test_cancel_for_an_unknown_session_is_a_404(client):
 async def test_posting_to_an_unknown_session_is_a_404(client, with_key):
     response = await client.post("/api/sessions/999/messages", json={"content": "x"})
     assert response.status_code == 404
+
+
+async def test_a_turn_that_cannot_be_marked_running_is_a_503(app, client, with_key, monkeypatch):
+    """No turn, and the client says why.
+
+    The row is written before the task exists, so a database that refuses that
+    write means there is no turn — the user's question is in the transcript and
+    re-sending it is the right move, which a 500 would not say.
+    """
+    use_script(app, turn_text("never"))
+    session_id = await create_session(client)
+
+    async def boom(*_args, **_kwargs):
+        raise OperationalError("UPDATE research_sessions", {}, Exception("database is locked"))
+
+    monkeypatch.setattr(turn_module, "_set_status", boom)
+
+    response = await client.post(f"/api/sessions/{session_id}/messages", json={"content": "go"})
+
+    assert response.status_code == 503
+    assert app.state.turn_registry.running_ids() == []
 
 
 async def test_mid_turn_refresh_sees_a_partial_transcript(app, client, with_key, session_factory):

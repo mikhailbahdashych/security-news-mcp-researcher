@@ -47,3 +47,30 @@ def test_append_after_close_is_an_error():
         assert "closed" in str(exc)
     else:
         raise AssertionError("append after close must raise")
+
+
+async def test_a_long_turn_is_followed_without_a_task_per_event():
+    """Two thousand events — a long research turn — through one subscriber.
+
+    The first implementation scheduled a wake-up task per append, which cost a
+    task and hundreds of milliseconds of loop time per turn in the one process
+    that also serves the inbox. This has to stay cheap and lose nothing.
+    """
+    log = TurnLog()
+    received: list[str] = []
+
+    async def collect() -> None:
+        async for event in log.subscribe():
+            received.append(event.type)
+
+    collector = asyncio.create_task(collect())
+    await asyncio.sleep(0)
+
+    for index in range(2000):
+        log.append(ev.TextDelta(text=str(index)))
+        if index % 100 == 0:
+            await asyncio.sleep(0)
+    log.close()
+
+    await asyncio.wait_for(collector, timeout=5)
+    assert len(received) == 2000

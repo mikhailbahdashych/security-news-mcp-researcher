@@ -16,15 +16,15 @@ from __future__ import annotations
 import asyncio
 import logging
 
+# The bound lives with the turn registry, which makes the same promise about the
+# same kind of task. Imported rather than duplicated, and in this direction:
+# domain code under app/agent must never import the API layer.
+from app.agent.turns import CANCEL_WAIT_S
+
 logger = logging.getLogger(__name__)
 
 _tasks: dict[str, asyncio.Task] = {}
 _lock = asyncio.Lock()
-
-#: How long :func:`cancel_and_wait` waits for a task to actually stop. A task can
-#: refuse to die — a shielded write, a handler that swallows CancelledError — and
-#: an unbounded wait would hang the DELETE request behind it forever.
-CANCEL_WAIT_S = 10.0
 
 
 def session_key(session_id: int) -> str:

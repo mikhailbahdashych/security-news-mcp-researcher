@@ -27,7 +27,7 @@ from app.agent import persistence
 from app.agent import runner as agent_runner
 from app.agent.providers import build_tool_providers, turn_settings
 from app.agent.registry import ToolRegistry
-from app.agent.turns import TurnAlreadyRunning
+from app.agent.turns import TurnAlreadyRunning, TurnStartFailed
 from app.api.deps import (
     AppSettings,
     ChatClientFactory,
@@ -375,6 +375,16 @@ async def post_message(
             await client.close()
         raise HTTPException(
             status.HTTP_409_CONFLICT, detail="A turn is already running for this session."
+        ) from None
+    except TurnStartFailed:
+        # The session row could not be marked running, so no turn exists. Say so
+        # plainly: the question is already in the transcript and re-sending it is
+        # the right move.
+        if client is not None:
+            await client.close()
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not start the turn; the database was busy. Try again.",
         ) from None
     return TurnAccepted(turn_id=turn.turn_id, session_id=session_id, started_at=turn.started_at)
 
