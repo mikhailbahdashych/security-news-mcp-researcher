@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
   blocksToText,
@@ -549,8 +549,24 @@ describe('parseSessionId', () => {
 })
 
 describe('whenLabel', () => {
-  // Midday throughout, because the stored timestamps are naive UTC and a
-  // late-evening one crosses into the next day for anyone east of Greenwich.
+  // The zone is pinned to UTC in `vite.config.ts` (`test.env.TZ`), because the
+  // app renders the viewer's *local* day of a naive-UTC stamp: `T12:00:00` is
+  // still the 16th from UTC-12 to UTC+11, and the 17th in UTC+13 and UTC+14.
+  //
+  // And the `Intl` path is taken away for the whole block: asserting English
+  // output on the runner's own locale would pass just as happily against
+  // `toLocaleDateString('en-GB', …)`, which renders `15 janv. 2026` on a French
+  // machine. If anyone reintroduces it here, these tests throw.
+  beforeEach(() => {
+    vi.spyOn(Date.prototype, 'toLocaleDateString').mockImplementation(() => {
+      throw new Error('whenLabel must not go through Intl')
+    })
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
   it('dates every row, day then month then year', () => {
     expect(whenLabel('2026-09-16T12:00:00')).toBe('16 Sep 2026')
     expect(whenLabel('2025-12-31T12:00:00')).toBe('31 Dec 2025')
@@ -561,14 +577,10 @@ describe('whenLabel', () => {
   })
 
   it('dates the last two days rather than naming them', () => {
-    const today = new Date()
-    const stamp = (date: Date) =>
-      `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}-${String(
-        date.getUTCDate(),
-      ).padStart(2, '0')}T12:00:00`
-    const yesterday = new Date(today.getTime() - 86_400_000)
-    expect(whenLabel(stamp(today))).toMatch(/^\d{1,2} [A-Z][a-z]{2} \d{4}$/)
-    expect(whenLabel(stamp(yesterday))).toMatch(/^\d{1,2} [A-Z][a-z]{2} \d{4}$/)
+    const stamp = (at: number) => `${new Date(at).toISOString().slice(0, 10)}T12:00:00`
+    const now = Date.now()
+    expect(whenLabel(stamp(now))).toMatch(/^\d{1,2} [A-Z][a-z]{2} \d{4}$/)
+    expect(whenLabel(stamp(now - 86_400_000))).toMatch(/^\d{1,2} [A-Z][a-z]{2} \d{4}$/)
   })
 
   it('names the month in English whatever the browser locale is', () => {
