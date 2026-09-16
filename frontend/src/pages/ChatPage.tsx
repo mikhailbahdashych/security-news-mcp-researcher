@@ -235,7 +235,7 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
   }, [abandonTurn, staleSession])
 
   // Joining a turn this page did not start: a reload, a return from the Inbox,
-  // the drawer, a second tab. The rule itself is `shouldAttach`, a tested
+  // the rail's list, a second tab. The rule itself is `shouldAttach`, a tested
   // function in `liveTurn.ts` — it weighs two caches against each other and is
   // exactly the kind of thing this project keeps out of components. Declared
   // after the effect above so that a browser-back onto another running session
@@ -300,6 +300,38 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
     // oxlint-disable-next-line react/set-state-in-effect
     openSession(null, true)
   }, [abandonTurn, missingSession, openSession, queryClient])
+
+  // Archiving the open chat takes it out of the rail's list, and without this the
+  // page went on offering a composer for a conversation nothing showed any more.
+  // `openSession(null, true)` is the same fork the 404 path uses, so it navigates
+  // routed and clears the local selection embedded.
+  //
+  // Only on the **transition**, and only for the session this page is already
+  // looking at: an archived chat opened deliberately from Settings' archived
+  // dialog must render normally, and it arrives with `archived` already true. The
+  // ref is keyed on the id, because switching to another chat whose row is
+  // already in the cache would otherwise read the previous chat's value as "was
+  // not archived" and bounce the user straight back out of it.
+  const archivedNow = detail.data?.session.archived ?? null
+  const archivedSeen = useRef<{ id: number; archived: boolean } | null>(null)
+  useEffect(() => {
+    if (sessionId === null || archivedNow === null) {
+      archivedSeen.current = null
+      return
+    }
+    const previous = archivedSeen.current
+    archivedSeen.current = { id: sessionId, archived: archivedNow }
+    if (!archivedNow || previous?.id !== sessionId || previous.archived) {
+      return
+    }
+    // A detach, not a cancel: the chat still exists and its turn is the
+    // server's. Archive is disabled on a running row, so this is all but
+    // unreachable mid-turn — but another tab can still get there.
+    abandonTurn()
+    dispatch({ kind: 'reset' })
+    // oxlint-disable-next-line react/set-state-in-effect
+    openSession(null, true)
+  }, [abandonTurn, archivedNow, openSession, sessionId])
 
   // Clear the handover off the history entry so a reload does not re-attach.
   useEffect(() => {

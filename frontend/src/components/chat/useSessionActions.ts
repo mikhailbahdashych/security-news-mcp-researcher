@@ -41,7 +41,15 @@ export function useSessionActions(): SessionActions {
   const archive = useMutation({
     mutationFn: ({ id, archived }: { id: number; archived: boolean }) =>
       setSessionArchived(id, archived),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: sessionsQueryKey }),
+    onSuccess: (_data, { id }) => {
+      queryClient.invalidateQueries({ queryKey: sessionsQueryKey })
+      // And the chat's own row, for the same reason a delete does it: archiving
+      // takes the chat out of every list the rail shows, and the page that has
+      // it open has to find out. `sessionQueryKey` is not under the
+      // `['sessions']` prefix, so without this the research page went on
+      // composing into a chat nothing listed until the next window focus.
+      queryClient.invalidateQueries({ queryKey: sessionQueryKey(id) })
+    },
   })
 
   const remove = useMutation({
