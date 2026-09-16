@@ -5,8 +5,9 @@ import type { ReactNode } from 'react'
  *
  * No icon library: the design's line work is one weight (1.6) at one size in one
  * 20×20 box, and a dependency would bring thousands of glyphs drawn to somebody
- * else's grid. The nav, theme, rail, search, logo, history and send glyphs are
- * the design prototype's own paths, verbatim; the rest are drawn to match.
+ * else's grid. The nav, theme, rail, search, logo and send glyphs are the design
+ * prototype's own paths, verbatim; the rest are drawn to match. (`settings` was
+ * one of them until it had to stop being a sun — see below.)
  *
  * Icons are decorative by default (`aria-hidden`). An icon that is the only
  * content of a control needs a label on the control, not on the icon — see
@@ -56,12 +57,21 @@ const GLYPHS = {
   // whose eight teeth are attached to the body, on a 24 grid because the teeth
   // need the extra room to survive at 18px. `strokeWidth` is scaled with the
   // grid (1.6 x 24/20) so it still paints at the set's one weight.
+  //
+  // The number that decides whether it reads as a gear is the **notch base**:
+  // the chord between two teeth where they meet the body. A first pass put the
+  // flanks 2.0 units apart there — 1.5px at size 18, under a 1.42px stroke — so
+  // every notch closed to a V and the glyph read as a bumpy disc. Teeth are
+  // narrow (16 degrees at the root, 14 at the tip) and the body is small
+  // (r 6.2 against tips at 9.3), which leaves a 3.1-unit notch base and a
+  // 3.1-unit tooth depth: both comfortably over the stroke, at every size the
+  // app draws this at.
   settings: {
     viewBox: '0 0 24 24',
     strokeWidth: 1.9,
     body: (
       <>
-        <path d="M10.51 5.78 L10.83 3.08 L13.17 3.08 L13.49 5.78 A6.4 6.4 0 0 1 15.34 6.54 L17.48 4.86 L19.14 6.52 L17.46 8.66 A6.4 6.4 0 0 1 18.22 10.51 L20.92 10.83 L20.92 13.17 L18.22 13.49 A6.4 6.4 0 0 1 17.46 15.34 L19.14 17.48 L17.48 19.14 L15.34 17.46 A6.4 6.4 0 0 1 13.49 18.22 L13.17 20.92 L10.83 20.92 L10.51 18.22 A6.4 6.4 0 0 1 8.66 17.46 L6.52 19.14 L4.86 17.48 L6.54 15.34 A6.4 6.4 0 0 1 5.78 13.49 L3.08 13.17 L3.08 10.83 L5.78 10.51 A6.4 6.4 0 0 1 6.54 8.66 L4.86 6.52 L6.52 4.86 L8.66 6.54 A6.4 6.4 0 0 1 10.51 5.78 Z" />
+        <path d="M11.14 5.86 L10.87 2.77 L13.13 2.77 L12.86 5.86 A6.2 6.2 0 0 1 15.73 7.05 L17.73 4.67 L19.33 6.27 L16.95 8.27 A6.2 6.2 0 0 1 18.14 11.14 L21.23 10.87 L21.23 13.13 L18.14 12.86 A6.2 6.2 0 0 1 16.95 15.73 L19.33 17.73 L17.73 19.33 L15.73 16.95 A6.2 6.2 0 0 1 12.86 18.14 L13.13 21.23 L10.87 21.23 L11.14 18.14 A6.2 6.2 0 0 1 8.27 16.95 L6.27 19.33 L4.67 17.73 L7.05 15.73 A6.2 6.2 0 0 1 5.86 12.86 L2.77 13.13 L2.77 10.87 L5.86 11.14 A6.2 6.2 0 0 1 7.05 8.27 L4.67 6.27 L6.27 4.67 L8.27 7.05 A6.2 6.2 0 0 1 11.14 5.86 Z" />
         <circle cx="12" cy="12" r="2.9" />
       </>
     ),
@@ -108,17 +118,6 @@ const GLYPHS = {
       <>
         <path d="M10 2l6.5 2.4v4.4c0 4.2-2.8 7.3-6.5 8.8-3.7-1.5-6.5-4.6-6.5-8.8V4.4L10 2z" />
         <path d="M6.5 10h2l1-2 1.5 4 1-2h1.5" />
-      </>
-    ),
-  },
-  history: {
-    viewBox: '0 0 16 16',
-    strokeWidth: 1.5,
-    body: (
-      <>
-        <path d="M2.5 8a5.5 5.5 0 1 1 1.6 3.9" />
-        <path d="M2.5 12V8.5H6" />
-        <path d="M8 5.5V8l2 1.5" />
       </>
     ),
   },
