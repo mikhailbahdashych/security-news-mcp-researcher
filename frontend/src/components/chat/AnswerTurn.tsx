@@ -8,7 +8,7 @@ import SourcesGrid from './SourcesGrid'
 import StepsCard from './StepsCard'
 import TurnError from './TurnError'
 import TurnProgress from './TurnProgress'
-import type { ActiveTool, LiveActivity } from './liveTurn'
+import { showsProgress, type LiveProgress } from './liveTurn'
 
 export interface AnswerTurnProps {
   question: string
@@ -21,10 +21,7 @@ export interface AnswerTurnProps {
   /** The turn currently on the wire. */
   streaming?: boolean
   /** What the live turn is doing. A stored turn has none and shows no line. */
-  activity?: LiveActivity
-  activeTool?: ActiveTool | null
-  /** `Date.now()` when the live turn started, for the elapsed counter. */
-  startedAt?: number
+  progress?: LiveProgress
 }
 
 function AttachedChip({ attachment }: { attachment: TurnAttachment }) {
@@ -74,9 +71,7 @@ function AnswerTurn({
   error,
   followUp,
   streaming = false,
-  activity,
-  activeTool = null,
-  startedAt = 0,
+  progress,
 }: AnswerTurnProps) {
   const sources = useMemo(() => collectSources(steps), [steps])
   const Heading = followUp ? 'h3' : 'h2'
@@ -107,8 +102,12 @@ function AnswerTurn({
       {/* Directly under the steps, where the eye already is. Hidden while text
           is flowing: the answer appearing word by word is its own progress
           report, and a spinner over it would only compete. */}
-      {streaming && activity !== undefined && activity !== 'writing' ? (
-        <TurnProgress activity={activity} activeTool={activeTool} startedAt={startedAt} />
+      {progress && showsProgress(streaming, progress.activity) ? (
+        <TurnProgress
+          activity={progress.activity}
+          activeTool={progress.activeTool}
+          startedAt={progress.startedAt}
+        />
       ) : null}
 
       <SourcesGrid sources={sources} />

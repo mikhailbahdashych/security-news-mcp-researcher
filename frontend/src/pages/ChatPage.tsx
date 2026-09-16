@@ -386,7 +386,6 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
 
       {empty ? (
         <EmptyResearch
-          streaming={live.streaming}
           embedded={embedded}
           meta={model ? `${model} · inbox first, then web` : undefined}
           {...attachProps}
@@ -416,9 +415,11 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
                   error={live.error}
                   followUp={turns.length > 0}
                   streaming={live.streaming}
-                  activity={live.activity}
-                  activeTool={live.activeTool}
-                  startedAt={live.startedAt}
+                  progress={{
+                    activity: live.activity,
+                    activeTool: live.activeTool,
+                    startedAt: live.startedAt,
+                  }}
                 />
               ) : null}
 

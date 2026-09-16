@@ -426,6 +426,31 @@ export function turnsBesideLive(turns: Turn[], livePrompt: string | null): Turn[
   return unanswered && last.question.trim() === livePrompt.trim() ? turns.slice(0, -1) : turns
 }
 
+/**
+ * Everything the progress line needs, travelling as one.
+ *
+ * A bundle rather than three optional props: `startedAt` without `activity` is
+ * an elapsed counter with no start, and defaulting it to 0 rendered the seconds
+ * since 1970.
+ */
+export interface LiveProgress {
+  activity: LiveActivity
+  activeTool: ActiveTool | null
+  startedAt: number
+}
+
+/**
+ * Whether a turn should be showing the progress line.
+ *
+ * Lives here rather than inline in `AnswerTurn` because it is the whole of what
+ * "the line is truthful" means: it is on only while the stream is open, and off
+ * while text is flowing — the answer appearing word by word is its own progress
+ * report. A stored turn has no activity and so never shows one.
+ */
+export function showsProgress(streaming: boolean, activity?: LiveActivity): boolean {
+  return streaming && activity !== undefined && activity !== 'writing'
+}
+
 /** The progress line's wording, for `activity` and whatever it is waiting on. */
 export function activityLabel(
   activity: LiveActivity,

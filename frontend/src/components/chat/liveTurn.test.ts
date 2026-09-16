@@ -8,6 +8,7 @@ import {
   isForeignSession,
   liveSteps,
   liveTurnReducer,
+  showsProgress,
   turnsBesideLive,
   type LiveAction,
   type LiveStep,
@@ -506,5 +507,29 @@ describe('turnsBesideLive', () => {
 
   it('leaves an empty transcript alone', () => {
     expect(turnsBesideLive([], 'What broke this week?')).toEqual([])
+  })
+})
+
+describe('showsProgress', () => {
+  it('shows the line while the turn is working', () => {
+    expect(showsProgress(true, 'starting')).toBe(true)
+    expect(showsProgress(true, 'thinking')).toBe(true)
+    expect(showsProgress(true, 'tool')).toBe(true)
+    expect(showsProgress(true, 'reading')).toBe(true)
+  })
+
+  it('hides it while the answer is flowing', () => {
+    // The text appearing word by word is its own progress report; a spinner
+    // over it would only compete with the thing it is reporting on.
+    expect(showsProgress(true, 'writing')).toBe(false)
+  })
+
+  it('hides it once the stream is over', () => {
+    expect(showsProgress(false, 'thinking')).toBe(false)
+  })
+
+  it('hides it for a stored turn, which has no activity at all', () => {
+    expect(showsProgress(false, undefined)).toBe(false)
+    expect(showsProgress(true, undefined)).toBe(false)
   })
 })
