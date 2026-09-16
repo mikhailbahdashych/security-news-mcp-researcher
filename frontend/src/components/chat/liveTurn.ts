@@ -171,11 +171,20 @@ const RENDERED_BY_TRANSCRIPT = new Set<ErrorPayload['type']>(['refusal', 'max_to
  * back while its siblings are in flight does not mean the turn stopped waiting;
  * saying "Reading results…" over a search still running is exactly the kind of
  * lie this line exists to stop telling, so the label follows whatever is left.
+ *
+ * A result whose id matches no step at all moves nothing: it patched nothing,
+ * so nothing was read, and announcing otherwise describes an event the turn
+ * never had.
  */
 function activityAfterResult(
   state: LiveTurn,
   steps: LiveStep[],
+  toolUseId: string,
 ): Pick<LiveTurn, 'activity' | 'activeTool'> {
+  const known = steps.some((step) => step.kind === 'tool' && step.toolUseId === toolUseId)
+  if (!known) {
+    return { activity: state.activity, activeTool: state.activeTool }
+  }
   const waiting = steps.filter(
     (step): step is LiveTool => step.kind === 'tool' && step.status === 'running',
   )
@@ -235,9 +244,11 @@ export function liveTurnReducer(state: LiveTurn, action: LiveAction): LiveTurn {
         // otherwise the answer visibly reflows the moment the turn settles.
         text: state.text === '' ? '' : `${state.text}\n\n`,
         interrupted: false,
-        // Only the first turn is news. The tool loop and `pause_turn` both emit
-        // this again, and the model has not gone back to a blank page.
-        activity: state.activity === 'starting' ? 'thinking' : state.activity,
+        // Every API turn begins by thinking, including the ones the tool loop
+        // and `pause_turn` start. Keeping `writing` through a pause restart hid
+        // the progress line for the whole of the next time-to-first-token,
+        // leaving the answer frozen mid-sentence with nothing moving.
+        activity: 'thinking',
       }
     case 'thinking_delta': {
       // Deltas are contiguous within a block, so appending to a trailing
@@ -315,7 +326,7 @@ export function liveTurnReducer(state: LiveTurn, action: LiveAction): LiveTurn {
         preview: result.preview,
         durationMs: result.duration_ms,
       })
-      return { ...state, ...activityAfterResult(state, steps), steps }
+      return { ...state, ...activityAfterResult(state, steps, result.tool_use_id), steps }
     }
     case 'server_tool_use': {
       const use = payload as ServerToolUsePayload
@@ -351,7 +362,7 @@ export function liveTurnReducer(state: LiveTurn, action: LiveAction): LiveTurn {
         status: result.is_error ? 'error' : 'ok',
         results: result.results,
       })
-      return { ...state, ...activityAfterResult(state, steps), steps }
+      return { ...state, ...activityAfterResult(state, steps, result.tool_use_id), steps }
     }
     case 'turn_end': {
       const end = payload as TurnEndPayload

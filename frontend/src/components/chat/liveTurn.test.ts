@@ -197,15 +197,65 @@ describe('activity', () => {
     expect(live.activity).toBe('writing')
   })
 
-  it('does not rewind to thinking when a later turn starts mid-answer', () => {
-    // `pause_turn` and the tool loop both emit another `turn_start`; the model
-    // has not gone back to a blank page, so the line must not say so.
+  it('goes back to thinking when a paused turn restarts mid-answer', () => {
+    // `pause_turn` stops the answer mid-sentence and the runner re-requests.
+    // Leaving the activity on `writing` hid the progress line for the whole of
+    // the next time-to-first-token — frozen text and nothing moving, which is
+    // the exact symptom the line exists to remove.
     const live = apply([
       START,
       sse('text_delta', { text: 'Some answer.' }),
       sse('turn_start', { turn: 2 }),
     ])
-    expect(live.activity).toBe('writing')
+    expect(live.activity).toBe('thinking')
+    expect(live.text).toBe('Some answer.\n\n')
+  })
+
+  it('goes back to thinking after a tool result, too', () => {
+    const live = apply([
+      START,
+      sse('tool_use_start', { tool_use_id: 'toolu_1', name: 'fetch_article', source: 'builtin' }),
+      sse('tool_result', {
+        tool_use_id: 'toolu_1',
+        name: 'fetch_article',
+        is_error: false,
+        duration_ms: 5,
+        preview: 'text',
+      }),
+      sse('turn_start', { turn: 2 }),
+    ])
+    expect(live.activity).toBe('thinking')
+  })
+
+  it('ignores a result for a call it never saw', () => {
+    // A stray id patches nothing, so nothing was read — "Reading results…"
+    // would be describing an event that did not happen.
+    const live = apply([
+      START,
+      sse('thinking_delta', { text: 'Checking.' }),
+      sse('tool_result', {
+        tool_use_id: 'toolu_ghost',
+        name: 'search_feed_items',
+        is_error: false,
+        duration_ms: 1,
+        preview: 'nothing',
+      }),
+    ])
+    expect(live.activity).toBe('thinking')
+    expect(live.activeTool).toBeNull()
+  })
+
+  it('ignores a server result for a call it never saw', () => {
+    const live = apply([
+      START,
+      sse('server_tool_result', {
+        tool_use_id: 'srvtoolu_ghost',
+        name: 'web_search',
+        is_error: false,
+        results: [],
+      }),
+    ])
+    expect(live.activity).toBe('starting')
   })
 
   it('tracks a server tool and clears it on its result', () => {
