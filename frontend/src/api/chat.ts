@@ -996,7 +996,12 @@ export function attachmentsFromMessage(message: ChatMessage): TurnAttachment[] {
   }
   const attachments: TurnAttachment[] = []
   for (const line of block.text.split('\n')) {
-    const match = /^-\s+id\s+(\d+)\s·\s(.+?)\s·\s(.+?)\s*$/.exec(line)
+    // The title is **greedy** so the split lands on the *last* separator: a
+    // headline with its own " · " in it ("Acme · CVE-2026-1234") otherwise gave
+    // the chip its first word and put the rest of the line in the href. The tail
+    // is not `\S+` because an item with no URL is written `(no link)`, which has
+    // a space in it and would then cost the chip its whole line.
+    const match = /^-\s+id\s+(\d+)\s·\s(.+)\s·\s(.+?)\s*$/.exec(line)
     if (!match) {
       continue
     }

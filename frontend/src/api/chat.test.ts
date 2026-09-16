@@ -713,7 +713,11 @@ function userMessage(id: number, text: string, attachments: TurnAttachment[]): C
       type: 'text',
       text: [
         'Attached feed items:',
-        ...attachments.map((item) => `- id ${item.id} · ${item.title} · ${item.url ?? ''}`),
+        // `(no link)` is what the server writes for an item with no URL, so the
+        // fixture writes it too — it is the line the parser actually meets.
+        ...attachments.map(
+          (item) => `- id ${item.id} · ${item.title} · ${item.url ?? '(no link)'}`,
+        ),
       ].join('\n'),
     })
   }
@@ -741,5 +745,28 @@ describe('resendPayload', () => {
   })
   it('is null with no user message', () => {
     expect(resendPayload([])).toBeNull()
+  })
+
+  it('keeps a title that contains the separator whole', () => {
+    // The line is `- id N · title · url`, and a headline with its own " \u00b7 " in
+    // it split at the first one: the chip read "Acme" and its link became the
+    // rest of the line. The URL has no spaces, so it is the anchor.
+    const messages = [
+      userMessage(1, 'what about this?', [
+        { id: 4, title: 'Acme \u00b7 CVE-2026-1234 under attack', url: 'https://example.test/4' },
+      ]),
+    ]
+    expect(resendPayload(messages)?.attachments).toEqual([
+      { id: 4, title: 'Acme \u00b7 CVE-2026-1234 under attack', url: 'https://example.test/4' },
+    ])
+  })
+
+  it('reads a line with no URL on it', () => {
+    // An item with no link: the server writes the separator and nothing after
+    // it, and the chip is drawn without an anchor.
+    const messages = [userMessage(1, 'and this?', [{ id: 5, title: 'A local note', url: null }])]
+    expect(resendPayload(messages)?.attachments).toEqual([
+      { id: 5, title: 'A local note', url: null },
+    ])
   })
 })
