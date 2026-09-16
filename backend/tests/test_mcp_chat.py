@@ -16,7 +16,7 @@ from fakes.anthropic import ScriptedAnthropic, turn_text, turn_tool_use
 from fakes.mcp import BrokenTarget, SpyFactory, build_server
 from fastapi import FastAPI
 from sqlalchemy import select
-from sse_util import parse_sse
+from test_api_sessions import capture_turns, finish_turn, turn_events
 
 from app.api import tasks as task_registry
 from app.api.deps import get_chat_client_factory
@@ -66,14 +66,17 @@ async def test_an_mcp_tool_is_offered_called_and_recorded(
         ]
     )
     chat_app.dependency_overrides[get_chat_client_factory] = lambda: lambda _key: scripted
+    turns = capture_turns(chat_app)
     session_id = await start(client, {"files": {"command": "fixture"}})
 
     response = await client.post(
         f"/api/sessions/{session_id}/messages", json={"content": "use the file server"}
     )
 
-    assert response.status_code == 200
-    events = parse_sse(response.text)
+    assert response.status_code == 202
+    await finish_turn(chat_app, session_id)
+    # The turn's log is what ``GET /stream`` writes out, event for event.
+    events = turn_events(turns[0])
 
     # The tool array the model was offered carries the namespaced MCP tool.
     offered = {tool["name"] for tool in scripted.calls[0]["tools"]}
@@ -104,14 +107,16 @@ async def test_a_broken_server_does_not_break_the_turn(
 ) -> None:
     scripted = ScriptedAnthropic([turn_text("No tools needed.")])
     chat_app.dependency_overrides[get_chat_client_factory] = lambda: lambda _key: scripted
+    turns = capture_turns(chat_app)
     session_id = await start(
         client, {"broken": {"command": "fixture"}, "files": {"command": "fixture"}}
     )
 
     response = await client.post(f"/api/sessions/{session_id}/messages", json={"content": "hello"})
 
-    assert response.status_code == 200
-    events = [name for name, _ in parse_sse(response.text)]
+    assert response.status_code == 202
+    await finish_turn(chat_app, session_id)
+    events = [name for name, _ in turn_events(turns[0])]
     assert "error" not in events
     assert events[-1] == "done"
 
@@ -129,6 +134,7 @@ async def test_a_disabled_tool_is_not_offered_to_the_model(
 
     await client.patch("/api/mcp/tools/mcp__files__echo", json={"enabled": False})
     await client.post(f"/api/sessions/{session_id}/messages", json={"content": "hello"})
+    await finish_turn(chat_app, session_id)
 
     offered = {tool["name"] for tool in scripted.calls[0]["tools"]}
     assert "mcp__files__echo" not in offered
