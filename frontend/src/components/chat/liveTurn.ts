@@ -269,6 +269,24 @@ export function liveTurnReducer(state: LiveTurn, action: LiveAction): LiveTurn {
   }
 }
 
+/**
+ * Whether the route has moved to a *different* conversation.
+ *
+ * A route with no id is never foreign. `send` dispatches `start` and navigates
+ * in the same handler, but react-router 7 wraps `BrowserRouter`'s location
+ * update in `React.startTransition`: the urgent reducer update renders first,
+ * with the route still `/chat` and no id at all. Reading that as "the user left"
+ * reset the live turn on the very first render of every chat started from the
+ * empty view, and every SSE event after it landed on an invisible turn.
+ *
+ * Leaving deliberately is still handled — `newChat` and the history drawer
+ * dispatch `reset` themselves — so the only case this lets through is a browser
+ * back to `/chat` mid-turn, where keeping the turn on screen is the lesser evil.
+ */
+export function isForeignSession(live: LiveTurn, routeSessionId: number | null): boolean {
+  return routeSessionId !== null && live.sessionId !== null && live.sessionId !== routeSessionId
+}
+
 function parseObject(raw: string): Record<string, unknown> | null {
   try {
     const parsed: unknown = JSON.parse(raw || 'null')

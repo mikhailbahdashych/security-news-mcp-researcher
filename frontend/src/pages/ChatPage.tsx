@@ -27,7 +27,12 @@ import Composer from '../components/chat/Composer'
 import EmptyResearch from '../components/chat/EmptyResearch'
 import HistoryDrawer from '../components/chat/HistoryDrawer'
 import TurnError from '../components/chat/TurnError'
-import { emptyTurn, liveSteps, liveTurnReducer } from '../components/chat/liveTurn'
+import {
+  emptyTurn,
+  isForeignSession,
+  liveSteps,
+  liveTurnReducer,
+} from '../components/chat/liveTurn'
 import GenerateNotesDialog from '../components/notes/GenerateNotesDialog'
 import Button from '../components/ui/Button'
 import IconButton from '../components/ui/IconButton'
@@ -107,11 +112,14 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
   // session's own model is authoritative once there is one.
   const settings = useQuery({ queryKey: settingsQueryKey, queryFn: fetchSettings })
 
-  // Leaving the conversation the live state belongs to drops it — this is what
-  // catches browser back/forward, which no click handler sees. It cannot fire
-  // mid-turn: `send` stamps the new session id onto the state before navigating,
-  // so the two only diverge once the user has genuinely moved on.
-  const staleSession = live.sessionId !== null && live.sessionId !== sessionId
+  // Leaving for a *different* conversation drops the live turn — this is what
+  // catches browser back/forward, which no click handler sees. Only a route that
+  // names another session counts: react-router 7 runs `BrowserRouter`'s location
+  // update inside `React.startTransition`, so the urgent `start` dispatch
+  // renders before the navigation lands and the route is still `/chat`, with no
+  // id at all. Reading that as "the user left" reset every turn started from the
+  // empty view on its first render.
+  const staleSession = isForeignSession(live, sessionId)
   useEffect(() => {
     if (staleSession) {
       dispatch({ kind: 'reset' })
