@@ -5,8 +5,8 @@ import { fetchRunningSessions, runningSessionsKey } from '../api/chat'
 import { formatElapsed } from '../components/chat/liveTurn'
 
 /**
- * Which sessions have a turn in flight, for the rail's dot and the drawer's
- * marks.
+ * Which sessions have a turn in flight, for the rail's dot and its chat list's
+ * `running` marks.
  *
  * **No interval.** A turn is started by a click and ends when the server says
  * so, and this app polls nothing: the triggers are the page's own invalidations
@@ -22,7 +22,7 @@ export function useRunningTurns(): Set<number> {
     staleTime: 5_000,
   })
   // Memoised on the answer, not rebuilt per render: the chat page re-renders on
-  // every streamed delta, and the drawer would be handed a new set each time.
+  // every streamed delta, and the list would be handed a new set each time.
   return useMemo(() => new Set(query.data?.session_ids ?? []), [query.data])
 }
 

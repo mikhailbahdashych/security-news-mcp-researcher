@@ -18,7 +18,7 @@ export interface IconButtonProps extends ComponentPropsWithRef<'button'> {
   /** Icon box in px; the padded hit area grows with it. */
   size?: number
   tone?: IconButtonTone
-  /** Held-down look, for toggles like the chat history drawer. */
+  /** Held-down look, for a toggle that stays on — the ⌘K opener, a rail entry. */
   active?: boolean
 }
 

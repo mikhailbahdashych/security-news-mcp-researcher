@@ -109,22 +109,23 @@ these rather than inventing a fifth slightly-different secondary button. Primiti
   The `settings` glyph is a **cog on a 24 grid** (eight teeth attached to the body,
   `strokeWidth` scaled 1.6 × 24/20 to keep the set's one weight): the prototype's was a
   ringed circle with eight detached rays, which is the same drawing as `sun` — and both
-  sit in the rail's bottom group.
+  sit in the rail's bottom group. The number that decides whether it reads as a gear is
+  the **notch base**, the chord between two teeth where they meet the body: at 2 units it
+  is narrower than the stroke and every notch closes to a V. It is 3.1 now, as is the
+  tooth depth.
 - `modal.ts::useModalPanel(onClose)` is the keyboard contract every overlay owes:
   focus in on mount and back out on unmount, Escape from anywhere, Tab cycling inside
   the panel. Mount the panel **conditionally** — "open" is this hook's mount. A panel
   that says `aria-modal` without this is worse than one that never claimed it.
   `ConfirmDialog` builds on it to replace `window.confirm`, which is an OS box in a
   themed app and blocks the event loop so a pending mutation cannot report into it.
-  `modal.ts::isOutside(target, ...containers)` is the other half, for overlays that
-  also dismiss on a click away: pure, variadic, and **the opener counts as inside** —
-  without it the opener's `pointerdown` closes the panel and its `click` reopens it.
-  A missing target, or no mounted container, is not outside. Nothing calls it since the
-  history drawer became the rail's list; it is kept, with its tests, as the rule the next
-  click-away overlay should use rather than re-derive.
-- `menuPosition.ts` is the same idea for placement: where a `fixed` row menu goes,
-  given its trigger's box, its height and the viewport's. Pure, so the flip-and-clamp
-  arithmetic is tested without a DOM. See the rail chat list below for why `fixed`.
+  (It used to have a companion, `isOutside`, for overlays that also dismiss on a click
+  away. Its only caller was the history drawer; it went with it. If you add another
+  click-away overlay, the rule it encoded is worth re-deriving: **the opener counts as
+  inside**, or its `pointerdown` closes the panel and its `click` reopens it.)
+- `menuPosition.ts` is the placement half: where a `fixed` row menu goes, given its
+  trigger's box, its height and the viewport's. Pure, so the flip-and-clamp arithmetic is
+  tested without a DOM. See the rail chat list below for why `fixed`.
 - `GlobalSearch.tsx` owns the `Cmd/Ctrl+K` binding (not `/` — the composer and the
   note editor are text fields). It queries `GET /api/search`, groups the hits and
   follows `hit.link`, which the **backend** builds. The match is highlighted by
@@ -430,6 +431,14 @@ group, and **only** when the rail is expanded *and* Research is on screen in eit
   `ChatPage`'s missing-session effect abandons the turn, resets and leaves the URL —
   the same path a chat deleted in another tab already took. Nothing is wired back from
   the rail to the page.
+- **Archiving leaves the chat too, and is refused mid-turn.** It takes the chat out of
+  every list the rail shows, so a page still composing into it is a page pointing at
+  nothing: `archive` invalidates `sessionQueryKey(id)` as well, and `ChatPage` leaves on
+  the **transition** to `archived` — keyed on the session id, because a chat opened
+  deliberately from Settings' archived dialog arrives archived already and must render
+  normally. Archive is **disabled on a row with a turn in flight**, with a `title` saying
+  to stop it first: the rail's list is where a detached turn stays findable, and Stop and
+  Delete are this app's only two cancels.
 - **The row menu is `position: fixed`**, placed from the trigger's own
   `getBoundingClientRect()` by the pure `ui/menuPosition.ts::menuPosition(rect,
   menuHeight, viewportHeight)`: below and left-aligned to the button, flipped above when
@@ -440,8 +449,11 @@ group, and **only** when the rail is expanded *and* Research is on screen in eit
   `fixed` and the clipping comes straight back. **Never give the rail a `transform`**
   (`transition-[width]` is not one.) Scrolling the list closes the menu — placed in
   viewport coordinates it does not travel with its row — through a capture-phase
-  `scroll` listener on the scroller, and the `fixed inset-0` backdrop still catches the
-  click away.
+  `scroll` listener on the scroller — and a `resize`, which moves the row out from under
+  it just as effectively — while the `fixed inset-0` backdrop still catches the click
+  away. **The height it is placed against is measured, not guessed**: the click places it
+  as though the menu had none, and a `useLayoutEffect` re-places it from the real element
+  before the browser paints, so a fourth menu item cannot silently break the flip.
 - Escape unwinds the row menu, then a rename in progress. There is no third layer: the
   list is part of the rail and has nothing to close, so a rename commits on Enter and on
   blur (the panel no longer vanishes out from under the input, which is what made the
@@ -519,7 +531,7 @@ hand-rolled `.prose-chat` block in `src/index.css`, deliberately instead of
 
 ## Tests
 
-`npx vitest run` — **12 files, 193 tests**, `environment: 'node'` with
+`npx vitest run` — **11 files, 188 tests**, `environment: 'node'` with
 **`TZ` pinned to `UTC`** (`test.env` in `vite.config.ts`: the backend sends naive UTC and
 the app renders the viewer's *local* day of it, so a test that asserts an instant would
 otherwise assert the machine's offset, and UTC+13/+14 roll a midday stamp over to the next
@@ -537,9 +549,9 @@ the `activity` transitions, turn scoping, `activityLabel`, `showsProgress`,
 `api/inbox.test.ts`, `components/ui/preferences.test.ts` (`parseStoredTheme`/
 `resolveTheme`, `parseRail`, `parseLayout`/`pageFromPath`),
 `components/ui/searchKeys.test.ts` (the shared overlay keyboard model),
-`components/ui/modal.test.ts` (`isOutside`, against `contains` stubs — there is no
-DOM here, which is the point), `components/ui/menuPosition.test.ts` (fits below, flips
-above, clamps), `api/client.test.ts` (`isNotFound`),
+`components/ui/menuPosition.test.ts` (fits below, flips above, clamps — there is no DOM
+here, which is the point: the caller measures, the function decides),
+`api/client.test.ts` (`isNotFound`),
 `components/notes/excerpt.test.ts` and `lib/ids.test.ts`.
 
 Component and E2E tests are deliberately out of scope — **do not add a jsdom
