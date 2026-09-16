@@ -125,9 +125,11 @@ execution with `{}` — until a reload, when the stored transcript (from
 `get_final_message()`) answers instead. The fragments go out on the same
 `tool_use_input` event for both, because the consumer patches by `tool_use_id`.
 
-`ServerToolUse.input` stays the block's *initial* dict on purpose: it is the whole input
-when the server filled it in, and `{}` when it is streaming — the fragments follow either
-way, and nothing downstream may treat that `{}` as "no input".
+`ServerToolUse.input` stays the block's *initial* dict on purpose, and an empty one means
+**"not supplied yet", never "the final input was empty"** — the fragments that follow are
+the value. A consumer therefore seeds an empty buffer from an empty `input` and renders
+the streamed JSON; seeding the buffer with `"{}"`, or preferring that `{}` over the
+fragments, is how the card ends up showing `{}` or an unparseable `{}{"query": …}`.
 
 ## Persistence strategy
 
