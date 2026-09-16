@@ -153,6 +153,16 @@ export interface LiveTurn {
    * `shouldAttach` uses it to not go back for one at all.
    */
   lastTurnId: string | null
+  /**
+   * When that turn began, on the server's clock.
+   *
+   * The id alone says "I have watched a turn here", which would keep this page
+   * off *every* later turn in the session — a second tab that watched one turn
+   * and stayed put never saw the next one start. The time says which turn, so
+   * `shouldAttach` can tell the session row naming a newer one from the row
+   * still naming the turn this page already drew.
+   */
+  lastStartedAt: number | null
 }
 
 export const emptyTurn: LiveTurn = {
@@ -171,6 +181,7 @@ export const emptyTurn: LiveTurn = {
   startedAt: 0,
   token: 0,
   lastTurnId: null,
+  lastStartedAt: null,
 }
 
 export type LiveAction =
@@ -283,6 +294,7 @@ export function liveTurnReducer(state: LiveTurn, action: LiveAction): LiveTurn {
         // Kept: the stream about to open may be the replay of the turn this
         // page has just watched, and this is the only way to recognise it.
         lastTurnId: state.lastTurnId,
+        lastStartedAt: state.lastStartedAt,
       }
     case 'failed':
       return { ...state, streaming: false, error: action.error }
@@ -295,6 +307,7 @@ export function liveTurnReducer(state: LiveTurn, action: LiveAction): LiveTurn {
         sessionId: state.sessionId,
         error: state.error && !RENDERED_BY_TRANSCRIPT.has(state.error.type) ? state.error : null,
         lastTurnId: state.lastTurnId,
+        lastStartedAt: state.lastStartedAt,
       }
     case 'sse':
       break
@@ -314,16 +327,18 @@ export function liveTurnReducer(state: LiveTurn, action: LiveAction): LiveTurn {
         // prompt renders nothing — so the transcript below it stands alone.
         return state
       }
+      // Server times are naive UTC, so the zone designator has to be put back
+      // on (`parseUtc`) or the counter is out by the browser's offset.
+      const startedAt = parseUtc(started.started_at).getTime()
       return {
         ...state,
         sessionId: started.session_id,
         prompt: started.prompt,
         attachments: started.attachments ?? [],
-        // Server times are naive UTC, so the zone designator has to be put back
-        // on or the counter is out by the browser's offset.
-        startedAt: Date.parse(`${started.started_at}Z`),
+        startedAt,
         activity: 'starting',
         lastTurnId: started.turn_id,
+        lastStartedAt: startedAt,
       }
     }
     case 'turn_start':
@@ -493,6 +508,8 @@ export interface AttachContext {
   sessionId: number | null
   /** The session row's own word, from the detail query. */
   turnStatus: TurnStatus | null
+  /** When the row says its current turn began — naive UTC, or `null` if idle. */
+  turnStartedAt: string | null
   /** The sessions the turn registry says are running right now. */
   runningIds: Set<number>
   live: LiveTurn
@@ -514,7 +531,13 @@ export interface AttachContext {
  * The row still has a veto: a turn marked `interrupted` is one a restart killed,
  * and there is nothing to watch whatever any list says.
  */
-export function shouldAttach({ sessionId, turnStatus, runningIds, live }: AttachContext): boolean {
+export function shouldAttach({
+  sessionId,
+  turnStatus,
+  turnStartedAt,
+  runningIds,
+  live,
+}: AttachContext): boolean {
   if (sessionId === null || !runningIds.has(sessionId)) {
     return false
   }
@@ -525,10 +548,30 @@ export function shouldAttach({ sessionId, turnStatus, runningIds, live }: Attach
     // Whatever this page was watching, it was not this conversation.
     return true
   }
-  // Already watching it — or already watched it: the running list is up to five
-  // seconds old, so it can still name a session whose turn ended a moment ago,
-  // and going back for that turn is how a replay lands on top of the answer.
-  return !live.streaming && live.lastTurnId === null
+  if (live.streaming) {
+    // Already watching it.
+    return false
+  }
+  if (live.lastTurnId === null) {
+    return true
+  }
+  // Already watched one here: the running list is up to five seconds old, so it
+  // can still name a session whose turn ended a moment ago, and going back for
+  // that turn is how a replay lands on top of the answer. But a *later* turn —
+  // started in another tab while this page sat on the settled one — is one this
+  // page has never seen, and the row's start time is what tells them apart. The
+  // row is a cache too, so it only ever earns an attach by naming something
+  // newer: no time at all, or the one already watched, is not a reason to go
+  // back.
+  return startedAfter(turnStartedAt, live.lastStartedAt)
+}
+
+/** Whether the row's turn began after the one this page last watched. */
+function startedAfter(turnStartedAt: string | null, lastStartedAt: number | null): boolean {
+  if (turnStartedAt === null || lastStartedAt === null) {
+    return false
+  }
+  return parseUtc(turnStartedAt).getTime() > lastStartedAt
 }
 
 /**

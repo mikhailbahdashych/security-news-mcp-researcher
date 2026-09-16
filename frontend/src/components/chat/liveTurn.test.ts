@@ -697,6 +697,22 @@ describe('attaching to a running turn', () => {
     expect(replayed.prompt).toBeNull()
   })
 
+  it('remembers when the turn it settled began', () => {
+    // `lastTurnId` alone cannot say whether a turn the registry is reporting is
+    // the one this page already watched or the next one; the start time can.
+    let state = liveTurnReducer(emptyTurn, { kind: 'attach', sessionId: 12, token: 3 })
+    state = liveTurnReducer(state, {
+      kind: 'sse',
+      token: 3,
+      event: 'turn_started',
+      payload: started('abc'),
+    })
+    expect(state.lastStartedAt).toBe(Date.UTC(2026, 8, 16, 10, 0, 0))
+    state = liveTurnReducer(state, { kind: 'settle', token: 3 })
+    expect(state.lastStartedAt).toBe(Date.UTC(2026, 8, 16, 10, 0, 0))
+    expect(liveTurnReducer(state, { kind: 'reset' }).lastStartedAt).toBeNull()
+  })
+
   it('a different turn in the same session is not mistaken for the replay', () => {
     let state = liveTurnReducer(emptyTurn, { kind: 'attach', sessionId: 12, token: 3 })
     state = liveTurnReducer(state, {
@@ -741,9 +757,18 @@ describe('attaching to a running turn', () => {
 })
 
 describe('shouldAttach', () => {
+  /** The turn this page watched to its end, and the one started after it. */
+  const WATCHED = '2026-09-16T10:00:00'
+  const NEXT = '2026-09-16T10:04:00'
+
   /** A live turn as it looks once this page has watched `turnId` to its end. */
   function settled(sessionId: number, turnId: string): LiveTurn {
-    return { ...emptyTurn, sessionId, lastTurnId: turnId }
+    return {
+      ...emptyTurn,
+      sessionId,
+      lastTurnId: turnId,
+      lastStartedAt: Date.UTC(2026, 8, 16, 10, 0, 0),
+    }
   }
 
   it('attaches to a turn running in the open session that this page is not watching', () => {
@@ -751,6 +776,7 @@ describe('shouldAttach', () => {
       shouldAttach({
         sessionId: 12,
         turnStatus: 'running',
+        turnStartedAt: WATCHED,
         runningIds: new Set([12]),
         live: emptyTurn,
       }),
@@ -762,6 +788,7 @@ describe('shouldAttach', () => {
       shouldAttach({
         sessionId: 12,
         turnStatus: 'running',
+        turnStartedAt: WATCHED,
         runningIds: new Set([12]),
         live: { ...emptyTurn, sessionId: 12, streaming: true },
       }),
@@ -775,6 +802,7 @@ describe('shouldAttach', () => {
       shouldAttach({
         sessionId: 12,
         turnStatus: 'running',
+        turnStartedAt: WATCHED,
         runningIds: new Set([12]),
         live: { ...emptyTurn, sessionId: 9, streaming: true },
       }),
@@ -783,7 +811,13 @@ describe('shouldAttach', () => {
 
   it('does not attach to an idle session', () => {
     expect(
-      shouldAttach({ sessionId: 12, turnStatus: 'idle', runningIds: new Set(), live: emptyTurn }),
+      shouldAttach({
+        sessionId: 12,
+        turnStatus: 'idle',
+        turnStartedAt: null,
+        runningIds: new Set(),
+        live: emptyTurn,
+      }),
     ).toBe(false)
   })
 
@@ -792,7 +826,13 @@ describe('shouldAttach', () => {
     // that finished while the user was on another page. Attaching on that word
     // replays a finished turn over the transcript that already holds it.
     expect(
-      shouldAttach({ sessionId: 12, turnStatus: 'running', runningIds: new Set(), live: emptyTurn }),
+      shouldAttach({
+        sessionId: 12,
+        turnStatus: 'running',
+        turnStartedAt: WATCHED,
+        runningIds: new Set(),
+        live: emptyTurn,
+      }),
     ).toBe(false)
   })
 
@@ -801,6 +841,7 @@ describe('shouldAttach', () => {
       shouldAttach({
         sessionId: 12,
         turnStatus: 'interrupted',
+        turnStartedAt: WATCHED,
         runningIds: new Set([12]),
         live: emptyTurn,
       }),
@@ -809,11 +850,43 @@ describe('shouldAttach', () => {
 
   it('does not re-attach to a turn this page has already settled', () => {
     // The registry list is up to 5 s stale, so it can still name a session
-    // whose turn this page watched to `done` a moment ago.
+    // whose turn this page watched to `done` a moment ago. The row names that
+    // same turn, so there is nothing new to watch.
     expect(
       shouldAttach({
         sessionId: 12,
         turnStatus: 'running',
+        turnStartedAt: WATCHED,
+        runningIds: new Set([12]),
+        live: settled(12, 'abc'),
+      }),
+    ).toBe(false)
+  })
+
+  it('attaches to the next turn in a session it has already watched one in', () => {
+    // Two tabs: this one watched a turn to its end and stayed put, and the
+    // other started another. The row's start time is newer than the one this
+    // page settled, so this is a turn it has never seen.
+    expect(
+      shouldAttach({
+        sessionId: 12,
+        turnStatus: 'running',
+        turnStartedAt: NEXT,
+        runningIds: new Set([12]),
+        live: settled(12, 'abc'),
+      }),
+    ).toBe(true)
+  })
+
+  it('does not attach on a row that has not caught up with the new turn yet', () => {
+    // The detail query is a cache: until it refetches it still carries the
+    // settled turn's start time, or none at all. Neither is a reason to go back
+    // for a turn this page has already drawn.
+    expect(
+      shouldAttach({
+        sessionId: 12,
+        turnStatus: 'running',
+        turnStartedAt: null,
         runningIds: new Set([12]),
         live: settled(12, 'abc'),
       }),
@@ -825,6 +898,7 @@ describe('shouldAttach', () => {
       shouldAttach({
         sessionId: null,
         turnStatus: null,
+        turnStartedAt: null,
         runningIds: new Set([12]),
         live: emptyTurn,
       }),

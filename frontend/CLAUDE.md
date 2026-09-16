@@ -246,16 +246,20 @@ watching are two requests.
   long, so an error-only turn still reaches the page that asked for it).
   `ChatPage.attach(id, token)` is the single owner of that reader, whether this page
   started the turn or found it going.
-- **Whether to attach is `shouldAttach({sessionId, turnStatus, runningIds, live})`** in
+- **Whether to attach is `shouldAttach({sessionId, turnStatus, turnStartedAt, runningIds,
+  live})`** in
   `liveTurn.ts` — a tested function, because it weighs two caches against each other.
   **`GET /sessions/running` decides, not `session.turn_status`.** The session row reaches
   the page through a query and is wrong in both directions: a second tab read it before
   the turn started, a page that walked to the Inbox and back reads it after the turn
   ended. Attaching on a stale `running` replays a finished turn over the transcript that
   already holds it; not attaching on a stale `idle` was the "send, walk away, come back to
-  an empty page" bug. The row keeps one veto (`interrupted` is never watched), and the
-  rule also refuses to re-attach to a turn this page already settled (`live.lastTurnId`).
-  The detail query overrides the app defaults with `refetchOnMount: 'always'` +
+  an empty page" bug. The row keeps one veto (`interrupted` is never watched) and one
+  casting vote: a page that has already watched a turn here (`live.lastTurnId`) goes back
+  only for a turn that began **after** the one it settled — `turn_started_at` newer than
+  `live.lastStartedAt`. That is what lets a second tab that watched one turn attach to the
+  next one, without re-attaching to the replay of its own (the running list is up to 5 s
+  stale). The detail query overrides the app defaults with `refetchOnMount: 'always'` +
   `refetchOnWindowFocus: true` for the same reason.
 - **Leaving detaches; only Stop cancels.** `abandonTurn` aborts the reader and bumps the
   token, and that is the whole of it — the turn runs on and opening the session again
@@ -286,7 +290,7 @@ watching are two requests.
 `components/chat/liveTurn.ts` holds **only the in-flight turn**; once the turn ends the
 page refetches the session and the Query cache is the source of truth again.
 `LiveTurn = { sessionId, prompt, attachments, streaming, steps, text, interrupted, error,
-turn, usage, activity, activeTool, startedAt, token, lastTurnId }`; actions are `start`,
+turn, usage, activity, activeTool, startedAt, token, lastTurnId, lastStartedAt }`; actions are `start`,
 `attach`, `sse`, `failed`, `settle`, `reset`. `start` carries its own `startedAt`
 (`Date.now()` at the call site) so the reducer stays pure, and the `attachments` it was sent
 with — they live on the stored user row, which `turnsBesideLive` hides for the length of
@@ -301,6 +305,9 @@ again. `settle` and `attach` keep the id, `reset` and `start` drop it, and a
 `turn_started` carrying it is **ignored** — which leaves the live turn without a prompt,
 and a live turn with no prompt renders nothing, so the transcript below it stands alone.
 `shouldAttach` reads the same field to not go back for that turn at all.
+**`lastStartedAt`** travels with it (set, kept and dropped in the same places): the id
+alone says only "this page has watched a turn here", which kept a tab off every *later*
+turn in the session, and the start time is what tells the next turn from the last one.
 
 `steps` is **one flat `LiveStep[]`** (thinking blocks and tool calls in arrival order),
 not "the thinking" plus "the cards" — a turn thinks, calls a tool, thinks again, and
@@ -414,7 +421,7 @@ hand-rolled `.prose-chat` block in `src/index.css`, deliberately instead of
 
 ## Tests
 
-`npx vitest run` — **9 files, 164 tests**, `environment: 'node'` with **`TZ` pinned to
+`npx vitest run` — **9 files, 172 tests**, `environment: 'node'` with **`TZ` pinned to
 `UTC`** (`vite.config.ts`: the backend sends naive UTC, so a test asserting an instant
 would otherwise assert the machine's offset), so only pure modules
 are covered: `lib/sse.test.ts` (frames split across chunks, multi-line data,

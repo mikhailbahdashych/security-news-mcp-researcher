@@ -260,7 +260,8 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
   // after the effect above so that a browser-back onto another running session
   // resets the old turn first and this one then claims a token of its own.
   const turnStatus = detail.data?.session.turn_status ?? null
-  const attachNow = shouldAttach({ sessionId, turnStatus, runningIds: running, live })
+  const turnStartedAt = detail.data?.session.turn_started_at ?? null
+  const attachNow = shouldAttach({ sessionId, turnStatus, turnStartedAt, runningIds: running, live })
   useEffect(() => {
     if (!attachNow || sessionId === null) {
       return
