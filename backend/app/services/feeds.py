@@ -69,6 +69,17 @@ BOT_PROTECTION_ERROR = (
     "get through either)"
 )
 
+#: The same 403, when **no retry was attempted**: ``curl_cffi`` is not importable,
+#: so there was no browser-TLS client to retry with. Claiming the retry failed
+#: would send the reader hunting for a WAF that beat libcurl when libcurl was
+#: never asked — and the fix is one command, so the message names it. A server
+#: started before ``uv sync`` finished is exactly how this happens.
+BOT_PROTECTION_NO_RETRY_ERROR = (
+    "HTTP 403 (blocked by the site's bot protection; the browser-TLS retry is "
+    "unavailable because curl_cffi is not installed — run `uv sync` and restart "
+    "the server)"
+)
+
 #: Seeded by ``POST /api/feeds/seed-defaults``. Every URL was fetched and confirmed
 #: to return a parseable feed at implementation time.
 #:
@@ -331,7 +342,7 @@ async def _fetch_feed(
     client: httpx2.AsyncClient,
     retry: _BrowserRetry | None,
     url: str,
-) -> httpx2.Response:
+) -> tuple[httpx2.Response, bool]:
     """Fetch one feed, retrying a 403 with a browser TLS fingerprint.
 
     The retry is automatic rather than a per-feed setting because the block is not a
@@ -339,25 +350,32 @@ async def _fetch_feed(
     and disappear without the URL changing, so there is nothing for anyone to tick.
     Both attempts go through ``fetch_guarded``, so the redirect, address and size
     policy is identical whichever client wins.
+
+    Returns the response and whether a 403 went **unretried** because no browser-TLS
+    client could be built, which is the difference between the two 403 messages: the
+    caller must not tell the user a retry failed when none was made.
     """
     # The operator typed this URL, so its first hop is trusted (a feed reader on
     # the LAN is a legitimate target); every redirect it takes is still checked.
     response = await fetch_guarded(client, url, max_bytes=MAX_FEED_BYTES, validate_first_hop=False)
-    if response.status_code != 403 or retry is None:
-        return response
+    if response.status_code != 403:
+        return response, False
 
-    browser = await retry.client()
+    browser = await retry.client() if retry is not None else None
     if browser is None:
-        return response
+        return response, True
     logger.info("Feed %s answered 403; retrying with a browser TLS fingerprint", url)
     try:
-        return await fetch_guarded(browser, url, max_bytes=MAX_FEED_BYTES, validate_first_hop=False)
+        retried = await fetch_guarded(
+            browser, url, max_bytes=MAX_FEED_BYTES, validate_first_hop=False
+        )
     except Exception:
         # Includes the guard refusing a redirect hop, which says nothing about the
         # client's health — but a session that raised is not worth trusting for the
         # rest of the batch, and rebuilding one is cheap next to a wrong answer.
         await retry.discard(browser)
         raise
+    return retried, False
 
 
 async def _refresh_one(
@@ -374,9 +392,10 @@ async def _refresh_one(
     site_url: str | None = None
     rows: list[dict[str, Any]] = []
     fetched_at = utcnow()
+    retry_unavailable = False
 
     try:
-        response = await _fetch_feed(client, retry, url)
+        response, retry_unavailable = await _fetch_feed(client, retry, url)
         response.raise_for_status()
         parsed = await parse_feed(response.content)
 
@@ -400,7 +419,10 @@ async def _refresh_one(
     except httpx2.HTTPStatusError as exc:
         status_code = exc.response.status_code
         # Only the status code is used — a WAF's response body is a challenge page.
-        error = BOT_PROTECTION_ERROR if status_code == 403 else f"HTTP {status_code}"
+        if status_code != 403:
+            error = f"HTTP {status_code}"
+        else:
+            error = BOT_PROTECTION_NO_RETRY_ERROR if retry_unavailable else BOT_PROTECTION_ERROR
     except (httpx2.TimeoutException, TimeoutError):
         # ``TimeoutError`` is ``fetch_guarded``'s whole-fetch budget; httpx's is
         # per operation. Both mean the same thing on a feed row.
@@ -512,6 +534,7 @@ async def refresh_feeds(
 
 __all__ = [
     "BOT_PROTECTION_ERROR",
+    "BOT_PROTECTION_NO_RETRY_ERROR",
     "DEFAULT_FEEDS",
     "INSERT_CHUNK_ROWS",
     "MAX_CONCURRENT_FEEDS",

@@ -238,6 +238,16 @@ through that client. Each takes an `impersonate_transport=` seam alongside
 `transport=`; a caller that passes `transport` **alone gets no retry**, which is what
 keeps a 403 fixture in the test suite off the network.
 
+Because that client can be absent, the feed row distinguishes the two outcomes:
+`BOT_PROTECTION_ERROR` ("a browser-TLS retry did not get through either") is only
+written when a retry actually ran, and `BOT_PROTECTION_NO_RETRY_ERROR` names the
+missing `curl_cffi` and the `uv sync` that fixes it when no client could be built.
+`_fetch_feed` returns `(response, retry_unavailable)` so `_refresh_one` can tell them
+apart without a second fetch path. The lifespan logs one WARNING at startup when
+`http.impersonation_available()` is False — the live failure was a `--reload` dev server
+that picked up the new code before the wheel was in the venv, and the row alone could not
+say so. The *article* path keeps its bare `HTTP 403`: it never claimed a retry happened.
+
 Three more ingest invariants worth not re-litigating (`app/services/feeds.py`):
 
 - A feed that parses cleanly with **zero entries is `last_status="ok"`**, not an error.
@@ -251,7 +261,7 @@ Three more ingest invariants worth not re-litigating (`app/services/feeds.py`):
 
 ## Tests (`backend/tests/`)
 
-`make test` → `uv run pytest` (**563 tests** with the cleanup PRs in, ~14 s) then the frontend's vitest. One
+`make test` → `uv run pytest` (**569 tests**, ~14 s) then the frontend's vitest. One
 `test_<area>.py` per area, `fakes/` for client stand-ins, `fixtures/` for XML/HTML.
 
 There is **no `tests/__init__.py`**, so pytest puts `tests/` on `sys.path`: helpers are

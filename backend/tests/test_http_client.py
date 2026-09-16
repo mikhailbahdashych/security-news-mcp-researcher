@@ -10,6 +10,8 @@ than saying plainly what the client is.
 from __future__ import annotations
 
 import asyncio
+import logging
+from pathlib import Path
 from typing import Any
 
 import httpx2
@@ -196,6 +198,49 @@ async def test_no_browser_client_when_curl_cffi_is_missing(
     assert build_impersonating_client(10) is None
     with pytest.raises(RuntimeError):
         ImpersonatingTransport(timeout_s=10)
+
+
+async def test_startup_warns_once_when_curl_cffi_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: Path,
+) -> None:
+    """The dependency is optional at import time, so nothing else says it is absent.
+
+    The live failure: a ``--reload`` dev server picked up the code that retries a
+    403 before the wheel was in its venv, so every CISA refresh reported a block
+    with no hint that the retry itself was missing. One line at boot names it.
+    """
+    from app.config import Settings
+    from app.main import create_app, lifespan
+
+    monkeypatch.setattr(http_service, "_CurlAsyncSession", None)
+    application = create_app(Settings(db_path=tmp_path / "app.db", static_dir=tmp_path / "gone"))
+
+    with caplog.at_level(logging.WARNING, logger="app.main"):
+        async with lifespan(application):
+            pass
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "curl_cffi" in warnings[0].getMessage()
+    assert "uv sync" in warnings[0].getMessage()
+
+
+async def test_startup_is_silent_when_the_wheel_is_there(
+    caplog: pytest.LogCaptureFixture, tmp_path: Path
+) -> None:
+    from app.config import Settings
+    from app.main import create_app, lifespan
+
+    assert http_service.impersonation_available() is True
+    application = create_app(Settings(db_path=tmp_path / "app.db", static_dir=tmp_path / "gone"))
+
+    with caplog.at_level(logging.WARNING, logger="app.main"):
+        async with lifespan(application):
+            pass
+
+    assert [r for r in caplog.records if r.levelno == logging.WARNING] == []
 
 
 async def test_the_byte_ceiling_stops_the_download(fake_curl) -> None:  # noqa: ANN001
