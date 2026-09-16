@@ -12,12 +12,14 @@ import httpx2
 import pytest
 from httpx2 import ASGITransport
 from sqlalchemy import inspect, select, text
+from sqlalchemy.dialects import sqlite
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.schema import CreateColumn
 
 from app.config import Settings
 from app.db.engine import create_db_engine, create_session_factory
-from app.db.init import init_db
-from app.db.models import Feed, FeedItem, Message, ResearchSession, Setting, utcnow
+from app.db.init import ADDED_COLUMNS, init_db
+from app.db.models import Base, Feed, FeedItem, Message, ResearchSession, Setting, utcnow
 from app.main import create_app
 from app.services import settings as settings_service
 
@@ -151,6 +153,81 @@ async def test_init_db_adds_columns_a_previous_release_did_not_have(tmp_path: Pa
     finally:
         connection.close()
     assert {"turn_status", "turn_started_at"} <= columns
+
+
+OLD_RESEARCH_SESSIONS = """
+    CREATE TABLE research_sessions (
+        id INTEGER NOT NULL PRIMARY KEY,
+        title TEXT,
+        model TEXT,
+        archived BOOLEAN NOT NULL,
+        total_input_tokens INTEGER NOT NULL,
+        total_output_tokens INTEGER NOT NULL,
+        created_at DATETIME NOT NULL,
+        updated_at DATETIME NOT NULL
+    )
+"""
+
+
+def _columns(db_path: Path, table: str) -> dict[str, tuple]:
+    """``{name: (type, notnull, default)}`` as the file itself declares them."""
+    connection = sqlite3.connect(db_path)
+    try:
+        rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
+    finally:
+        connection.close()
+    return {row[1]: (row[2], row[3], row[4]) for row in rows}
+
+
+async def test_a_fresh_database_and_an_upgraded_one_declare_the_same_columns(tmp_path: Path):
+    """The two paths into a column must not disagree.
+
+    ``create_all`` writes what the model says and ``ADDED_COLUMNS`` writes a
+    literal, so a column can end up ``NOT NULL`` with a default on one machine and
+    ``NOT NULL`` with none on another — the same app, two different tables, and
+    only the upgraded one survives an insert that omits the column.
+    """
+    fresh_path = tmp_path / "fresh" / "app.db"
+    fresh = create_db_engine(fresh_path)
+    try:
+        await init_db(fresh, create_session_factory(fresh))
+    finally:
+        await fresh.dispose()
+
+    upgraded_path = tmp_path / "upgraded" / "app.db"
+    upgraded_path.parent.mkdir(parents=True)
+    connection = sqlite3.connect(upgraded_path)
+    try:
+        connection.execute(OLD_RESEARCH_SESSIONS)
+        connection.commit()
+    finally:
+        connection.close()
+    upgraded = create_db_engine(upgraded_path)
+    try:
+        await init_db(upgraded, create_session_factory(upgraded))
+    finally:
+        await upgraded.dispose()
+
+    fresh_columns = _columns(fresh_path, "research_sessions")
+    upgraded_columns = _columns(upgraded_path, "research_sessions")
+    assert fresh_columns == upgraded_columns
+
+
+def test_added_columns_say_exactly_what_the_models_say():
+    """``ADDED_COLUMNS`` is hand-written DDL for columns the models declare.
+
+    A column added to the models and not listed here fails at runtime with "no
+    such column" on every database that already exists, and one whose DDL has
+    drifted from the model gives an upgraded database a different table from a
+    fresh one. Both are caught by compiling the model's own column.
+    """
+    for table, columns in ADDED_COLUMNS.items():
+        assert table in Base.metadata.tables
+        declared = Base.metadata.tables[table].columns
+        for name, ddl in columns.items():
+            assert name in declared, f"{table}.{name} is not declared in app.db.models"
+            compiled = str(CreateColumn(declared[name]).compile(dialect=sqlite.dialect()))
+            assert compiled == f"{name} {ddl}"
 
 
 async def test_engine_creates_the_parent_directory(tmp_path: Path):

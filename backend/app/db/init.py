@@ -24,9 +24,14 @@ from app.services.settings import seed_defaults
 #: table itself shipped. The DDL is a literal from this module, never user input,
 #: and a ``NOT NULL`` column must carry a default or SQLite refuses to add it to a
 #: table that already has rows.
+#:
+#: Each entry must be **exactly** what ``create_all`` emits for that column, or an
+#: upgraded database ends up with a different table from a fresh one. The column's
+#: ``server_default`` in ``app.db.models`` is what puts the ``DEFAULT`` in both.
+#: ``tests/test_db.py`` compiles every model column here and compares the two.
 ADDED_COLUMNS: dict[str, dict[str, str]] = {
     "research_sessions": {
-        "turn_status": "TEXT NOT NULL DEFAULT 'idle'",
+        "turn_status": "TEXT DEFAULT 'idle' NOT NULL",
         "turn_started_at": "DATETIME",
     },
 }
