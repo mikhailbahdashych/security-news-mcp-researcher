@@ -13,6 +13,19 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * "The thing this page is about is gone."
+ *
+ * A predicate rather than an inline `instanceof` at each call site: a page that
+ * reacts to a 404 by navigating away must be sure it is reacting to the server
+ * saying *not found* and not to the backend being down — `fetch` throws a
+ * `TypeError` for that, and sending the user to a blank page because their
+ * laptop woke up mid-request would lose the URL they were on.
+ */
+export function isNotFound(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 404
+}
+
 async function readDetail(response: Response): Promise<string> {
   try {
     const body: unknown = await response.json()

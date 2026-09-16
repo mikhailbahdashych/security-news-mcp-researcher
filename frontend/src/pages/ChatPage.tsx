@@ -20,6 +20,7 @@ import {
   type ErrorPayload,
   type SessionFilters,
 } from '../api/chat'
+import { isNotFound } from '../api/client'
 import { useFeedTitlesFromCache, type FeedItem } from '../api/inbox'
 import { fetchSettings, settingsQueryKey } from '../api/settings'
 import AnswerTurn from '../components/chat/AnswerTurn'
@@ -160,6 +161,35 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
       dispatch({ kind: 'reset' })
     }
   }, [abandonTurn, liveSession, staleSession])
+
+  // A session that is not there — a hand-typed id, a stale bookmark, a tab left
+  // open while the chat was deleted from another one. The empty view under
+  // `/chat/999` looks like a working new chat until you send into it and the
+  // POST 404s too, so the page goes back to `/chat` (replace: the dead id does
+  // not deserve a history entry) and drops the live state with it. Only a 404:
+  // every other failure keeps the error on screen, because a backend that is
+  // down is not a session that is gone.
+  //
+  // The sessions list needs no invalidation. It is `enabled: historyOpen`, so it
+  // is usually not even mounted on this path, and the two ways a row can go
+  // stale already refresh it: the in-app delete invalidates on success, and a
+  // row deleted elsewhere is a stale cache this redirect does not make worse.
+  const missingSession = isNotFound(detail.error)
+  useEffect(() => {
+    if (!missingSession) {
+      return
+    }
+    abandonTurn(liveSession)
+    dispatch({ kind: 'reset' })
+    // Routed: navigate. Embedded: the URL belongs to the other pane, so this
+    // clears the local selection instead — `openSession` owns that fork, and in
+    // that mode it is a `setState`. The server answering 404 is the external
+    // system this effect exists to synchronise with, and there is nothing to
+    // derive during render: the id being cleared is what the query that failed
+    // was keyed on, so clearing it is what stops the effect running again.
+    // oxlint-disable-next-line react/set-state-in-effect
+    openSession(null, true)
+  }, [abandonTurn, liveSession, missingSession, openSession])
 
   // Clear the handover off the history entry so a reload does not re-attach.
   useEffect(() => {
