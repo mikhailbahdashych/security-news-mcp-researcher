@@ -148,17 +148,29 @@ export type LiveAction =
 const RENDERED_BY_TRANSCRIPT = new Set<ErrorPayload['type']>(['refusal', 'max_tokens'])
 
 /**
- * The activity fields a tool result moves on.
+ * The activity fields a tool result moves on, given the steps it just patched.
  *
- * The model now has the answer and is deciding what to do with it, which is the
- * one moment nothing else is on the wire. `activeTool` only clears when the
- * result belongs to the call being waited on — calls run in parallel, and a
- * sibling coming back first does not mean the turn stopped waiting.
+ * `reading` — the model has the answer and is deciding what to do with it — is
+ * only true once *nothing* is still out. Calls run in parallel, and one coming
+ * back while its siblings are in flight does not mean the turn stopped waiting;
+ * saying "Reading results…" over a search still running is exactly the kind of
+ * lie this line exists to stop telling, so the label follows whatever is left.
  */
-function settledBy(state: LiveTurn, toolUseId: string): Pick<LiveTurn, 'activity' | 'activeTool'> {
+function activityAfterResult(
+  state: LiveTurn,
+  steps: LiveStep[],
+): Pick<LiveTurn, 'activity' | 'activeTool'> {
+  const waiting = steps.filter(
+    (step): step is LiveTool => step.kind === 'tool' && step.status === 'running',
+  )
+  if (waiting.length === 0) {
+    return { activity: 'reading', activeTool: null }
+  }
+  const held = waiting.find((step) => step.toolUseId === state.activeTool?.toolUseId)
+  const next = held ?? waiting[0]
   return {
-    activity: 'reading',
-    activeTool: state.activeTool?.toolUseId === toolUseId ? null : state.activeTool,
+    activity: 'tool',
+    activeTool: { toolUseId: next.toolUseId, name: next.name, source: next.source },
   }
 }
 
@@ -281,15 +293,12 @@ export function liveTurnReducer(state: LiveTurn, action: LiveAction): LiveTurn {
     }
     case 'tool_result': {
       const result = payload as ToolResultPayload
-      return {
-        ...state,
-        ...settledBy(state, result.tool_use_id),
-        steps: patchTool(state.steps, result.tool_use_id, {
-          status: result.is_error ? 'error' : 'ok',
-          preview: result.preview,
-          durationMs: result.duration_ms,
-        }),
-      }
+      const steps = patchTool(state.steps, result.tool_use_id, {
+        status: result.is_error ? 'error' : 'ok',
+        preview: result.preview,
+        durationMs: result.duration_ms,
+      })
+      return { ...state, ...activityAfterResult(state, steps), steps }
     }
     case 'server_tool_use': {
       const use = payload as ServerToolUsePayload
@@ -321,14 +330,11 @@ export function liveTurnReducer(state: LiveTurn, action: LiveAction): LiveTurn {
     }
     case 'server_tool_result': {
       const result = payload as ServerToolResultPayload
-      return {
-        ...state,
-        ...settledBy(state, result.tool_use_id),
-        steps: patchTool(state.steps, result.tool_use_id, {
-          status: result.is_error ? 'error' : 'ok',
-          results: result.results,
-        }),
-      }
+      const steps = patchTool(state.steps, result.tool_use_id, {
+        status: result.is_error ? 'error' : 'ok',
+        results: result.results,
+      })
+      return { ...state, ...activityAfterResult(state, steps), steps }
     }
     case 'turn_end': {
       const end = payload as TurnEndPayload

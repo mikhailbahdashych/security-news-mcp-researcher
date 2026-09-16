@@ -182,19 +182,58 @@ describe('activity', () => {
     expect(live.activeTool).toBeNull()
   })
 
-  it('keeps a still-running tool when a different one comes back', () => {
-    const live = apply([
+  it('stays on the tool while a sibling call is still running', () => {
+    // Parallel calls are the norm. The first one back does not mean the turn
+    // stopped waiting, and "Reading results…" over a search still in flight is
+    // exactly the kind of lie this line exists to stop telling.
+    let live = apply([
       START,
       sse('server_tool_use', { tool_use_id: 'srvtoolu_1', name: 'web_search', input: {} }),
       sse('server_tool_use', { tool_use_id: 'srvtoolu_2', name: 'web_fetch', input: {} }),
+      sse('server_tool_result', {
+        tool_use_id: 'srvtoolu_2',
+        name: 'web_fetch',
+        is_error: false,
+        results: [],
+      }),
+    ])
+    expect(live.activity).toBe('tool')
+    expect(live.activeTool).toMatchObject({ name: 'web_search' })
+
+    live = liveTurnReducer(
+      live,
       sse('server_tool_result', {
         tool_use_id: 'srvtoolu_1',
         name: 'web_search',
         is_error: false,
         results: [],
       }),
+    )
+    expect(live.activity).toBe('reading')
+    expect(live.activeTool).toBeNull()
+  })
+
+  it('moves the label onto whichever call is still waiting', () => {
+    // The result that lands is the one the label was naming, but another call
+    // is still out — the line follows it rather than claiming the turn is idle.
+    const live = apply([
+      START,
+      sse('tool_use_start', { tool_use_id: 'toolu_1', name: 'fetch_article', source: 'builtin' }),
+      sse('tool_use_start', {
+        tool_use_id: 'toolu_2',
+        name: 'search_feed_items',
+        source: 'builtin',
+      }),
+      sse('tool_result', {
+        tool_use_id: 'toolu_2',
+        name: 'search_feed_items',
+        is_error: false,
+        duration_ms: 8,
+        preview: 'three items',
+      }),
     ])
-    expect(live.activeTool).toMatchObject({ name: 'web_fetch' })
+    expect(live.activity).toBe('tool')
+    expect(live.activeTool).toMatchObject({ name: 'fetch_article' })
   })
 
   it('leaves the activity alone once the stream is over', () => {
