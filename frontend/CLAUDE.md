@@ -146,9 +146,12 @@ keystroke is its own request and its own cache entry. Used by `GlobalSearch`, `I
 (`AttachmentPicker`, `GenerateNotesDialog`).
 
 `lib/useElapsed.ts` — whole seconds since a timestamp, ticking once a second. The
-interval belongs to the component that shows the counter (`chat/TurnProgress`), which is
-mounted only while a turn is on the wire, so the clock is read at mount and never
-resynchronised.
+interval belongs to the component that shows the counter (`chat/TurnProgress`), so it
+lives exactly as long as there is something to count. That component mounts and unmounts
+several times in a turn — the line is hidden while text flows — so the clock is re-read
+often; the value stays right because `startedAt` is only ever subtracted from it.
+(Corollary: `TurnProgress`'s `aria-live` region is remounted rather than updated, so a
+screen reader generally will not announce the label again.)
 
 ## `lib/sse.ts` — the POST-SSE reader
 
@@ -198,14 +201,20 @@ a turn does not re-render differently the instant it is refetched.
   domain in the next.
 - **The sandbox.** `code_execution` / `bash_code_execution` / `text_editor_*` are one
   thing to the user: Anthropic's server-side container, which Opus 5 runs its own
-  `web_search`/`web_fetch` calls from. `isSandboxTool` is the single test; the row is
+  `web_search`/`web_fetch` calls from. `isSandboxTool(source, name)` is the single test and
+  **the source is half of it** — MCP tool names are user-supplied and `text_editor_write`
+  is an ordinary one, but a stdio MCP server runs on the user's own machine, so captioning
+  its call "ran in Anthropic's sandbox" is a false provenance claim. The row is
   named `Sandbox`, tagged `sandbox` (not `code` — that never said *whose* machine ran
   it), hinted with the first line of `input.code`/`input.command` (or `container start`
   for the input-less block that opens the container), and its expanded body says in one
   line what the sandbox is. Its `args` block is the `code`/`command` string **verbatim**,
   not JSON — `{"code": "import json\n…"}` is the wire format, not source anyone can
   audit. Its result is read as `stdout`/`stderr`/`exit N` **only when N ≠ 0**, `no output`
-  when there is nothing — and never `encrypted_stdout`.
+  when there is nothing — and never `encrypted_stdout`. `container start` is reserved for a
+  **settled** block with no input: while fragments are still arriving `liveSteps` yields
+  `null` (the `ToolStepSpec.input` contract) and the row hints `…`, because "called with no
+  arguments" is a statement and it would be the wrong one.
 - Presentation helpers live here too: `hostOf`, `formatMs`, `formatTokens`, `toolTag`
   (`local`/`web`/`sandbox`/an MCP server name), `toolHint`, `whenLabel`.
 
@@ -217,8 +226,8 @@ Components: `AnswerTurn`, `StepsCard`, `TurnProgress`, `SourcesGrid`, `Composer`
 `components/chat/liveTurn.ts` holds **only the in-flight turn**; once the turn ends the
 page refetches the session and the Query cache is the source of truth again.
 `LiveTurn = { sessionId, prompt, attachments, streaming, steps, text, interrupted, error,
-turn, usage, activity, activeTool, startedAt }`; actions are `start`, `sse`, `failed`,
-`settle`, `reset`. `start` carries its own `startedAt` (`Date.now()` at the call site) so
+turn, usage, activity, activeTool, startedAt, token }`; actions are `start`, `sse`,
+`failed`, `settle`, `reset`. `start` carries its own `startedAt` (`Date.now()` at the call site) so
 the reducer stays pure, and the `attachments` the question was sent with — they live on
 the stored user row, which `turnsBesideLive` hides for the length of the turn, so without
 a copy here the chips vanished the moment the user pressed Enter.
@@ -249,8 +258,12 @@ and the next output — settled rows show ticks, and a 20 s thinking phase after
 as a hung page. **`reading` means every call is back**: calls run in parallel, so while
 any tool step is still `running` the activity stays `tool` and follows whatever is left —
 "Reading results…" over a search still in flight is the kind of lie this line exists to
-stop telling. It renders only while `streaming` and never when `activity === 'writing'`
-(the text is its own progress report), so a stored turn never shows one.
+stop telling, and a result whose id matches no step moves nothing at all. `turn_start` sets
+`thinking` **every** time, including a `pause_turn` restart: keeping `writing` there hid the
+line for the whole of the next time-to-first-token, with the answer frozen mid-sentence.
+Whether to render it is `showsProgress(streaming, activity)` — a tested function, not an
+inline predicate — and the three fields travel as one `LiveProgress`, because `startedAt`
+without an `activity` is an elapsed counter with no start.
 
 **`turnsBesideLive(turns, livePrompt)`** is what stops the question rendering twice. The
 backend persists the user row before the first token, so the refetch after `createSession`
@@ -281,7 +294,19 @@ themselves. The one case this lets through is a browser-back to `/chat` mid-turn
 keeping the turn on screen is the lesser evil.
 
 **Stop needs both halves**: `abort.current?.abort()` stops the browser reading, and
-`POST /api/sessions/:id/cancel` stops the server billing.
+`POST /api/sessions/:id/cancel` stops the server billing. The id is the **turn's**
+(`live.sessionId ?? sessionId`), not the route's — a browser-back to `/chat` mid-turn keeps
+the turn and its Stop button on screen with no id in the URL.
+
+**A turn that is left behind must be stopped, not forgotten.** `reset` alone cleared
+`streaming`, so the composer re-enabled while the stream ran on; the abandoned turn's
+`finally` then nulled the *replacement* turn's controller and dispatched `settle`, wiping a
+live question off the screen mid-stream. Every leave path — `newChat`, the history drawer,
+deleting the open session, the foreign-session effect and a second `send` — goes through
+`ChatPage.abandonTurn`, which aborts, cancels the turn's own session and bumps a token.
+`LiveTurn.token` carries it, and the reducer ignores any `sse`/`failed`/`settle` stamped
+with an older one. `reset` carries no token on purpose: leaving is the user's decision and
+can never be a stale frame.
 
 ## Notes generation (`components/notes/GenerateNotesDialog.tsx`)
 
@@ -308,13 +333,13 @@ hand-rolled `.prose-chat` block in `src/index.css`, deliberately instead of
 
 ## Tests
 
-`npx vitest run` — **8 files, 124 tests**, `environment: 'node'`, so only pure modules
+`npx vitest run` — **8 files, 145 tests**, `environment: 'node'`, so only pure modules
 are covered: `lib/sse.test.ts` (frames split across chunks, multi-line data,
 heartbeats ignored), `api/chat.test.ts` (`blocksToText`, `groupTurns`,
 `stepsFromMessage`, `toolCallStatus`, source extraction, the sandbox card, the
 formatters), `components/chat/liveTurn.test.ts` (`isForeignSession`, `turnsBesideLive`,
-the streamed server-tool input, the `activity` transitions, `activityLabel`,
-`formatElapsed`),
+the streamed server-tool input, the `activity` transitions, turn scoping, `activityLabel`,
+`showsProgress`, `formatElapsed`),
 `api/inbox.test.ts`, `components/ui/preferences.test.ts` (`parseStoredTheme`/
 `resolveTheme`, `parseRail`, `parseLayout`/`pageFromPath`),
 `components/ui/searchKeys.test.ts` (the shared overlay keyboard model),
