@@ -1,3 +1,4 @@
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -12,7 +13,10 @@ from app.db.engine import create_db_engine, create_session_factory
 from app.db.init import init_db
 from app.logging_config import configure_logging
 from app.mcp.manager import McpManager
+from app.services.http import impersonation_available
 from app.static import mount_spa
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -39,6 +43,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.session_factory = create_session_factory(engine)
 
     await init_db(engine, app.state.session_factory)
+
+    # An optional import, so nothing else in the app can say it is missing — and
+    # what it costs is invisible until a feed is refreshed: the 403 retry simply
+    # never happens. The live case was a --reload dev server that picked up the
+    # retry code before its venv had the wheel.
+    if not impersonation_available():
+        logger.warning(
+            "curl_cffi is not installed; feeds behind TLS-fingerprint bot protection "
+            "(e.g. CISA) will stay 403 — run `uv sync`"
+        )
+
     try:
         yield
     finally:

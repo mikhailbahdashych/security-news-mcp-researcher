@@ -24,6 +24,7 @@ from httpx2 import ASGITransport
 from sqlalchemy import delete, func, select
 from sse_util import event_names, parse_sse, payloads_for
 
+from app.agent import events as ev
 from app.api import tasks as task_registry
 from app.api.deps import get_chat_client_factory
 from app.db.models import Feed, FeedItem, Message, Note, NoteSource, ResearchSession, utcnow
@@ -651,6 +652,34 @@ async def test_cited_web_search_results_become_sources(app, client, with_key, se
     assert [(source.feed_item_id, source.url, source.title) for source in sources] == [
         (item_ids[0], "https://example.test/story-0", "Story 0: AcmeVPN pre-auth RCE"),
         (None, "https://vendor.test/advisory", "Vendor advisory"),
+    ]
+
+
+def test_a_server_tools_streamed_input_leaves_no_buffer_behind() -> None:
+    """A server tool's input now streams in too, and its result is a different event.
+
+    The collector buffers ``tool_use_input`` fragments per id and pops them when
+    the matching ``tool_result`` lands. A ``server_tool_result`` has to pop as
+    well, or every web_search in a generation leaves its query buffered for the
+    life of the run — and the sources must come from the results, never from a
+    server tool's arguments.
+    """
+    collector = notes_service.SourceCollector()
+    collector.observe(ev.ServerToolUse(tool_use_id="srvtoolu_ws", name="web_search", input={}))
+    collector.observe(ev.ToolUseInput(tool_use_id="srvtoolu_ws", partial_json='{"query": '))
+    collector.observe(ev.ToolUseInput(tool_use_id="srvtoolu_ws", partial_json='"acmevpn"}'))
+    collector.observe(
+        ev.ServerToolResult(
+            tool_use_id="srvtoolu_ws",
+            name="web_search",
+            is_error=False,
+            results=[{"title": "Advisory", "url": "https://vendor.test/advisory"}],
+        )
+    )
+
+    assert collector._buffers == {}
+    assert [source.url for source in collector.sources(body_md="https://vendor.test/advisory")] == [
+        "https://vendor.test/advisory"
     ]
 
 

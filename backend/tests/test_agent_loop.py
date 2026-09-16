@@ -1153,9 +1153,7 @@ def test_an_error_code_alone_is_enough_to_classify_a_failure():
     assert payload["error_code"] == "max_uses_exceeded"
 
 
-async def test_a_web_search_result_list_reaches_the_stream_as_results(
-    session_factory, session_id
-):
+async def test_a_web_search_result_list_reaches_the_stream_as_results(session_factory, session_id):
     """The success branch of the same fork, driven through the real runner.
 
     A successful server-tool result puts a *list* in ``content`` where a failure
@@ -1222,3 +1220,74 @@ async def test_a_web_search_error_object_reaches_the_stream_as_an_error(
         row = (await session.execute(select(ToolCall))).scalars().one()
     assert row.is_error is True
     assert row.result_json["content"]["error_code"] == "max_uses_exceeded"
+
+
+# ------------------------- round-4: streamed server-tool input
+
+
+async def test_a_streamed_server_tool_input_is_forwarded_as_fragments(session_factory, session_id):
+    """A server tool's input streams in exactly like a client tool's.
+
+    ``content_block_start`` carries an empty ``input`` when the model composes the
+    argument itself, so a card rendered from ``server_tool_use`` alone shows a
+    web_search with no query (and a code execution with ``{}``) until the page is
+    reloaded. The ``input_json_delta`` fragments are what fill it in live, and they
+    ride the same ``tool_use_input`` event the client-side tools use — the browser
+    patches by ``tool_use_id``, which is the same id either way.
+    """
+    from fakes.anthropic import turn_web_search
+
+    collected = await drive(
+        ScriptedAnthropic(
+            [
+                turn_web_search(
+                    tool_use_id="srvtoolu_ws",
+                    query="CVE-2026-1234 exploitation",
+                    results=[("Advisory", "https://acme.test/advisory")],
+                    stream_input=True,
+                )
+            ]
+        ),
+        session_factory,
+        session_id,
+    )
+
+    use = next(e for e in collected if e.type == "server_tool_use")
+    # The start block really is empty; the deltas are the only live source.
+    assert use.input == {}
+    assert use.tool_use_id == "srvtoolu_ws"
+
+    fragments = [e for e in collected if e.type == "tool_use_input"]
+    assert len(fragments) == 2
+    assert {e.tool_use_id for e in fragments} == {"srvtoolu_ws"}
+    assert json.loads("".join(e.partial_json for e in fragments)) == {
+        "query": "CVE-2026-1234 exploitation"
+    }
+
+    # Order matters: the card is created by server_tool_use, then patched.
+    assert [e.type for e in collected if e.type in ("server_tool_use", "tool_use_input")] == [
+        "server_tool_use",
+        "tool_use_input",
+        "tool_use_input",
+    ]
+
+
+async def test_streamed_server_tool_input_does_not_disturb_the_persisted_call(
+    session_factory, session_id
+):
+    """Execution and persistence still read the parsed input off the final message."""
+    from fakes.anthropic import turn_web_search
+
+    await drive(
+        ScriptedAnthropic(
+            [turn_web_search(tool_use_id="srvtoolu_ws", query="acmevpn rce", stream_input=True)]
+        ),
+        session_factory,
+        session_id,
+    )
+
+    async with session_factory() as session:
+        row = (await session.execute(select(ToolCall))).scalars().one()
+    assert row.name == "web_search"
+    assert row.source == "server"
+    assert row.input_json == {"query": "acmevpn rce"}

@@ -145,7 +145,7 @@ definition; each event's `to_sse()` returns `(event_name, payload)`.
 | `thinking_delta` | `{"text": "..."}` |
 | `text_delta` | `{"text": "..."}` |
 | `tool_use_start` | `{"tool_use_id", "name", "source"}` (`source` ∈ `builtin`/`server`/`mcp`) |
-| `tool_use_input` | `{"tool_use_id", "partial_json"}` — raw fragments, only valid JSON once concatenated |
+| `tool_use_input` | `{"tool_use_id", "partial_json"}` — raw fragments, only valid JSON once concatenated; sent for `server_tool_use` blocks too, patched onto the card by id |
 | `tool_result` | `{"tool_use_id", "name", "is_error", "duration_ms", "preview"}` (preview ≤ 600 chars) |
 | `server_tool_use` | `{"tool_use_id", "name", "input"}` |
 | `server_tool_result` | `{"tool_use_id", "name", "is_error", "results"}` |
@@ -238,6 +238,19 @@ through that client. Each takes an `impersonate_transport=` seam alongside
 `transport=`; a caller that passes `transport` **alone gets no retry**, which is what
 keeps a 403 fixture in the test suite off the network.
 
+Because that client can be absent, a feed's 403 says which of three things happened:
+`BOT_PROTECTION_ERROR` ("a browser-TLS retry did not get through either") **only** when a
+retry actually ran, `BOT_PROTECTION_NO_RETRY_ERROR` (names the missing `curl_cffi` and the
+`uv sync` that fixes it) when no client could be built, and `BOT_PROTECTION_PLAIN_ERROR`
+when the retry was withheld rather than unavailable — the mock-transport interlock, which
+is a test-only shape. `_BrowserRetry.client()` returns `(client, reason)` with the reason
+`RETRY_MISSING` or `RETRY_DISABLED` and **remembers** it, so the second feed of a batch is
+told what the first was; `_fetch_feed` passes it up and `_refresh_one` picks the wording,
+without a second fetch path. The lifespan logs one WARNING at startup when
+`http.impersonation_available()` is False — the live failure was a `--reload` dev server
+that picked up the new code before the wheel was in the venv, and the row alone could not
+say so. The *article* path keeps its bare `HTTP 403`: it never claimed a retry happened.
+
 Three more ingest invariants worth not re-litigating (`app/services/feeds.py`):
 
 - A feed that parses cleanly with **zero entries is `last_status="ok"`**, not an error.
@@ -246,12 +259,14 @@ Three more ingest invariants worth not re-litigating (`app/services/feeds.py`):
 - `feed_items` inserts go in chunks of `INSERT_CHUNK_ROWS` (500 × 10 bound
   parameters), inside one transaction, so a feed of several thousand entries cannot
   outrun SQLite's parameter ceiling.
-- A 403 surfaces as `BOT_PROTECTION_ERROR`, never the response body — a challenge page
-  is several KB of markup that helps nobody.
+- A 403 surfaces as one of the three `BOT_PROTECTION_*` messages above, never the
+  response body — a challenge page is several KB of markup that helps nobody. Which one
+  is a statement of fact about the retry: do not widen a message to cover a case it did
+  not measure.
 
 ## Tests (`backend/tests/`)
 
-`make test` → `uv run pytest` (**563 tests** with the cleanup PRs in, ~14 s) then the frontend's vitest. One
+`make test` → `uv run pytest` (**572 tests**, ~14 s) then the frontend's vitest. One
 `test_<area>.py` per area, `fakes/` for client stand-ins, `fixtures/` for XML/HTML.
 
 There is **no `tests/__init__.py`**, so pytest puts `tests/` on `sys.path`: helpers are

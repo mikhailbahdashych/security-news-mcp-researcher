@@ -539,6 +539,7 @@ def turn_web_search(
     query: str = "acmevpn rce",
     text: str | None = None,
     stop_reason: str = "end_turn",
+    stream_input: bool = False,
 ) -> ScriptedTurn:
     """A server-side web_search call and its results, in one turn.
 
@@ -551,6 +552,13 @@ def turn_web_search(
     errors are an HTTP 200 and never raise. It is the other half of the branch
     ``_server_tool_result_payload`` has to get right: list means results, object
     means "look at the type before assuming anything".
+
+    ``stream_input`` is what the wire really looks like when the model composes
+    the query rather than the server filling it in: ``content_block_start``
+    carries an **empty** ``input`` and the real one arrives as
+    ``input_json_delta`` fragments, exactly as for a client-side ``tool_use``.
+    The accumulated message still carries the full input, because that is what
+    ``get_final_message()`` returns.
     """
     from anthropic.types.beta import (
         BetaWebSearchResultBlock,
@@ -583,8 +591,25 @@ def turn_web_search(
         content=payload,
     )
     content: list[Any] = [use, result]
+    started = use
+    input_deltas: list[Any] = []
+    if stream_input:
+        started = BetaServerToolUseBlock(
+            type="server_tool_use", id=tool_use_id, name="web_search", input={}
+        )
+        serialised = json.dumps({"query": query})
+        half = len(serialised) // 2
+        input_deltas = [
+            BetaRawContentBlockDeltaEvent(
+                type="content_block_delta",
+                index=0,
+                delta=BetaInputJSONDelta(type="input_json_delta", partial_json=fragment),
+            )
+            for fragment in (serialised[:half], serialised[half:])
+        ]
     events: list[Any] = [
-        BetaRawContentBlockStartEvent(type="content_block_start", index=0, content_block=use),
+        BetaRawContentBlockStartEvent(type="content_block_start", index=0, content_block=started),
+        *input_deltas,
         BetaRawContentBlockStopEvent(type="content_block_stop", index=0),
         BetaRawContentBlockStartEvent(type="content_block_start", index=1, content_block=result),
         BetaRawContentBlockStopEvent(type="content_block_stop", index=1),

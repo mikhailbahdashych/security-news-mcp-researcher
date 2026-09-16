@@ -274,7 +274,17 @@ async def _stream_turn(
     Tool input arrives as ``input_json_delta`` fragments that are only valid JSON
     once concatenated; they are forwarded raw for display and never parsed here.
     Execution reads the parsed ``input`` dict off ``get_final_message()``.
+
+    That is true of **server** tools too, which is why ``open_tool_blocks`` tracks
+    them: when the model composes the argument itself, ``content_block_start``
+    carries an empty ``input`` and the query or the code only exists in the
+    fragments. Forwarding them on the same ``tool_use_input`` event (the consumer
+    patches by ``tool_use_id``, which is the same id either way) is the difference
+    between a live web_search card showing its query and one showing ``{}`` until
+    the page is reloaded and the stored transcript answers instead.
     """
+    #: block index -> tool_use id, for both client-side and server-side tool
+    #: blocks. Indices are unique within one message, ids across the session.
     open_tool_blocks: dict[int, str] = {}
     #: server_tool_use id -> name, so a result block can be labelled with the
     #: tool that actually produced it rather than a guess from its own type.
@@ -294,6 +304,7 @@ async def _stream_turn(
             elif block_type == "server_tool_use":
                 raw_input = getattr(block, "input", None)
                 server_tool_names[block.id] = block.name
+                open_tool_blocks[event.index] = block.id
                 yield ev.ServerToolUse(
                     tool_use_id=block.id,
                     name=block.name,

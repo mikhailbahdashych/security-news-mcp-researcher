@@ -298,17 +298,23 @@ async def test_a_feed_with_no_entries_is_not_an_error(
 async def test_a_403_is_reported_as_bot_protection(
     db_session: AsyncSession, session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
-    """A bare "HTTP 403" reads as a bad URL; this one says what actually happened."""
+    """A bare "HTTP 403" reads as a bad URL; this one says what actually happened.
+
+    No retry was configured at all here (the mock-transport interlock withholds
+    it), which is a test-only shape: the row gets the plain wording, with no claim
+    about a retry in either direction.
+    """
     feed = await add_feed(db_session, BROKEN_URL)
     challenge = "<html><title>Just a moment...</title><script>secret-token</script></html>"
     transport = routes_transport({BROKEN_URL: httpx2.Response(403, text=challenge)})
 
     result = await feeds_service.refresh_feeds(session_factory, None, transport=transport)
 
-    assert result.results[0].error == feeds_service.BOT_PROTECTION_ERROR
+    assert result.results[0].error == feeds_service.BOT_PROTECTION_PLAIN_ERROR
     await db_session.refresh(feed)
     assert feed.last_status == "error"
     assert "bot protection" in feed.last_error
+    assert "retry" not in feed.last_error
     # The challenge page itself is never stored or shown.
     assert "secret-token" not in feed.last_error
 
@@ -379,8 +385,102 @@ async def test_the_browser_retry_is_never_built_behind_a_mock_transport(
 
     result = await feeds_service.refresh_feeds(session_factory, None, transport=transport)
 
-    assert result.results[0].error == feeds_service.BOT_PROTECTION_ERROR
+    # Withheld on purpose, not missing: the row must not blame curl_cffi for it.
+    assert result.results[0].error == feeds_service.BOT_PROTECTION_PLAIN_ERROR
     assert built == []
+
+
+async def test_a_403_says_so_when_the_browser_retry_could_not_be_built(
+    db_session: AsyncSession,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The live case: curl_cffi is missing, so no retry happens at all.
+
+    This is what a dev server started before ``uv sync`` finished does on every
+    CISA refresh. Reporting the "retry did not get through either" wording there
+    sends the reader looking for a WAF that beat libcurl, when the truth is that
+    libcurl was never asked. The message has to name the missing wheel and the fix.
+    """
+    feed = await add_feed(db_session, BROKEN_URL)
+    blocked = routes_transport({BROKEN_URL: httpx2.Response(403, text="denied")})
+    # Passing an impersonate transport is what lifts the mock-transport interlock;
+    # the builder returning None is the wheel being absent.
+    unusable = routes_transport({BROKEN_URL: xml_response("sample_rss.xml")})
+    monkeypatch.setattr(feeds_service, "build_impersonating_client", lambda *a, **k: None)
+
+    result = await feeds_service.refresh_feeds(
+        session_factory, None, transport=blocked, impersonate_transport=unusable
+    )
+
+    error = result.results[0].error
+    assert error == feeds_service.BOT_PROTECTION_NO_RETRY_ERROR
+    assert "curl_cffi" in error
+    assert "uv sync" in error
+    # The claim that must not be made when nothing was retried.
+    assert "did not get through" not in error
+    assert unusable.requests == []
+    await db_session.refresh(feed)
+    assert feed.last_error == feeds_service.BOT_PROTECTION_NO_RETRY_ERROR
+
+
+async def test_the_three_403_messages_are_three_different_claims() -> None:
+    """All say "bot protection"; only one says a retry ran, only one blames the wheel."""
+    messages = [
+        feeds_service.BOT_PROTECTION_ERROR,
+        feeds_service.BOT_PROTECTION_NO_RETRY_ERROR,
+        feeds_service.BOT_PROTECTION_PLAIN_ERROR,
+    ]
+    assert len(set(messages)) == 3
+    assert all(
+        message.startswith("HTTP 403 (blocked by the site's bot protection") for message in messages
+    )
+    assert [message for message in messages if "did not get through" in message] == [
+        feeds_service.BOT_PROTECTION_ERROR
+    ]
+    assert [message for message in messages if "curl_cffi" in message] == [
+        feeds_service.BOT_PROTECTION_NO_RETRY_ERROR
+    ]
+    assert "retry" not in feeds_service.BOT_PROTECTION_PLAIN_ERROR
+
+
+async def test_the_retry_says_why_it_has_no_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Withheld and not-installed are different facts, so they get different words."""
+    withheld = feeds_service._BrowserRetry(5, transport=None, enabled=False)
+    assert await withheld.client() == (None, feeds_service.RETRY_DISABLED)
+
+    monkeypatch.setattr(feeds_service, "build_impersonating_client", lambda *a, **k: None)
+    missing = feeds_service._BrowserRetry(5, transport=None, enabled=True)
+    assert await missing.client() == (None, feeds_service.RETRY_MISSING)
+    # Sticky: the rest of the batch gets the same answer without rebuilding.
+    assert await missing.client() == (None, feeds_service.RETRY_MISSING)
+
+
+async def test_a_batch_that_lost_the_wheel_blames_it_for_every_feed(
+    db_session: AsyncSession,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reason is remembered, so the second feed is not downgraded to "withheld"."""
+    await add_feed(db_session, BROKEN_URL)
+    await add_feed(db_session, "https://broken-too.test/feed.xml")
+    blocked = routes_transport(
+        {
+            BROKEN_URL: httpx2.Response(403, text="denied"),
+            "https://broken-too.test/feed.xml": httpx2.Response(403, text="denied"),
+        }
+    )
+    unusable = routes_transport({BROKEN_URL: xml_response("sample_rss.xml")})
+    monkeypatch.setattr(feeds_service, "build_impersonating_client", lambda *a, **k: None)
+
+    result = await feeds_service.refresh_feeds(
+        session_factory, None, transport=blocked, impersonate_transport=unusable
+    )
+
+    assert [outcome.error for outcome in result.results] == [
+        feeds_service.BOT_PROTECTION_NO_RETRY_ERROR,
+        feeds_service.BOT_PROTECTION_NO_RETRY_ERROR,
+    ]
 
 
 def _big_feed(entry_count: int) -> bytes:

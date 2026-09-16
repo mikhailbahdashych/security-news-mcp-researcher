@@ -10,6 +10,8 @@ than saying plainly what the client is.
 from __future__ import annotations
 
 import asyncio
+import logging
+from pathlib import Path
 from typing import Any
 
 import httpx2
@@ -196,6 +198,62 @@ async def test_no_browser_client_when_curl_cffi_is_missing(
     assert build_impersonating_client(10) is None
     with pytest.raises(RuntimeError):
         ImpersonatingTransport(timeout_s=10)
+
+
+def _startup_warnings(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    """Only ``app.main``'s own warnings: the lifespan is not the only thing logging."""
+    return [
+        record
+        for record in caplog.records
+        if record.levelno == logging.WARNING and record.name == "app.main"
+    ]
+
+
+async def test_startup_warns_once_when_curl_cffi_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: Path,
+) -> None:
+    """The dependency is optional at import time, so nothing else says it is absent.
+
+    The live failure: a ``--reload`` dev server picked up the code that retries a
+    403 before the wheel was in its venv, so every CISA refresh reported a block
+    with no hint that the retry itself was missing. One line at boot names it.
+    """
+    from app.config import Settings
+    from app.main import create_app, lifespan
+
+    # The seam, not the installed wheel: both branches have to be testable on an
+    # install that has it and on one that does not.
+    monkeypatch.setattr(http_service, "_CurlAsyncSession", None)
+    application = create_app(Settings(db_path=tmp_path / "app.db", static_dir=tmp_path / "gone"))
+
+    with caplog.at_level(logging.WARNING, logger="app.main"):
+        async with lifespan(application):
+            pass
+
+    assert [record.getMessage() for record in _startup_warnings(caplog)] == [
+        "curl_cffi is not installed; feeds behind TLS-fingerprint bot protection "
+        "(e.g. CISA) will stay 403 — run `uv sync`"
+    ]
+
+
+async def test_startup_is_silent_when_the_wheel_is_there(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: Path,
+) -> None:
+    from app.config import Settings
+    from app.main import create_app, lifespan
+
+    monkeypatch.setattr(http_service, "_CurlAsyncSession", object())
+    application = create_app(Settings(db_path=tmp_path / "app.db", static_dir=tmp_path / "gone"))
+
+    with caplog.at_level(logging.WARNING, logger="app.main"):
+        async with lifespan(application):
+            pass
+
+    assert _startup_warnings(caplog) == []
 
 
 async def test_the_byte_ceiling_stops_the_download(fake_curl) -> None:  # noqa: ANN001

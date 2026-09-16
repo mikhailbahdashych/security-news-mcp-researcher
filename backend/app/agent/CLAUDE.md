@@ -114,6 +114,23 @@ the web ones — they are server tools we never declared, and dropping them orph
 **before** any success branch — matching success type *prefixes* is the bug this replaced
 (`text_editor_code_execution_tool_result_error` starts with `text_editor_code_execution`).
 
+## Event mapping (`_stream_turn`)
+
+`open_tool_blocks` maps a content-block **index** to its `tool_use_id`, and it registers
+`tool_use` **and `server_tool_use`** blocks. Both kinds stream their input the same way:
+when the model composes the argument, `content_block_start` carries `input == {}` and the
+real value only exists in the `input_json_delta` fragments, so a `server_tool_use` block
+that is not registered leaves the live card showing a web_search with no query and a code
+execution with `{}` — until a reload, when the stored transcript (from
+`get_final_message()`) answers instead. The fragments go out on the same
+`tool_use_input` event for both, because the consumer patches by `tool_use_id`.
+
+`ServerToolUse.input` stays the block's *initial* dict on purpose, and an empty one means
+**"not supplied yet", never "the final input was empty"** — the fragments that follow are
+the value. A consumer therefore seeds an empty buffer from an empty `input` and renders
+the streamed JSON; seeding the buffer with `"{}"`, or preferring that `{}` over the
+fragments, is how the card ends up showing `{}` or an unparseable `{}{"query": …}`.
+
 ## Persistence strategy
 
 `Persistence(factory, session_id)` / `NullPersistence()` expose the same methods
