@@ -198,10 +198,12 @@ quiet second would end the stream). Leaving detaches that subscriber and nothing
 
 **A turn that is already over still streams.** `TurnRegistry.recent(session_id)` keeps
 the turn each session last finished for `RECENT_TURN_S` (30 s, one entry per session,
-dropped when that session starts another turn), and `GET /stream` falls back to it: an
-error-only turn — no API key, an immediate 401 — is three events long and finishes inside
-the POST's own round trip, and answering 204 there meant the user saw their question and
-no notice at all. The log is closed, so the replay ends immediately.
+dropped when that session starts another turn, and swept out of the whole cache by the
+next turn to finish anywhere — a log nobody asks about again is not free), and
+`GET /stream` falls back to it: an error-only turn — no API key, an immediate 401 — is
+three events long and finishes inside the POST's own round trip, and answering 204 there
+meant the user saw their question and no notice at all. The log is closed, so the replay
+ends immediately.
 
 **The two terminal contracts differ, deliberately.** A chat turn always ends on `done`
 (`TurnRegistry._finish` appends one if the runner ended without it). A
@@ -320,7 +322,7 @@ Three more ingest invariants worth not re-litigating (`app/services/feeds.py`):
 
 ## Tests (`backend/tests/`)
 
-`make test` → `uv run pytest` (**614 tests**, ~19 s) then the frontend's vitest. One
+`make test` → `uv run pytest` (**616 tests**, ~20 s) then the frontend's vitest. One
 `test_<area>.py` per area, `fakes/` for client stand-ins, `fixtures/` for XML/HTML.
 
 There is **no `tests/__init__.py`**, so pytest puts `tests/` on `sys.path`: helpers are

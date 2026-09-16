@@ -90,6 +90,9 @@ async def test_start_runs_the_turn_to_completion_without_a_subscriber(session_fa
     assert registry.get(session_id) is None
     assert not registry.is_running(session_id)
     assert client.closed
+    # And the turn lets go of it: the turn itself is kept for half a minute so
+    # its log can still be replayed, and the client holds the API key.
+    assert turn.client is None
     assert (await _status(session_factory, session_id))[0] == "idle"
     assert [event.type for event in turn.log.events] == [
         "turn_started",
@@ -398,10 +401,12 @@ async def test_the_registry_forgets_a_turn_before_its_subscriber_sees_done(
     turn = await registry.start(
         session_id=session_id,
         session_factory=session_factory,
-        # It must await *after* ``done``, the way the real runner does. A
-        # generator that ends with it hands control straight to ``_drive``'s
-        # ``finally``, which forgets the turn too — and the pre-``done`` forget,
-        # the fix itself, could then be deleted with the test still green.
+        # It must await *after* ``done``. Today's runner does not — it yields
+        # ``Done`` as its last statement — but a generator that ends there hands
+        # control straight to ``_drive``'s ``finally``, which forgets the turn
+        # too, and the pre-``done`` forget (the fix itself) could then be deleted
+        # with this test still green. So the generator models a runner that
+        # *could* await there, and pins the forget that is load-bearing.
         generator=done_then_waits(0.5),
         client=None,
         prompt="a",
@@ -494,6 +499,86 @@ async def test_starting_a_turn_drops_the_previous_one_from_the_recent_cache(sess
     assert registry.recent(session_id) is None
     assert registry.get(session_id) is second
     await second.task
+
+
+async def test_a_stale_recent_entry_is_swept_when_another_turn_finishes(
+    session_factory, monkeypatch
+):
+    """Nothing asks about most sessions again, and their logs are not free.
+
+    ``recent()`` drops an expired entry only for the session it is asked about,
+    so a session whose turn finished and that is never streamed again kept its
+    whole ``TurnLog`` for the life of the process. Every finish sweeps.
+    """
+    registry = TurnRegistry()
+    forgotten = await _new_session(session_factory)
+    first = await registry.start(
+        session_id=forgotten,
+        session_factory=session_factory,
+        generator=slow_turn(1, 0.01),
+        client=None,
+        prompt="a",
+        attachments=[],
+    )
+    await first.task
+    assert registry.recent(forgotten) is first
+
+    # Age the first entry past the window, then finish a turn in *another*
+    # session — the one event that has to notice.
+    monkeypatch.setattr(turns_module, "RECENT_TURN_S", -1.0)
+    other = await _new_session(session_factory)
+    second = await registry.start(
+        session_id=other,
+        session_factory=session_factory,
+        generator=slow_turn(1, 0.01),
+        client=None,
+        prompt="b",
+        attachments=[],
+    )
+    await second.task
+
+    # Back inside the window: an entry still there would now be served again.
+    monkeypatch.setattr(turns_module, "RECENT_TURN_S", 30.0)
+    assert registry.recent(forgotten) is None
+    assert registry.recent(other) is second
+
+
+async def test_a_late_finish_does_not_replace_a_newer_turn(session_factory):
+    """``_finish`` must not hand ``/stream`` the *previous* turn's log.
+
+    A turn is forgotten at its ``done``, before its own cleanup runs, so the
+    next turn can start, run and finish while the first one is still on its way
+    out. The write to the recent cache is guarded the way every other late-turn
+    write is.
+    """
+    registry = TurnRegistry()
+    session_id = await _new_session(session_factory)
+    first = await registry.start(
+        session_id=session_id,
+        session_factory=session_factory,
+        # Says ``done`` — which forgets it — and then lingers.
+        generator=done_then_waits(0.3),
+        client=None,
+        prompt="a",
+        attachments=[],
+    )
+    await asyncio.sleep(0.05)
+    assert registry.is_running(session_id) is False
+
+    second = await registry.start(
+        session_id=session_id,
+        session_factory=session_factory,
+        generator=slow_turn(1, 0.01),
+        client=None,
+        prompt="b",
+        attachments=[],
+    )
+    await second.task
+    assert registry.recent(session_id) is second
+
+    # Now let the first turn finish, long after the second one did.
+    await first.task
+    assert registry.recent(session_id) is second
 
 
 async def swallows_one_cancel(delay: float) -> AsyncIterator[ev.AgentEvent]:

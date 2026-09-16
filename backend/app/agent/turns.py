@@ -272,9 +272,7 @@ class TurnRegistry:
             return
         turn.finished = True
         self._forget(turn)
-        # Kept, briefly, so ``GET /stream`` can still replay a turn that ended
-        # during the POST that started it.
-        self._recent[turn.session_id] = (turn, asyncio.get_running_loop().time())
+        self._remember(turn)
         if not turn.log.closed:
             if not saw_done:
                 # A turn that already said ``done`` was not stopped in any way the
@@ -289,6 +287,11 @@ class TurnRegistry:
                 await turn.client.close()
             except Exception:  # noqa: BLE001 - never let a close hide the turn's end
                 logger.warning("Closing the turn's client failed", exc_info=True)
+            finally:
+                # The turn outlives this by ``RECENT_TURN_S`` so its log can still
+                # be replayed; the client — which holds the API key — has no
+                # business outliving the call it was built for.
+                turn.client = None
         try:
             await _set_status(
                 turn.session_factory,
@@ -301,6 +304,31 @@ class TurnRegistry:
             logger.warning(
                 "Could not idle session %s after its turn", turn.session_id, exc_info=True
             )
+
+    def _remember(self, turn: RunningTurn) -> None:
+        """Keep *turn* replayable for a while — and only if it is the last word.
+
+        Two rules, both the same shape as the other late-turn guards:
+
+        * **Sweep on the way in.** ``recent()`` expires an entry only for the
+          session it is asked about, so a session that finished a turn and is
+          never streamed again would hold its whole log — every delta, every tool
+          result preview — for the life of the process.
+        * **Never overwrite a newer turn.** A turn is forgotten at its ``done``,
+          so the next one can start, run and finish while it is still on its way
+          out; writing unguarded here would hand ``GET /stream`` the *previous*
+          turn's log for a page asking about the current one.
+        """
+        now = asyncio.get_running_loop().time()
+        self._recent = {
+            session_id: entry
+            for session_id, entry in self._recent.items()
+            if now - entry[1] <= RECENT_TURN_S
+        }
+        running = self._turns.get(turn.session_id)
+        previous = self._recent.get(turn.session_id)
+        if running is None and (previous is None or previous[0].started_at <= turn.started_at):
+            self._recent[turn.session_id] = (turn, now)
 
     async def _finalise_cancelled(self, turn: RunningTurn) -> None:
         """Close out a turn whose task never ran.

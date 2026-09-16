@@ -5,8 +5,9 @@ second tab — and it has to see the turn *from the start*, not from wherever th
 stream happens to be. So the turn's events are kept, in order, for as long as
 the turn runs, and a subscriber replays them and then tails.
 
-The log is dropped with the turn: once ``done`` is in the database the
-transcript is the record, and this is only ever the in-flight view.
+The log is dropped with the turn — bar the short replay window
+(``TurnRegistry.recent``), which every finish sweeps. Once ``done`` is in the
+database the transcript is the record, and this is only ever the in-flight view.
 """
 
 from __future__ import annotations
