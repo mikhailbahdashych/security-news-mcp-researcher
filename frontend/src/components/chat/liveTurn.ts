@@ -227,6 +227,8 @@ export function liveTurnReducer(state: LiveTurn, action: LiveAction): LiveTurn {
     }
     case 'server_tool_use': {
       const use = payload as ServerToolUsePayload
+      const opened = use.input ?? {}
+      const whole = Object.keys(opened).length > 0
       return {
         ...state,
         interrupted: true,
@@ -238,8 +240,12 @@ export function liveTurnReducer(state: LiveTurn, action: LiveAction): LiveTurn {
             toolUseId: use.tool_use_id,
             name: use.name,
             source: 'server',
-            partialJson: JSON.stringify(use.input ?? {}),
-            input: use.input,
+            // The API opens a server tool's block with `input: {}` and streams
+            // the arguments as `input_json_delta` like any other. Seeding `{}`
+            // here left `{}{"query": …` — never valid JSON — so the row showed
+            // the query only after a reload.
+            partialJson: whole ? JSON.stringify(opened) : '',
+            input: opened,
             status: 'running',
           },
         ],
@@ -307,6 +313,22 @@ export interface LiveStepsContext {
 }
 
 /**
+ * A live tool call's arguments, streamed fragments first.
+ *
+ * `server_tool_use` announces `input: {}` and streams the real arguments after
+ * it. An empty object is truthy, so preferring `input` meant a live `web_search`
+ * row never showed its query and a `code_execution` row never showed its code —
+ * both only appeared after a reload put the stored row on screen.
+ */
+function streamedInput(step: LiveTool): Record<string, unknown> {
+  const streamed = parseObject(step.partialJson)
+  if (streamed && Object.keys(streamed).length > 0) {
+    return streamed
+  }
+  return step.input ?? {}
+}
+
+/**
  * The live turn as the same steps the stored transcript produces.
  *
  * Going through `toolStep`/`thinkingStep` is what stops a turn re-rendering
@@ -328,7 +350,7 @@ export function liveSteps(steps: LiveStep[], context: LiveStepsContext): TurnSte
       key: step.key,
       name: step.name,
       source: step.source,
-      input: step.input ?? parseObject(step.partialJson),
+      input: streamedInput(step),
       rawInput: step.partialJson,
       status: step.status,
       durationMs: step.durationMs ?? null,
