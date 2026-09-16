@@ -9,6 +9,7 @@ from anthropic import AsyncAnthropic
 from fastapi import Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.agent.turns import TurnRegistry
 from app.config import Settings
 from app.mcp.manager import McpManager
 from app.services import settings as settings_service
@@ -143,6 +144,22 @@ def get_chat_client_factory() -> Callable[[str], AsyncAnthropic]:
 ChatClientFactory = Annotated[Callable[[str], AsyncAnthropic], Depends(get_chat_client_factory)]
 
 
+def get_turn_registry(request: Request) -> TurnRegistry:
+    """The app's turn registry, created by ``create_app`` and drained by the lifespan.
+
+    A chat turn outlives the request that started it, so its owner cannot be a
+    request-scoped object; it lives on ``app.state`` beside the MCP manager, and
+    a test that skips the lifespan still finds one there.
+    """
+    registry = getattr(request.app.state, "turn_registry", None)
+    if registry is None:  # pragma: no cover - create_app always sets it
+        raise RuntimeError("The turn registry is missing from app.state.")
+    return registry
+
+
+TurnRegistryDep = Annotated[TurnRegistry, Depends(get_turn_registry)]
+
+
 __all__ = [
     "AnthropicClient",
     "AppSettings",
@@ -150,6 +167,7 @@ __all__ = [
     "DbSession",
     "McpManagerDep",
     "SessionFactory",
+    "TurnRegistryDep",
     "build_anthropic_client",
     "get_anthropic_client",
     "get_app_settings",
@@ -157,4 +175,5 @@ __all__ = [
     "get_db",
     "get_mcp_manager",
     "get_session_factory",
+    "get_turn_registry",
 ]

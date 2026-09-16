@@ -1,7 +1,13 @@
-"""Session CRUD and the SSE chat endpoint.
+"""Session CRUD and the detached chat turn.
 
 Every test runs against a scripted Anthropic client — the chat client factory is
 overridden app-wide, so no test can reach the network even by accident.
+
+The POST only *starts* a turn now (202) and the events come from
+``GET /sessions/{id}/stream``, so anything asserting on what a turn produced
+either waits for it with :func:`finish_turn` or reads the log of a turn kept by
+:func:`capture_turns`. See ``test_api_sessions_stream.py`` for the streaming
+contract itself.
 """
 
 from __future__ import annotations
@@ -13,10 +19,12 @@ import httpx2
 import pytest
 from fakes.anthropic import ScriptedAnthropic, turn_text, turn_tool_use
 from httpx2 import ASGITransport
-from sqlalchemy import func, select
+from sqlalchemy import event, func, select
+from sqlalchemy.exc import OperationalError
 from sse_util import parse_sse, payloads_for
 
 from app.agent import persistence
+from app.agent import turns as turn_module
 from app.api import tasks as task_registry
 from app.api.deps import get_chat_client_factory
 from app.db.models import Feed, FeedItem, Message, Note, ResearchSession, ToolCall, utcnow
@@ -47,6 +55,45 @@ async def create_session(client: httpx2.AsyncClient) -> int:
     response = await client.post("/api/sessions", json={})
     assert response.status_code == 201
     return response.json()["id"]
+
+
+async def finish_turn(app, session_id: int) -> None:
+    """Wait for the session's background turn to end.
+
+    Deterministic either way: the registry holds the turn until its task is
+    finished, so this either awaits a running turn or finds one that already
+    ended. A test that asserts on what the turn wrote needs it, because the POST
+    now returns while the turn is still going.
+    """
+    turn = app.state.turn_registry.get(session_id)
+    if turn is not None:
+        await asyncio.gather(turn.task, return_exceptions=True)
+
+
+def capture_turns(app) -> list:
+    """Keep every turn the registry starts, so a *finished* one can still be read.
+
+    A turn is dropped from the registry as it ends, and ``GET /stream`` then
+    answers 204 — right for a client, useless for a test that wants the events a
+    turn too short to attach to produced. The returned list holds the
+    ``RunningTurn``s in start order; their logs outlive the registry entry.
+    """
+    registry = app.state.turn_registry
+    started: list = []
+    original = registry.start
+
+    async def start(**kwargs):
+        turn = await original(**kwargs)
+        started.append(turn)
+        return turn
+
+    registry.start = start
+    return started
+
+
+def turn_events(turn) -> list[tuple[str, dict]]:
+    """A turn's log as ``(event, payload)`` pairs — what ``/stream`` writes."""
+    return [event.to_sse() for event in turn.log.events]
 
 
 # ------------------------------------------------------------------- CRUD
@@ -414,16 +461,20 @@ async def test_a_later_message_does_not_retitle_a_titled_session(client, session
 
 
 async def test_stream_headers_and_event_sequence(app, client, with_key):
+    """The POST starts the turn; the stream carries it, opening event first."""
     use_script(
         app,
-        turn_tool_use([("search_feed_items", {"q": "CVE-2026-1234"})]),
-        turn_text("Nothing in the inbox matches."),
+        turn_tool_use([("search_feed_items", {"q": "CVE-2026-1234"})], delay_s=0.05),
+        turn_text("Nothing in the inbox matches.", delay_s=0.05),
     )
     session_id = await create_session(client)
 
-    response = await client.post(
+    accepted = await client.post(
         f"/api/sessions/{session_id}/messages", json={"content": "what happened?"}
     )
+    assert accepted.status_code == 202
+
+    response = await client.get(f"/api/sessions/{session_id}/stream")
 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/event-stream")
@@ -431,7 +482,9 @@ async def test_stream_headers_and_event_sequence(app, client, with_key):
     assert response.headers["cache-control"].startswith("no-cache")
 
     events = [name for name, _ in parse_sse(response.text)]
-    assert events[0] == "turn_start"
+    # The registry's opening event, then the loop's first API turn.
+    assert events[0] == "turn_started"
+    assert events[1] == "turn_start"
     assert events[-1] == "done"
     assert "tool_use_start" in events
     assert "tool_use_input" in events
@@ -450,6 +503,7 @@ async def test_stream_persists_the_transcript(app, client, with_key, session_fac
     session_id = await create_session(client)
 
     await client.post(f"/api/sessions/{session_id}/messages", json={"content": "hello"})
+    await finish_turn(app, session_id)
 
     detail = (await client.get(f"/api/sessions/{session_id}")).json()
     assert [message["kind"] for message in detail["messages"]] == [
@@ -466,14 +520,22 @@ async def test_stream_persists_the_transcript(app, client, with_key, session_fac
 
 
 async def test_no_api_key_yields_an_error_event(app, client):
+    """Still a turn, still a log — it just has nothing but the bad news in it.
+
+    Read from the captured turn rather than from ``/stream``: this turn is two
+    events long and is over before a subscriber could attach.
+    """
+    turns = capture_turns(app)
     session_id = await create_session(client)
 
-    response = await client.post(f"/api/sessions/{session_id}/messages", json={"content": "hello"})
+    accepted = await client.post(f"/api/sessions/{session_id}/messages", json={"content": "hello"})
+    assert accepted.status_code == 202
+    await finish_turn(app, session_id)
 
-    events = parse_sse(response.text)
-    assert [name for name, _ in events] == ["error", "done"]
-    assert events[0][1]["type"] == "api_error"
-    assert events[0][1]["message"] == "no API key configured"
+    events = turn_events(turns[0])
+    assert [name for name, _ in events] == ["turn_started", "error", "done"]
+    assert events[1][1]["type"] == "api_error"
+    assert events[1][1]["message"] == "no API key configured"
 
 
 async def test_no_api_key_still_keeps_the_question(app, client):
@@ -483,13 +545,15 @@ async def test_no_api_key_still_keeps_the_question(app, client):
     "no API key configured", and watched their own message disappear on the next
     refetch — with nothing to copy out and re-send once the key was set.
     """
+    turns = capture_turns(app)
     session_id = await create_session(client)
 
-    response = await client.post(
+    await client.post(
         f"/api/sessions/{session_id}/messages", json={"content": "what is CVE-2026-1234?"}
     )
+    await finish_turn(app, session_id)
 
-    done = parse_sse(response.text)[-1]
+    done = turn_events(turns[0])[-1]
     detail = (await client.get(f"/api/sessions/{session_id}")).json()
     assert [message["kind"] for message in detail["messages"]] == ["user"]
     assert detail["messages"][0]["content_json"] == [
@@ -521,16 +585,64 @@ async def test_attached_item_ids_are_resolved_into_the_persisted_content(
     use_script(app, turn_text("ok"))
     session_id = await create_session(client)
 
+    turns = capture_turns(app)
     await client.post(
         f"/api/sessions/{session_id}/messages",
         json={"content": "summarise these", "attached_item_ids": [item.id]},
     )
+    await finish_turn(app, session_id)
 
+    # The chips the opening event carries are what a late subscriber draws.
+    assert turn_events(turns[0])[0][1]["attachments"] == [
+        {"id": item.id, "title": "AcmeVPN RCE", "url": "https://example.test/a"}
+    ]
     detail = (await client.get(f"/api/sessions/{session_id}")).json()
     blocks = detail["messages"][0]["content_json"]
     assert blocks[0] == {"type": "text", "text": "summarise these"}
     assert "Attached feed items:" in blocks[1]["text"]
     assert f"id {item.id} · AcmeVPN RCE" in blocks[1]["text"]
+
+
+async def test_the_attached_items_are_read_once_not_twice(app, client, db_session, db_engine):
+    """The blocks the model reads and the chips a late subscriber draws are one query.
+
+    They were two: the same ids were selected again to build the opening event,
+    a second round trip per POST for rows the route had just fetched.
+    """
+    feed = Feed(url="https://example.test/rss", title="Example")
+    db_session.add(feed)
+    await db_session.flush()
+    items = [
+        FeedItem(feed_id=feed.id, guid=f"g{n}", url=f"https://example.test/{n}", title=f"Item {n}")
+        for n in range(2)
+    ]
+    db_session.add_all(items)
+    await db_session.commit()
+    item_ids = [item.id for item in items]
+
+    selects: list[str] = []
+
+    def record(conn, cursor, statement, parameters, context, executemany):
+        if "FROM feed_items" in statement:
+            selects.append(statement)
+
+    event.listen(db_engine.sync_engine, "before_cursor_execute", record)
+    try:
+        turns = capture_turns(app)
+        session_id = await create_session(client)
+        await client.post(
+            f"/api/sessions/{session_id}/messages",
+            json={"content": "summarise these", "attached_item_ids": item_ids},
+        )
+        await finish_turn(app, session_id)
+    finally:
+        event.remove(db_engine.sync_engine, "before_cursor_execute", record)
+
+    assert len(selects) == 1
+    # ...and both consumers still get what they need from that one read.
+    assert [chip["id"] for chip in turn_events(turns[0])[0][1]["attachments"]] == item_ids
+    detail = (await client.get(f"/api/sessions/{session_id}")).json()
+    assert "Attached feed items:" in detail["messages"][0]["content_json"][1]["text"]
 
 
 async def test_server_tools_are_absent_when_both_toggles_are_off(app, client, with_key, db_session):
@@ -542,6 +654,7 @@ async def test_server_tools_are_absent_when_both_toggles_are_off(app, client, wi
     session_id = await create_session(client)
 
     await client.post(f"/api/sessions/{session_id}/messages", json={"content": "hi"})
+    await finish_turn(app, session_id)
 
     names = [definition["name"] for definition in scripted.calls[0]["tools"]]
     assert names == ["fetch_article", "get_feed_item", "search_feed_items"]
@@ -549,19 +662,22 @@ async def test_server_tools_are_absent_when_both_toggles_are_off(app, client, wi
 
 async def test_a_second_concurrent_turn_is_a_conflict(app, with_key, session_factory):
     """A slow scripted stream keeps the first turn open while the second POSTs."""
-    scripted = ScriptedAnthropic([turn_text("slow answer", delay_s=0.05), turn_text("second")])
+    scripted = ScriptedAnthropic([turn_text("slow answer", delay_s=0.2), turn_text("second")])
     app.dependency_overrides[get_chat_client_factory] = lambda: lambda _key: scripted
 
     async with httpx2.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as http:
         session_id = await create_session(http)
 
-        first = asyncio.create_task(
-            http.post(f"/api/sessions/{session_id}/messages", json={"content": "one"})
-        )
-        await asyncio.sleep(0.05)
+        first = await http.post(f"/api/sessions/{session_id}/messages", json={"content": "one"})
+        assert first.status_code == 202
+        # The first turn is still running: the POST returned without waiting for
+        # it. Asserted rather than assumed — the conflict this test is about only
+        # happens while it is, and a turn that had already finished would answer
+        # the second POST with a 202 and fail here instead of racing silently.
+        assert app.state.turn_registry.is_running(session_id) is True
         second = await http.post(f"/api/sessions/{session_id}/messages", json={"content": "two"})
         assert second.status_code == 409
-        await first
+        await finish_turn(app, session_id)
 
 
 async def test_cancel_stops_a_running_turn_and_keeps_what_was_persisted(
@@ -578,9 +694,8 @@ async def test_cancel_stops_a_running_turn_and_keeps_what_was_persisted(
 
     async with httpx2.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as http:
         session_id = await create_session(http)
-        stream = asyncio.create_task(
-            http.post(f"/api/sessions/{session_id}/messages", json={"content": "go"})
-        )
+        await http.post(f"/api/sessions/{session_id}/messages", json={"content": "go"})
+        stream = asyncio.create_task(http.get(f"/api/sessions/{session_id}/stream"))
         await asyncio.sleep(0.08)
         cancelled = await http.post(f"/api/sessions/{session_id}/cancel")
         assert cancelled.json() == {"cancelled": True}
@@ -618,16 +733,45 @@ async def test_posting_to_an_unknown_session_is_a_404(client, with_key):
     assert response.status_code == 404
 
 
+async def test_a_turn_that_cannot_be_marked_running_is_a_503(app, client, with_key, monkeypatch):
+    """No turn, and the client says why.
+
+    The row is written before the task exists, so a database that refuses that
+    write means there is no turn — the user's question is in the transcript and
+    re-sending it is the right move, which a 500 would not say.
+    """
+    use_script(app, turn_text("never"))
+    session_id = await create_session(client)
+
+    async def boom(*_args, **_kwargs):
+        raise OperationalError("UPDATE research_sessions", {}, Exception("database is locked"))
+
+    monkeypatch.setattr(turn_module, "_set_status", boom)
+
+    response = await client.post(f"/api/sessions/{session_id}/messages", json={"content": "go"})
+
+    assert response.status_code == 503
+    assert app.state.turn_registry.running_ids() == []
+
+
 async def test_mid_turn_refresh_sees_a_partial_transcript(app, client, with_key, session_factory):
     """A GET during a turn must return whatever has been committed so far."""
     use_script(
         app,
-        turn_tool_use([("search_feed_items", {"q": "x"})]),
-        turn_text("finished"),
+        turn_tool_use([("search_feed_items", {"q": "x"})], delay_s=0.03),
+        turn_text("finished", delay_s=0.03),
     )
     session_id = await create_session(client)
     await client.post(f"/api/sessions/{session_id}/messages", json={"content": "go"})
 
+    # Mid-turn, the row already says a turn is in flight — that is what the Chat
+    # page reads on a reload to decide whether to attach to the stream.
+    await asyncio.sleep(0.05)
+    mid = (await client.get(f"/api/sessions/{session_id}")).json()
+    assert mid["session"]["turn_status"] == "running"
+    assert mid["messages"][0]["kind"] == "user"
+
+    await finish_turn(app, session_id)
     async with session_factory() as session:
         rows = (
             (
@@ -676,23 +820,19 @@ async def test_delete_during_a_running_turn_cancels_and_awaits_it_first(
 
     async with httpx2.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as http:
         session_id = await create_session(http)
-        stream = asyncio.create_task(
-            http.post(f"/api/sessions/{session_id}/messages", json={"content": "go"})
-        )
+        await http.post(f"/api/sessions/{session_id}/messages", json={"content": "go"})
         await asyncio.sleep(0.08)
-        key = task_registry.session_key(session_id)
-        assert await task_registry.is_running(key) is True
+        registry = app.state.turn_registry
+        assert registry.is_running(session_id) is True
 
         with caplog.at_level(logging.ERROR):
             deleted = await http.delete(f"/api/sessions/{session_id}")
 
         assert deleted.status_code == 204
         # The load-bearing assertion: finished, not merely asked to stop.
-        assert await task_registry.is_running(key) is False
+        assert registry.is_running(session_id) is False
         assert "FOREIGN KEY" not in caplog.text
         assert "IntegrityError" not in caplog.text
-
-        await stream
 
     async with session_factory() as session:
         assert await session.scalar(select(func.count()).select_from(Message)) == 0
@@ -706,7 +846,9 @@ async def test_delete_does_not_hang_on_a_task_that_ignores_cancellation(monkeypa
     CancelledError — and an unbounded await would park the DELETE behind it
     forever. The wait is capped; the delete goes ahead regardless.
     """
-    monkeypatch.setattr(task_registry, "CANCEL_WAIT_S", 0.05)
+    # Patched where it is *defined*: the notes path reads the turn registry's
+    # bound at call time, so this is the one knob and both waits honour it.
+    monkeypatch.setattr(turn_module, "CANCEL_WAIT_S", 0.05)
     await task_registry.clear()
 
     started = asyncio.Event()
@@ -742,7 +884,8 @@ async def test_delete_does_not_hang_on_a_task_that_ignores_cancellation(monkeypa
 async def test_delete_still_returns_204_when_the_turn_will_not_stop(
     app, with_key, session_factory, monkeypatch
 ):
-    monkeypatch.setattr(task_registry, "CANCEL_WAIT_S", 0.05)
+    # The turn registry's own bound, not the note-generation one.
+    monkeypatch.setattr(turn_module, "CANCEL_WAIT_S", 0.05)
     scripted = ScriptedAnthropic(
         [
             turn_tool_use(
@@ -759,9 +902,7 @@ async def test_delete_still_returns_204_when_the_turn_will_not_stop(
 
     async with httpx2.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as http:
         session_id = await create_session(http)
-        stream = asyncio.create_task(
-            http.post(f"/api/sessions/{session_id}/messages", json={"content": "go"})
-        )
+        await http.post(f"/api/sessions/{session_id}/messages", json={"content": "go"})
         await asyncio.sleep(0.08)
 
         began = asyncio.get_running_loop().time()
@@ -769,8 +910,15 @@ async def test_delete_still_returns_204_when_the_turn_will_not_stop(
         elapsed = asyncio.get_running_loop().time() - began
 
         assert deleted.status_code == 204
-        assert elapsed < 1.0
-        await stream
+        assert elapsed < 0.5
+        await finish_turn(app, session_id)
 
     async with session_factory() as session:
         assert await session.scalar(select(func.count()).select_from(ResearchSession)) == 0
+
+
+async def test_a_new_session_reports_an_idle_turn(client):
+    session_id = await create_session(client)
+    body = (await client.get(f"/api/sessions/{session_id}")).json()["session"]
+    assert body["turn_status"] == "idle"
+    assert body["turn_started_at"] is None

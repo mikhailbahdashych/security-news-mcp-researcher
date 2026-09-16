@@ -1,6 +1,6 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { createSSEParser, type SSEMessage } from './sse'
+import { createSSEParser, SSEHttpError, streamSSE, type SSEMessage } from './sse'
 
 function collect(): { events: SSEMessage[]; onEvent: (msg: SSEMessage) => void } {
   const events: SSEMessage[] = []
@@ -92,5 +92,53 @@ describe('createSSEParser', () => {
     parser.flush()
 
     expect(onEvent).not.toHaveBeenCalled()
+  })
+})
+
+describe('streamSSE', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  /** Records what `fetch` was called with and answers with `response`. */
+  function stubFetch(response: Response): RequestInit[] {
+    const calls: RequestInit[] = []
+    vi.stubGlobal('fetch', (_url: string, init: RequestInit) => {
+      calls.push(init)
+      return Promise.resolve(response)
+    })
+    return calls
+  }
+
+  const attach = (onEvent: (msg: SSEMessage) => void = () => {}) =>
+    streamSSE({
+      url: '/api/sessions/1/stream',
+      method: 'GET',
+      signal: new AbortController().signal,
+      onEvent,
+    })
+
+  it('reports a 204 as an error carrying the status, not as a stream that ended', async () => {
+    // Nothing is running any more. The caller has to be able to tell that from
+    // a stream that broke: one is the transcript being the record, the other is
+    // a failure worth showing.
+    stubFetch(new Response(null, { status: 204 }))
+
+    const error = await attach().catch((cause: unknown) => cause)
+
+    expect(error).toBeInstanceOf(SSEHttpError)
+    expect((error as SSEHttpError).status).toBe(204)
+    expect((error as SSEHttpError).message).toBe('nothing running')
+  })
+
+  it('sends no body when attaching with GET', async () => {
+    const calls = stubFetch(new Response('event: done\ndata: {}\n\n'))
+    const events: SSEMessage[] = []
+
+    await attach((msg) => events.push(msg))
+
+    expect(calls[0].method).toBe('GET')
+    expect(calls[0].body).toBeUndefined()
+    expect(events).toEqual([{ event: 'done', data: '{}' }])
   })
 })

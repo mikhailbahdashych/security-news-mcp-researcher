@@ -22,6 +22,8 @@ interface HistoryDrawerProps {
   loadingMore: boolean
   /** The row with a rename, archive or delete in flight. */
   busyId: number | null
+  /** Sessions with a turn in flight, server-side — not necessarily this page's. */
+  running: Set<number>
   onSearchChange: (value: string) => void
   onShowArchivedChange: (show: boolean) => void
   onOpen: (id: number) => void
@@ -56,6 +58,7 @@ export default function HistoryDrawer({
   hasMore,
   loadingMore,
   busyId,
+  running,
   onSearchChange,
   onShowArchivedChange,
   onOpen,
@@ -253,9 +256,7 @@ export default function HistoryDrawer({
                 >
                   {session.title || 'Untitled chat'}
                 </span>
-                <span className="mt-px block text-[10.5px] text-faint">
-                  {busy ? 'Saving…' : whenLabel(session.updated_at)}
-                </span>
+                <RowMeta busy={busy} running={running.has(session.id)} session={session} />
               </button>
 
               <IconButton
@@ -348,6 +349,38 @@ export default function HistoryDrawer({
         />
       ) : null}
     </div>
+  )
+}
+
+/**
+ * The row's second line: what it is doing, or when it was last touched.
+ *
+ * A turn keeps running after the user opens another chat, so the drawer is
+ * where they find it again — and "running" is more use there than a timestamp
+ * that has stopped meaning anything.
+ */
+function RowMeta({
+  busy,
+  running,
+  session,
+}: {
+  busy: boolean
+  running: boolean
+  session: ResearchSession
+}) {
+  if (busy) {
+    return <span className="mt-px block text-[10.5px] text-faint">Saving…</span>
+  }
+  if (running) {
+    return (
+      <span className="mt-px flex items-center gap-1 text-[10.5px] text-accent">
+        <Icon name="spinner" size={11} />
+        running
+      </span>
+    )
+  }
+  return (
+    <span className="mt-px block text-[10.5px] text-faint">{whenLabel(session.updated_at)}</span>
   )
 }
 

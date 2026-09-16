@@ -136,7 +136,7 @@ Dockerfile docker-compose.yaml Makefile .env.example
 > - `frontend/src/components/ui/` *was* eventually built, by the redesign rather than by
 >   the original plan — see "Frontend redesign".
 
-### Data model (SQLite, all tables land in PR 2 → no Alembic; delete data/app.db on dev schema change)
+### Data model (SQLite, all tables land in PR 2 → no Alembic; a later column goes in `init.py::ADDED_COLUMNS`)
 
 - `feeds` (url unique, enabled, last_fetched_at, last_error)
 - `feed_items` (feed_id FK, guid, url, title, summary, content_text, published_at, status ∈ unread/starred/dismissed, UNIQUE(feed_id,guid))
@@ -163,8 +163,11 @@ Search = `LIKE '%q%'` (single user, thousands of rows; no FTS5).
 >   **sets `notes.session_id` to NULL**; deleting a note takes its `note_sources`;
 >   deleting a feed item leaves the `note_sources` row with a NULL `feed_item_id` and
 >   its stored `url`/`title`, so a note never loses a citation.
-> - **No Alembic, still.** `Base.metadata.create_all` at startup; a schema change means
->   deleting `backend/data/app.db` in dev.
+> - **No Alembic, still.** `Base.metadata.create_all` at startup — plus
+>   `app/db/init.py::ADDED_COLUMNS`, a table of the columns added after a table shipped,
+>   which `init_db` adds to an existing file with `ALTER TABLE ADD COLUMN`. A new column
+>   is therefore a line in that table, not "delete `backend/data/app.db`": the file holds
+>   the user's key, feeds, transcripts and notes.
 > - The `LIKE` rule is centralised in `app/db/util.py`: `matches(column, value)` builds
 >   `column LIKE '%value%' ESCAPE '\'` with `%`, `_` and `\` escaped, so a search for
 >   `100%` or `log4j_rce` means what it says. Plain `LIKE`, not `ilike()` — SQLite's
@@ -184,6 +187,15 @@ Search = `LIKE '%q%'` (single user, thousands of rows; no FTS5).
 
 > **Implementation notes.**
 >
+> - **A chat turn is no longer the request.** `POST /api/sessions/{id}/messages` hands the
+>   runner to `app.agent.turns.TurnRegistry` and answers **202** (`turn_id`, `session_id`,
+>   `started_at`); the turn runs as a session-owned task, `GET /api/sessions/{id}/stream`
+>   replays its log from the first event and then tails it (204 when nothing is running),
+>   and `GET /api/sessions/running` says which sessions are busy. A disconnect detaches a
+>   subscriber; only `POST /cancel` stops a turn. `research_sessions.turn_status`
+>   (`idle` | `running` | `interrupted`) is what a reloaded page reads to know whether to
+>   attach; rows left `running` by a dead process are flipped to `interrupted` at startup.
+>   Note generation still streams from its POST.
 > - **The two streaming routes share `app/api/streaming.py`**: `SSE_PING_S = 15`,
 >   `SSE_HEADERS` (`Cache-Control: no-cache`, `X-Accel-Buffering: no`) and
 >   `pump_agent_events`, which drives the runner inside a registered `asyncio.Task`,
@@ -289,6 +301,19 @@ touched; what changed is everything around them.
   (`sourcesFromTool`, `feedItemSource`, `citationFor`). Tool-call status is
   `running`/`ok`/`error`/`unknown`: `running` belongs to the live stream alone, and a
   stored row with no `result_json` is `unknown` rather than a tick or a forever-spinner.
+- **A research turn survives the page** (added after the redesign). Asking is
+  `POST /api/sessions/{id}/messages` → **202**; watching is a separate
+  `GET /api/sessions/{id}/stream` that replays the turn's log before tailing it. A
+  reload, a walk to the Inbox, a browser-back or a second tab therefore rejoin the same
+  turn instead of killing it: `ChatPage.attach` is the single owner of that reader, and
+  leaving only detaches — Stop and Delete are the only cancels. Whether to attach is a
+  tested rule (`liveTurn.ts::shouldAttach`) that believes `GET /api/sessions/running`
+  rather than the session row's cached `turn_status`, because that row is read both before
+  a turn starts and after it ends. Three indicators make a detached turn findable (the rail's dot, a `running` row
+  in the history drawer, `running · 1m 05s` in the chat header), all off one
+  `GET /api/sessions/running` query refetched on window focus and on the page's own
+  events: **the no-poller rule holds on the frontend too**. A turn a backend restart cut
+  short reads `interrupted`, says so, and offers "Send again" from the stored question.
 - Helpers: `lib/useDebouncedValue.ts` (every search box drives a query key),
   `lib/dates.ts`, `components/notes/excerpt.ts` (Markdown markers off a clamped
   two-line preview — deliberately not a parser).

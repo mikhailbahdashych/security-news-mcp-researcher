@@ -25,6 +25,8 @@ export interface RailProps {
   onToggleTheme: () => void
   /** Which nav entries read as current: the URL's page, plus the split pane's. */
   isActive: (page: PageKey) => boolean
+  /** Which nav entries have work running behind them, for the dot. */
+  busyPages: Set<PageKey>
   onNavigate: (page: PageKey) => void
   onOpenSearch: () => void
 }
@@ -42,6 +44,7 @@ export default function Rail({
   theme,
   onToggleTheme,
   isActive,
+  busyPages,
   onNavigate,
   onOpenSearch,
 }: RailProps) {
@@ -88,6 +91,7 @@ export default function Rail({
             label={PAGE_LABELS[page]}
             title={PAGE_LABELS[page]}
             active={isActive(page)}
+            busy={busyPages.has(page)}
             onClick={() => onNavigate(page)}
           />
         ))}
@@ -120,6 +124,8 @@ interface RailButtonProps {
   label: string
   title: string
   active?: boolean
+  /** Something is running on that page while the user is looking elsewhere. */
+  busy?: boolean
   trailing?: string
   onClick: () => void
 }
@@ -135,6 +141,7 @@ function RailButton({
   label,
   title,
   active = false,
+  busy = false,
   trailing,
   onClick,
 }: RailButtonProps) {
@@ -155,7 +162,18 @@ function RailButton({
           : cx(expanded ? 'text-muted' : 'text-faint', 'hover:bg-hover hover:text-ink'),
       )}
     >
-      <Icon name={icon} size={18} />
+      {/* The dot is anchored to the icon, not to the button, so it lands in the
+          same place whether the rail is 58px of icons or a 198px list. */}
+      <span className="relative flex shrink-0">
+        <Icon name={icon} size={18} />
+        {busy ? (
+          <span
+            role="status"
+            aria-label="A research turn is running"
+            className="absolute -top-px -right-px size-1.5 rounded-full bg-accent-btn"
+          />
+        ) : null}
+      </span>
       {expanded ? (
         <>
           <span className="text-[12.5px] whitespace-nowrap">{label}</span>

@@ -23,6 +23,7 @@ from fakes.anthropic import (
 from httpx2 import ASGITransport
 from sqlalchemy import delete, func, select
 from sse_util import event_names, parse_sse, payloads_for
+from test_api_sessions import finish_turn
 
 from app.agent import events as ev
 from app.api import tasks as task_registry
@@ -834,9 +835,9 @@ async def test_mcp_tools_are_never_offered_to_note_generation(
         chat = ScriptedAnthropic([turn_text("ok")])
         app.dependency_overrides[get_chat_client_factory] = lambda: lambda _key: chat
         created = await client.post("/api/sessions", json={})
-        await client.post(
-            f"/api/sessions/{created.json()['id']}/messages", json={"content": "hello"}
-        )
+        session_id = created.json()["id"]
+        await client.post(f"/api/sessions/{session_id}/messages", json={"content": "hello"})
+        await finish_turn(app, session_id)
         assert any(
             tool["name"].startswith("mcp__") for tool in chat.calls[0]["tools"]
         ), "the MCP fixture server should be reachable for this test to mean anything"

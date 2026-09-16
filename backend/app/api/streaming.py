@@ -30,6 +30,7 @@ from anthropic import AsyncAnthropic
 from fastapi import Request
 
 from app.agent import events as ev
+from app.agent.turnlog import TurnLog
 from app.api import tasks as task_registry
 
 logger = logging.getLogger(__name__)
@@ -146,6 +147,41 @@ async def pump_agent_events(
         yield ev.Error(error_type="cancelled", message=CANCELLED_MESSAGE)
 
 
+async def stream_turn_log(request: Request, log: TurnLog) -> AsyncIterator[dict[str, str]]:
+    """Replay *log* and tail it as SSE frames, stopping when the client leaves.
+
+    Leaving detaches only this subscriber — the turn keeps running. Disconnects
+    are noticed between events, so a long silence is polled at
+    ``DISCONNECT_POLL_S`` like the note-generation pump.
+    """
+    subscription = log.subscribe()
+    # ``asyncio.wait`` rather than ``wait_for``: a timeout must leave the pending
+    # ``__anext__`` alone. Cancelling it would throw CancelledError into the
+    # subscription's frame and finish the generator, so the first quiet second —
+    # a long thinking pause, exactly what the poll exists for — would end the
+    # stream instead of merely checking on the client.
+    pending: asyncio.Task[ev.AgentEvent] | None = asyncio.ensure_future(subscription.__anext__())
+    try:
+        while True:
+            done, _ = await asyncio.wait({pending}, timeout=DISCONNECT_POLL_S)
+            if not done:
+                if await request.is_disconnected():
+                    return
+                continue
+            try:
+                event = pending.result()
+            except StopAsyncIteration:
+                pending = None
+                return
+            pending = asyncio.ensure_future(subscription.__anext__())
+            yield sse_frame(event)
+    finally:
+        if pending is not None:
+            pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+        await subscription.aclose()
+
+
 __all__ = [
     "ALREADY_RUNNING_MESSAGE",
     "CANCELLED_MESSAGE",
@@ -156,4 +192,5 @@ __all__ = [
     "pump_agent_events",
     "sse_data",
     "sse_frame",
+    "stream_turn_log",
 ]

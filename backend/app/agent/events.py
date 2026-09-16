@@ -14,6 +14,7 @@ module are the same contract stated twice; keep them in step.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Literal
 
 #: What the transport layer actually writes: an event name and its JSON payload.
@@ -29,6 +30,32 @@ ErrorType = Literal[
     "connection",
     "cancelled",
 ]
+
+
+@dataclass(frozen=True, slots=True)
+class TurnStarted:
+    """The first event in every turn log: what a late subscriber needs to render
+    the question, the attachment chips and the elapsed counter.
+
+    Distinct from ``TurnStart`` (one per *API* turn inside the loop); this is one
+    per *user* turn and is produced by the turn registry, never by the runner.
+    """
+
+    turn_id: str
+    session_id: int
+    prompt: str
+    attachments: list[dict[str, Any]]
+    started_at: datetime
+    type: str = "turn_started"
+
+    def to_sse(self) -> SSEEvent:
+        return self.type, {
+            "turn_id": self.turn_id,
+            "session_id": self.session_id,
+            "prompt": self.prompt,
+            "attachments": self.attachments,
+            "started_at": self.started_at.isoformat(),
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -224,7 +251,8 @@ class Done:
 
 
 AgentEvent = (
-    TurnStart
+    TurnStarted
+    | TurnStart
     | ThinkingDelta
     | TextDelta
     | ToolUseStart
@@ -253,4 +281,5 @@ __all__ = [
     "ToolUseStart",
     "TurnEnd",
     "TurnStart",
+    "TurnStarted",
 ]

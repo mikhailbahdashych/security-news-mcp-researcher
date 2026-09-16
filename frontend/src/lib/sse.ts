@@ -1,11 +1,13 @@
 /**
- * A hand-rolled SSE client for POST requests.
+ * A hand-rolled SSE client.
  *
- * Two libraries were ruled out on purpose. `EventSource` is GET-only, and the
- * chat turn is a POST with a JSON body. `@microsoft/fetch-event-source` would
- * work, but its automatic retry would silently re-run — and re-bill — an LLM
- * turn whenever the connection hiccuped. So: no library, and **no retry, ever**.
- * A failed or aborted stream surfaces to the caller, which decides what to do.
+ * Two libraries were ruled out on purpose. `EventSource` is GET-only, and note
+ * generation is a POST with a JSON body — so is starting a chat turn, although
+ * a turn is now *watched* over a GET (`method: 'GET'` below).
+ * `@microsoft/fetch-event-source` would work, but its automatic retry would
+ * silently re-run — and re-bill — an LLM turn whenever the connection hiccuped.
+ * So: no library, and **no retry, ever**. A failed or aborted stream surfaces to
+ * the caller, which decides what to do.
  */
 
 export interface SSEMessage {
@@ -15,7 +17,14 @@ export interface SSEMessage {
 
 export interface StreamSSEOptions {
   url: string
-  body: unknown
+  /**
+   * `POST` by default — the notes generation and, historically, the chat turn.
+   * A turn is now started by one request and *watched* by another, and that
+   * second one is a plain `GET` with nothing to send.
+   */
+  method?: 'POST' | 'GET'
+  /** Ignored for a `GET`. */
+  body?: unknown
   signal: AbortSignal
   onEvent: (msg: SSEMessage) => void
 }
@@ -112,17 +121,28 @@ async function readDetail(response: Response): Promise<string> {
   return response.statusText || 'Request failed'
 }
 
-/** POST `body` and pump the response's SSE frames into `onEvent`. */
+/** Open the stream — POSTing `body` unless this is a `GET` — and pump its frames. */
 export async function streamSSE(opts: StreamSSEOptions): Promise<void> {
+  const method = opts.method ?? 'POST'
+  const sends = method !== 'GET'
   const response = await fetch(opts.url, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', accept: 'text/event-stream' },
-    body: JSON.stringify(opts.body),
+    method,
+    headers: sends
+      ? { 'content-type': 'application/json', accept: 'text/event-stream' }
+      : { accept: 'text/event-stream' },
+    body: sends ? JSON.stringify(opts.body) : undefined,
     signal: opts.signal,
   })
 
   if (!response.ok) {
     throw new SSEHttpError(response.status, await readDetail(response))
+  }
+  // 204 is a successful "there is nothing to watch": the turn ended before this
+  // request arrived. Decided before the body, because a 204 has none — reading
+  // it would surface as "the response carried no body", which is a broken
+  // stream, and the caller needs to tell the two apart.
+  if (response.status === 204) {
+    throw new SSEHttpError(204, 'nothing running')
   }
   if (!response.body) {
     throw new SSEHttpError(response.status, 'The response carried no body')

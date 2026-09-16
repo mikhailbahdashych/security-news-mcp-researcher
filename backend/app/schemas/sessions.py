@@ -26,6 +26,8 @@ class SessionRead(BaseModel):
     total_output_tokens: int
     created_at: datetime
     updated_at: datetime
+    turn_status: Literal["idle", "running", "interrupted"] = "idle"
+    turn_started_at: datetime | None = None
 
 
 class SessionPageRead(BaseModel):
@@ -108,14 +110,30 @@ class MessageCreate(BaseModel):
     attached_item_ids: list[int] = Field(default_factory=list, max_length=50)
 
 
+class TurnAccepted(BaseModel):
+    """``POST /sessions/{id}/messages``: the turn is running; attach to ``/stream``."""
+
+    turn_id: str
+    session_id: int
+    started_at: datetime
+
+
+class RunningSessions(BaseModel):
+    """Which sessions have a turn in flight right now, straight from the registry."""
+
+    session_ids: list[int]
+
+
 __all__ = [
     "ArchivedFilter",
     "MessageCreate",
     "MessageRead",
+    "RunningSessions",
     "SessionCreate",
     "SessionDetail",
     "SessionPageRead",
     "SessionRead",
     "SessionUpdate",
     "ToolCallRead",
+    "TurnAccepted",
 ]

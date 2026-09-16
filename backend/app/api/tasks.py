@@ -1,8 +1,10 @@
 """A process-wide registry of in-flight streaming tasks, so they can be cancelled.
 
-Keys are namespaced strings — ``"session:{id}"`` for a chat turn, and Task 6 will
-register ``"note:{generation_id}"`` for a notes generation — so one registry and
-one cancel endpoint pattern serve both.
+Keys are namespaced strings; ``app/api/notes.py::generation_key`` builds the only
+one left, ``"note:{generation_id}"``. A chat turn used to be registered here as
+``"session:{id}"`` and is not any more: it belongs to
+:class:`app.agent.turns.TurnRegistry`, which owns the task for the whole of its
+life rather than for the length of one request.
 
 Why this exists at all: **an SSE disconnect does not stop billing.** When the
 browser goes away, the LLM call keeps running server-side unless something
@@ -16,19 +18,17 @@ from __future__ import annotations
 import asyncio
 import logging
 
+# The bound lives with the turn registry, which makes the same promise about the
+# same kind of task. The *module* is imported, not the value: ``from ... import
+# CANCEL_WAIT_S`` copies the float at import time, so the two halves of the app
+# would drift apart the moment anything (a test, a setting) changed it. And in
+# this direction only: domain code under app/agent must never import the API layer.
+from app.agent import turns
+
 logger = logging.getLogger(__name__)
 
 _tasks: dict[str, asyncio.Task] = {}
 _lock = asyncio.Lock()
-
-#: How long :func:`cancel_and_wait` waits for a task to actually stop. A task can
-#: refuse to die — a shielded write, a handler that swallows CancelledError — and
-#: an unbounded wait would hang the DELETE request behind it forever.
-CANCEL_WAIT_S = 10.0
-
-
-def session_key(session_id: int) -> str:
-    return f"session:{session_id}"
 
 
 async def register(key: str, task: asyncio.Task) -> None:
@@ -73,7 +73,7 @@ async def cancel_and_wait(key: str) -> bool:
     # asyncio.wait never re-raises the task's exception and never cancels the
     # caller, so a task that dies of anything (including the CancelledError we
     # just caused) is simply reported as done.
-    done, _pending = await asyncio.wait({task}, timeout=CANCEL_WAIT_S)
+    done, _pending = await asyncio.wait({task}, timeout=turns.CANCEL_WAIT_S)
     if not done:
         # Proceed anyway: the caller's work matters more than a wedged task, and
         # anything it still manages to write now fails inside run()'s safety net
@@ -81,7 +81,7 @@ async def cancel_and_wait(key: str) -> bool:
         logger.warning(
             "Task %s did not stop within %.0fs of being cancelled; continuing without it",
             key,
-            CANCEL_WAIT_S,
+            turns.CANCEL_WAIT_S,
         )
     else:
         logger.info("Cancelled and awaited in-flight task %s", key)
@@ -100,12 +100,10 @@ async def clear() -> None:
 
 
 __all__ = [
-    "CANCEL_WAIT_S",
     "cancel",
     "cancel_and_wait",
     "clear",
     "is_running",
     "register",
-    "session_key",
     "unregister",
 ]

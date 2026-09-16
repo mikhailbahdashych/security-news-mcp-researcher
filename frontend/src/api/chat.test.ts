@@ -8,6 +8,7 @@ import {
   formatTokens,
   groupTurns,
   parseSessionId,
+  resendPayload,
   stepsFromMessage,
   toolCallStatus,
   toolHint,
@@ -15,7 +16,9 @@ import {
   toolTag,
   whenLabel,
   type ChatMessage,
+  type ContentBlock,
   type ToolCallRow,
+  type TurnAttachment,
 } from './chat'
 
 function row(overrides: Partial<ToolCallRow> = {}): ToolCallRow {
@@ -769,5 +772,71 @@ describe('the sandbox card', () => {
         status: 'ok',
       }).args,
     ).toBe('{\n  "q": "kev"\n}')
+  })
+})
+
+/** A stored user row, with the "Attached feed items:" block the server appends. */
+function userMessage(id: number, text: string, attachments: TurnAttachment[]): ChatMessage {
+  const blocks: ContentBlock[] = [{ type: 'text', text }]
+  if (attachments.length > 0) {
+    blocks.push({
+      type: 'text',
+      text: [
+        'Attached feed items:',
+        // `(no link)` is what the server writes for an item with no URL, so the
+        // fixture writes it too — it is the line the parser actually meets.
+        ...attachments.map(
+          (item) => `- id ${item.id} · ${item.title} · ${item.url ?? '(no link)'}`,
+        ),
+      ].join('\n'),
+    })
+  }
+  return message({ id, role: 'user', kind: 'user', content_json: blocks })
+}
+
+function assistantText(id: number, text: string): ChatMessage {
+  return message({ id, content_json: [{ type: 'text', text }] })
+}
+
+describe('resendPayload', () => {
+  it('rebuilds the last question and its attachments', () => {
+    const messages = [
+      userMessage(1, 'first', []),
+      assistantText(2, 'a'),
+      userMessage(3, 'second', [{ id: 9, title: 'Item nine', url: 'https://example.test/9' }]),
+    ]
+    expect(resendPayload(messages)).toEqual({
+      content: 'second',
+      attached_item_ids: [9],
+      // The chips too: the live turn draws them while the question is answered,
+      // and the picker the user is holding must not be sent in their place.
+      attachments: [{ id: 9, title: 'Item nine', url: 'https://example.test/9' }],
+    })
+  })
+  it('is null with no user message', () => {
+    expect(resendPayload([])).toBeNull()
+  })
+
+  it('keeps a title that contains the separator whole', () => {
+    // The line is `- id N · title · url`, and a headline with its own " \u00b7 " in
+    // it split at the first one: the chip read "Acme" and its link became the
+    // rest of the line. The URL has no spaces, so it is the anchor.
+    const messages = [
+      userMessage(1, 'what about this?', [
+        { id: 4, title: 'Acme \u00b7 CVE-2026-1234 under attack', url: 'https://example.test/4' },
+      ]),
+    ]
+    expect(resendPayload(messages)?.attachments).toEqual([
+      { id: 4, title: 'Acme \u00b7 CVE-2026-1234 under attack', url: 'https://example.test/4' },
+    ])
+  })
+
+  it('reads a line with no URL on it', () => {
+    // An item with no link: the server writes the separator and nothing after
+    // it, and the chip is drawn without an anchor.
+    const messages = [userMessage(1, 'and this?', [{ id: 5, title: 'A local note', url: null }])]
+    expect(resendPayload(messages)?.attachments).toEqual([
+      { id: 5, title: 'A local note', url: null },
+    ])
   })
 })

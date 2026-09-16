@@ -1,6 +1,15 @@
 import { apiDelete, apiGet, apiPatch, apiPost } from './client'
 import { parseUtc } from '../lib/dates'
 
+/**
+ * Where the session's own turn stands, server-side.
+ *
+ * A turn belongs to the session, not to the page that started it: it keeps
+ * running with nobody watching, so the row is what tells a page arriving late
+ * whether to attach. `interrupted` is a turn a backend restart cut short.
+ */
+export type TurnStatus = 'idle' | 'running' | 'interrupted'
+
 export interface ResearchSession {
   id: number
   title: string | null
@@ -10,6 +19,9 @@ export interface ResearchSession {
   total_output_tokens: number
   created_at: string
   updated_at: string
+  turn_status: TurnStatus
+  /** Naive UTC, like every other timestamp — and null unless a turn is running. */
+  turn_started_at: string | null
 }
 
 export interface SessionPage {
@@ -131,9 +143,56 @@ export const deleteSession = (id: number): Promise<void> => apiDelete<void>(`/se
 export const cancelTurn = (id: number): Promise<{ cancelled: boolean }> =>
   apiPost<{ cancelled: boolean }>(`/sessions/${id}/cancel`)
 
-export const messagesUrl = (id: number): string => `/api/sessions/${id}/messages`
+/** `POST /sessions/:id/messages`: the turn was accepted and is already running. */
+export interface TurnAccepted {
+  turn_id: string
+  session_id: number
+  /** Naive UTC. */
+  started_at: string
+}
 
-/** The SSE payloads, mirroring the backend's wire contract. */
+/**
+ * Ask a question. The answer is *not* on this response.
+ *
+ * The POST answers 202 as soon as the turn is running server-side; watching it
+ * is a separate attachment to `streamUrl`, which is what lets the turn outlive
+ * the page that asked.
+ */
+export const startTurn = (
+  id: number,
+  body: { content: string; attached_item_ids: number[] },
+): Promise<TurnAccepted> => apiPost<TurnAccepted>(`/sessions/${id}/messages`, body)
+
+/** The turn's event stream: replayed from its first event, then followed live. */
+export const streamUrl = (id: number): string => `/api/sessions/${id}/stream`
+
+/**
+ * Which sessions have a turn in flight.
+ *
+ * One key for the whole app: the rail's dot, the drawer's marks and the header
+ * all read the same answer, and every place that starts or ends a turn
+ * invalidates it. There is no interval — see `lib/useRunningTurns.ts`.
+ */
+export const runningSessionsKey = ['sessions', 'running'] as const
+
+export const fetchRunningSessions = (): Promise<{ session_ids: number[] }> =>
+  apiGet<{ session_ids: number[] }>('/sessions/running')
+
+// The SSE payloads, mirroring the backend's wire contract.
+
+/**
+ * The first event of every turn log, produced by the registry rather than the
+ * runner: what a page that did not start this turn needs to draw it — the
+ * question, its chips and the elapsed counter's zero.
+ */
+export interface TurnStartedPayload {
+  turn_id: string
+  session_id: number
+  prompt: string
+  attachments: TurnAttachment[]
+  /** Naive UTC. */
+  started_at: string
+}
 export interface TurnStartPayload {
   turn: number
 }
@@ -358,6 +417,14 @@ export interface TurnAttachment {
 export interface Turn {
   key: string
   question: string
+  /**
+   * When the question was stored, naive UTC off the user row.
+   *
+   * `turnsBesideLive` compares it with the live turn's start time: that is how
+   * the stored half of the turn being answered *right now* is told from an
+   * older turn that happens to ask the same thing.
+   */
+  askedAt: string
   attachments: TurnAttachment[]
   steps: TurnStep[]
   answer: string
@@ -937,7 +1004,12 @@ export function attachmentsFromMessage(message: ChatMessage): TurnAttachment[] {
   }
   const attachments: TurnAttachment[] = []
   for (const line of block.text.split('\n')) {
-    const match = /^-\s+id\s+(\d+)\s·\s(.+?)\s·\s(.+?)\s*$/.exec(line)
+    // The title is **greedy** so the split lands on the *last* separator: a
+    // headline with its own " · " in it ("Acme · CVE-2026-1234") otherwise gave
+    // the chip its first word and put the rest of the line in the href. The tail
+    // is not `\S+` because an item with no URL is written `(no link)`, which has
+    // a space in it and would then cost the chip its whole line.
+    const match = /^-\s+id\s+(\d+)\s·\s(.+)\s·\s(.+?)\s*$/.exec(line)
     if (!match) {
       continue
     }
@@ -948,6 +1020,37 @@ export function attachmentsFromMessage(message: ChatMessage): TurnAttachment[] {
     })
   }
   return attachments
+}
+
+/** Everything "Send again" needs: what to send, and what to draw while it runs. */
+export interface ResendPayload {
+  content: string
+  attached_item_ids: number[]
+  /** The chips for the live turn — the picker is not consulted for a resend. */
+  attachments: TurnAttachment[]
+}
+
+/**
+ * What "Send again" re-sends after an interrupted turn: the last question as
+ * typed, the ids of the items that were pinned to it, and those items again as
+ * chips.
+ *
+ * All of it is read back off the block the server wrote, because the browser's
+ * own copy died with the page. The chips travel with the ids on purpose: the
+ * live turn draws them, and drawing whatever the attachment picker happens to
+ * hold would caption the question with items that were never sent.
+ */
+export function resendPayload(messages: ChatMessage[]): ResendPayload | null {
+  const last = [...messages].reverse().find((message) => message.kind === 'user')
+  if (!last) {
+    return null
+  }
+  const attachments = attachmentsFromMessage(last)
+  return {
+    content: questionFromMessage(last),
+    attached_item_ids: attachments.map((attachment) => attachment.id),
+    attachments,
+  }
 }
 
 /**
@@ -1005,6 +1108,7 @@ export function groupTurns(messages: ChatMessage[], knownTitles?: FeedTitles): T
       turns.push({
         key: `turn-${message.id}`,
         question: questionFromMessage(message),
+        askedAt: message.created_at,
         attachments: attachmentsFromMessage(message),
         steps: [],
         answer: '',

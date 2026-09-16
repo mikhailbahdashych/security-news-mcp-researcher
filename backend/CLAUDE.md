@@ -14,14 +14,23 @@ module-level `app = create_app()` for uvicorn.
 `create_app` calls `configure_logging(settings.log_level)` **first**, then sets, in
 order: `app.state.settings`, `app.state.db_engine = None`,
 `app.state.session_factory = None`, `app.state.mcp_manager = McpManager()` (created
-empty, **never connected here**), optional CORS middleware, the API router under
-`/api`, and **last** the SPA catch-all (`app/static.py::mount_spa`) so it can never
-shadow an API route. The catch-all explicitly 404s `/api/*` as JSON.
+empty, **never connected here**), `app.state.turn_registry = TurnRegistry()` (here and
+not in the lifespan, because it holds nothing until a turn starts and the test suite
+skips the lifespan), optional CORS middleware, the API router under `/api`, and **last**
+the SPA catch-all (`app/static.py::mount_spa`) so it can never shadow an API route. The
+catch-all explicitly 404s `/api/*` as JSON.
 
 `lifespan` fills in `db_engine` and `session_factory` from `settings.db_path`, runs
-`init_db` (create_all + seed default settings), and on shutdown calls
-`mcp_manager.aclose()` (**this is what terminates stdio subprocesses**) then disposes the
-engine.
+`init_db` (create_all + the `ADDED_COLUMNS` top-up + seed default settings), and then
+`turns.mark_interrupted(session_factory)`: a turn is a task in *this* process, so a row
+left `running` belongs to a process that died mid-turn and can never be resumed.
+
+On shutdown it does three things **in this order**: `turn_registry.drain()` — before the
+MCP close, so a turn parked in an MCP tool call is stopped while its server is still
+there, and before the engine goes, because a turn writes its last rows as it ends — then
+`mcp_manager.aclose()` (**this is what terminates stdio subprocesses**), then disposes
+the engine. Both the sweep and the drain are exercised through the *real* lifespan in
+`tests/test_app_lifespan.py`; deleting either used to leave the suite green.
 
 | `app.state` key | Set by | Notes |
 |---|---|---|
@@ -29,6 +38,7 @@ engine.
 | `db_engine` | lifespan | `None` outside a real server run |
 | `session_factory` | lifespan | `async_sessionmaker(expire_on_commit=False)` |
 | `mcp_manager` | `create_app` | always present, even in tests |
+| `turn_registry` | `create_app` | `app.agent.turns.TurnRegistry`; startup flips orphaned rows to `interrupted`, shutdown `drain()`s it |
 
 **Starlette does not run the lifespan under `ASGITransport`**, which is how the tests
 drive the app — so tests create their own engine and override `get_db` /
@@ -52,13 +62,21 @@ uvicorn's own loggers alone. Without it every `app.*` record had no handler at a
 | `app/static.py` | `mount_spa` — serves `frontend/dist` in Docker; a no-op when the dir is absent (dev). Path-traversal safe. |
 | `app/db/engine.py` | `create_db_engine` (WAL / `synchronous=NORMAL` / `busy_timeout=5000` / `foreign_keys=ON` pragmas on every connect), `create_session_factory`. No module-level engine. |
 | `app/db/models.py` | The **complete, frozen** schema + `utcnow()`. No Alembic. |
-| `app/db/init.py` | `init_db(engine, session_factory=None)` — `create_all` + `seed_defaults`. Idempotent. |
+| `app/db/init.py` | `init_db(engine, session_factory=None)` — `create_all` + `ADDED_COLUMNS` top-up + `seed_defaults`. Idempotent. |
 | `app/db/util.py` | `matches(column, value)` / `escape_like` / `like_pattern` / `LIKE_ESCAPE_CHAR` — **the** substring-match rule for the whole app. |
 | `app/schemas/` | Pydantic request/response models, one module per domain, plus `common.py` for what genuinely crosses domains (`CancelResponse`). |
-| `app/api/` | Routers (`health`, `settings`, `models`, `feeds`, `items`, `sessions`, `notes`, `search`, `mcp`) wired in `app/api/__init__.py`; `deps.py`; `streaming.py` (shared SSE plumbing, **not** a router); `tasks.py` (**not** a router — the cancel registry). |
+| `app/api/` | Routers (`health`, `settings`, `models`, `feeds`, `items`, `sessions`, `notes`, `search`, `mcp`) wired in `app/api/__init__.py`; `deps.py`; `streaming.py` (shared SSE plumbing, **not** a router); `tasks.py` (**not** a router — the cancel registry, notes only). |
 | `app/services/` | Domain logic, no FastAPI imports: `settings` (kv store + key precedence), `feeds` (ingest), `extract` (trafilatura), `items` (inbox queries + keyset cursor + the public `sort_key()`), `notes` (context, sources, save), `search` (cross-entity queries), `http` (UA/timeout policy + the browser-TLS transport), `url_guard` (SSRF + body/time caps), `anthropic_models` (model list + key check, 1 h in-process cache keyed on a digest of the key). |
-| `app/agent/` | The agent loop and tool registry — see `app/agent/CLAUDE.md`. |
+| `app/agent/` | The agent loop, the tool registry and the **turn registry** (`turns.py`, `turnlog.py`) — see `app/agent/CLAUDE.md`. |
 | `app/mcp/` | The MCP client — see `app/mcp/CLAUDE.md`. |
+
+`research_sessions` carries the turn state: `turn_status` (`idle` | `running` |
+`interrupted`) and `turn_started_at`, written only by the registry — and written with
+`updated_at=ResearchSession.updated_at` so a turn's own bookkeeping never reorders the
+sidebar. `init_db` **adds columns a previous release did not have**
+(`app/db/init.py::ADDED_COLUMNS` + `_ensure_columns`, one `ALTER TABLE ADD COLUMN` per
+missing column): there is no Alembic, but this file holds the user's key, feeds and
+history, so upgrading must never mean deleting it.
 
 Tables: `feeds`, `feed_items`, `research_sessions`, `messages`, `tool_calls`, `notes`,
 `note_sources`, `settings`, `mcp_servers`, `mcp_tool_prefs`. `messages.content_json`
@@ -108,13 +126,21 @@ the key may take in a response or a log. `seed_defaults` only inserts missing ke
 `GET /api/models` · `GET|POST /api/feeds`, `PATCH|DELETE /api/feeds/{id}`,
 `POST /api/feeds/seed-defaults`, `POST /api/feeds/refresh` · `GET /api/items`,
 `PATCH /api/items/{id}`, `POST /api/items/bulk-status`, `POST /api/items/{id}/extract` ·
-`GET|POST /api/sessions`, `GET|PATCH|DELETE /api/sessions/{id}`,
-`POST /api/sessions/{id}/cancel`, `POST /api/sessions/{id}/messages` (**SSE**) ·
+`GET|POST /api/sessions`, `GET /api/sessions/running` → `{session_ids}`,
+`GET|PATCH|DELETE /api/sessions/{id}`, `POST /api/sessions/{id}/cancel`,
+`POST /api/sessions/{id}/messages` → **202** `TurnAccepted` (409 while one runs, 503 if
+the row cannot be marked running), `GET /api/sessions/{id}/stream` (**SSE**: replay then
+tail, **204** only when nothing is running *and* nothing finished in the last
+`RECENT_TURN_S = 30` s) ·
 `GET /api/notes`, `GET|PATCH|DELETE /api/notes/{id}`, `GET /api/notes/{id}/export.md`,
 `POST /api/notes/generate` (**SSE**), `POST /api/notes/generate/cancel` ·
 `GET /api/search` · `GET|PUT /api/mcp/servers`,
 `POST /api/mcp/servers/{name}/reconnect`, `GET /api/mcp/tools`,
 `PATCH /api/mcp/tools/{namespaced}`.
+
+`GET /api/sessions/running` is declared **above** `/sessions/{session_id}` — the other
+way round FastAPI parses "running" as the id and answers 422 — and reads the registry
+only, never the database.
 
 `GET /api/sessions` takes `archived` (`"false"` default / `"true"` / `"all"` —
 `schemas/sessions.py::ArchivedFilter`) and `q`, which reuses
@@ -130,17 +156,25 @@ always has all three keys. Each hit carries a server-built `link` and a plain-te
 
 ## The SSE protocol
 
+**A chat turn is owned by `app.agent.turns.TurnRegistry` (`app.state.turn_registry`),
+not by the request**; `POST /messages` starts it and returns 202, and `GET /stream`
+encodes its log with `streaming.py::stream_turn_log`. `pump_agent_events` now serves
+only note generation.
+
 Both streaming routes go through `app/api/streaming.py`: `SSE_PING_S = 15`,
 `SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}`,
 `sse_data`/`sse_frame`/`frames`, and `pump_agent_events(request, generator, key=, client=)`,
 which consumes the runner inside a registered `asyncio.Task`, polls
 `request.is_disconnected()` every `DISCONNECT_POLL_S = 1.0` s, yields a terminal
 `error(cancelled)` if the run was stopped, unregisters the key and closes the client.
-**Use it for any new streaming route.** `app/agent/events.py` is the single event
-definition; each event's `to_sse()` returns `(event_name, payload)`.
+**Use it for any new *note-style* streaming route** — one whose run belongs to the
+request. A route that runs a *turn* uses `stream_turn_log` and never cancels on a
+disconnect. `app/agent/events.py` is the single event definition; each event's
+`to_sse()` returns `(event_name, payload)`.
 
 | event | payload |
 |---|---|
+| `turn_started` | `{"turn_id", "session_id", "prompt", "attachments": [{id,title,url}], "started_at"}` — **chat only**, first in every turn log, written by the registry so a late subscriber can draw the question it missed |
 | `turn_start` | `{"turn": 0}` (notes generation adds `"generation_id"`) |
 | `thinking_delta` | `{"text": "..."}` |
 | `text_delta` | `{"text": "..."}` |
@@ -157,8 +191,22 @@ definition; each event's `to_sse()` returns `(event_name, payload)`.
 `api_error`, `connection`, `cancelled`. `category` is only ever set on `refusal` and is
 open-ended — pass it through, never match it exhaustively.
 
+`stream_turn_log(request, log)` replays the log from index 0 and then tails it,
+checking `request.is_disconnected()` every `DISCONNECT_POLL_S` **without cancelling the
+pending read** (cancelling it would finish the subscription's generator, so the first
+quiet second would end the stream). Leaving detaches that subscriber and nothing else.
+
+**A turn that is already over still streams.** `TurnRegistry.recent(session_id)` keeps
+the turn each session last finished for `RECENT_TURN_S` (30 s, one entry per session,
+dropped when that session starts another turn, and swept out of the whole cache by the
+next turn to finish anywhere — a log nobody asks about again is not free), and
+`GET /stream` falls back to it: an error-only turn — no API key, an immediate 401 — is
+three events long and finishes inside the POST's own round trip, and answering 204 there
+meant the user saw their question and no notice at all. The log is closed, so the replay
+ends immediately.
+
 **The two terminal contracts differ, deliberately.** A chat turn always ends on `done`
-(`app/api/sessions.py::_stream_turn` appends one if the pump ended without it). A
+(`TurnRegistry._finish` appends one if the runner ended without it). A
 generation ends on `done` **only when a note was written**, and on `error` with **no
 `done` at all** when it was refused, capped, stopped or failed — there is no partial
 note, and a `done` would mean "saved". With no key, a chat POST still persists the
@@ -191,18 +239,27 @@ cited in the finished note. `save_note` writes note + sources in one transaction
 item or the session meanwhile, so the insert is retried once with the vanished
 references dropped — each orphaned source keeps its URL and title.
 
-## Cancellation (`app/api/tasks.py`)
+## Cancellation (`app/agent/turns.py`, `app/api/tasks.py`)
 
-**An SSE disconnect does not stop billing.** `pump_agent_events` registers the consuming
-task under a namespaced key and cancels it on disconnect or on a cancel POST.
+**An SSE disconnect does not stop billing** — and, for a chat turn, it does not stop the
+turn either: leaving the stream is not a cancel. `POST /sessions/{id}/cancel` and
+`DELETE /sessions/{id}` are the only things that stop one, through
+`TurnRegistry.cancel` / `cancel_and_wait`. A note generation still works the old way:
+`pump_agent_events` registers the consuming task under a namespaced key and cancels it
+on disconnect or on a cancel POST.
 
-`session_key(id) -> "session:{id}"` and `app/api/notes.py::generation_key(gid) ->
-"note:{gid}"` are the two key shapes. `register(key, task)` raises `KeyError` if one is
-already running (chat answers **409**; a generation gets an `api_error` frame) ·
-`is_running` · `cancel -> bool` · `cancel_and_wait` (bounded by `CANCEL_WAIT_S = 10`;
-used by `DELETE /sessions/{id}` so a running turn cannot write rows for a session being
-deleted) · `unregister` · `clear`. Both cancel endpoints answer 200 with
-`CancelResponse(cancelled=False)` when nothing was running — Stop may lose the race.
+`app/api/notes.py::generation_key(gid) -> "note:{gid}"` is the only key shape left —
+a chat turn is the `TurnRegistry`'s, not this module's. `register(key, task)` raises
+`KeyError` if one is already running (a generation gets an `api_error` frame; a second
+chat turn is the `TurnRegistry`'s own **409**) ·
+`is_running` · `cancel -> bool` · `cancel_and_wait` (bounded by `CANCEL_WAIT_S = 10`,
+which **lives in `app/agent/turns.py`**; `tasks.py` imports the *module* and reads
+`turns.CANCEL_WAIT_S` at call time, because `from ... import CANCEL_WAIT_S` copies the
+float and the two halves then drift — and only in that direction, domain code must not
+import the API layer) · `unregister` · `clear`. `TurnRegistry.drain()` is bounded by
+**one** `CANCEL_WAIT_S` shared by both of its waits, not one each. Both cancel endpoints
+answer 200 with `CancelResponse(cancelled=False)` when nothing was running — Stop may
+lose the race.
 
 ## Outbound fetching: the two clients (`app/services/http.py`)
 
@@ -266,7 +323,7 @@ Three more ingest invariants worth not re-litigating (`app/services/feeds.py`):
 
 ## Tests (`backend/tests/`)
 
-`make test` → `uv run pytest` (**572 tests**, ~14 s) then the frontend's vitest. One
+`make test` → `uv run pytest` (**616 tests**, ~20 s) then the frontend's vitest. One
 `test_<area>.py` per area, `fakes/` for client stand-ins, `fixtures/` for XML/HTML.
 
 There is **no `tests/__init__.py`**, so pytest puts `tests/` on `sys.path`: helpers are
@@ -310,6 +367,15 @@ in `app/schemas/<domain>.py` (`common.py` only for what two domains genuinely sh
 Domain logic goes in `app/services/` with no FastAPI import. Malformed user input →
 `HTTPException(422)`; missing row → 404.
 
+**...a new column.** Declare it in `app/db/models.py` *and* list it in
+`app/db/init.py::ADDED_COLUMNS` with the DDL — there is no Alembic and `create_all`
+never alters an existing table, so an unlisted column is `no such column` on every
+database that already exists. The literal must be **exactly** what `create_all` emits
+for that column (`CreateColumn(...).compile(dialect=sqlite.dialect())`), which for a
+`NOT NULL` column means declaring a `server_default` on the model: SQLite refuses to add
+one without a default, and a fresh database and an upgraded one must end up with the
+same table. `tests/test_db.py` asserts both.
+
 **...a new setting.** Add the key + default to `DEFAULT_SETTINGS` in
 `app/services/settings.py` (this is also what `seed_defaults` inserts on an existing DB),
 add the field to `SettingsRead`/`SettingsUpdate` in `app/schemas/settings.py`, read it in
@@ -325,6 +391,10 @@ If a *run* needs it, add it to `app/agent/providers.py::turn_settings` too.
 attribute + `async def list_tools() -> list[RegisteredTool]`) and append it in
 `app/agent/providers.py::build_tool_providers`. **Order is the prompt-cache prefix** —
 append, never insert.
+
+**...a route that runs a turn.** Copy `app/api/sessions.py::post_message`: build the
+generator, hand it to the registry, answer 202, and let clients attach to a `/stream`
+route built on `stream_turn_log`. **Never cancel a run because a client went away.**
 
 **...a new streaming route.** Copy `app/api/notes.py`: `turn_settings` for the key and
 model, `ToolRegistry(await build_tool_providers(...))`, `client_factory(api_key)`,

@@ -12,6 +12,8 @@ Read `backend/CLAUDE.md` (app wiring, SSE table, test harness) and the root
 | `persistence.py` | `Persistence` / `NullPersistence`, `load_history`, `repair_unanswered_tool_use`, `flatten_text`, `ToolCallRecord`. |
 | `prompts.py` | `DEFAULT_SYSTEM_PROMPT`, `build_system_prompt(override=, extra=)`. |
 | `events.py` | The frozen event dataclasses + `to_sse()`. |
+| `turns.py` | `TurnRegistry` — the owner of a running chat turn — plus `mark_interrupted` and `CANCEL_WAIT_S`. |
+| `turnlog.py` | `TurnLog` — one turn's events, replayable while it runs. |
 
 **Why a manual loop and not `client.beta.messages.tool_runner`:** the Python tool runner
 silently ends the loop on `pause_turn` (returns a truncated answer, no error), cannot be
@@ -241,6 +243,59 @@ rather than an error. `session_factory` is passed explicitly rather than read of
 `app.state` so a test overriding `get_session_factory` really redirects the built-ins'
 own transactions.
 
+## Turn ownership (`turns.py`, `turnlog.py`)
+
+A chat turn is a task this process owns, not a request. `TurnRegistry.start(...)` takes
+the runner's generator and the client, writes `research_sessions.turn_status='running'`,
+creates the task and returns a `RunningTurn`; the route answers **202** and returns. Any
+number of `GET /sessions/{id}/stream` subscribers attach to the turn's `TurnLog`, which
+replays from event 0 and then tails — a reload, a second tab or a trip to the Inbox all
+see the same turn from the start.
+
+- **One entry per session**, and the check, the row write and the registration are all
+  inside `_start_lock`. Checking `is_running()` alone let two POSTs start two turns on
+  one transcript, the first unreachable by Stop, by `drain()` or by anything else.
+- **`ev.TurnStarted` is always the first event in the log** (`turn_started`): the
+  question, the attachment chips and `started_at`, which is all a late subscriber needs
+  to draw the turn it missed. It is produced here, never by the runner.
+- **A client going away is not a cancel.** `cancel` / `cancel_and_wait` (and
+  `DELETE /sessions/{id}`) are the only things that stop a turn. **Never** cancel a run
+  because a subscriber disconnected — that was the old behaviour and it is the bug this
+  package exists to fix.
+- **The log always ends.** Whatever happens to the generator, `_finish` appends the
+  terminal `error` (when the turn did not already say `done`), appends `done`, closes the
+  log, closes the client and idles the row — once, latched by `RunningTurn.finished`. It
+  is re-shielded in a loop, because a second cancel (Stop then Delete, Stop then
+  shutdown) would otherwise detach the cleanup and leave a client open and a row
+  `running` after `drain()` had returned.
+- **A turn is forgotten before anyone sees it end.** The registry entry is dropped
+  *before* `done` is appended: a page that has seen `done` may send its next message in
+  the very next request, and a stale entry would answer that with a 409.
+- **...but its log is kept for `RECENT_TURN_S` (30 s).** `recent(session_id)` holds the
+  turn each session last finished — one entry, dropped when that session starts another
+  turn — so `GET /stream` can still replay a turn that was over before the page asked to
+  watch it. An error-only turn (no API key, an immediate 401) is three events long and
+  finishes inside the POST's own round trip; without this the stream answered 204 and the
+  error was never shown at all.
+- **A turn that swallows `CancelledError` wedges its session until restart.** Its entry
+  stays in `_turns` with a live task, so every later `start()` for that session is a 409,
+  and `cancel_and_wait` / `drain` give up on it after `CANCEL_WAIT_S` (one deadline for
+  both of `drain`'s waits, not one each). That is a deliberate decision, not an
+  oversight: the alternative — evicting an entry whose task is still running — puts two
+  turns on one transcript, which is the bug `_start_lock` exists to prevent. The runner
+  does not swallow cancellation; a tool handler that did would be the bug to fix.
+- **A cancelled turn ends normally** — `_drive` swallows the `CancelledError` so the
+  cleanup can run. Read a turn's ending off its log (`error(cancelled)` then `done`),
+  never off `task.cancelled()`.
+- **The status writes never touch `updated_at`** (they pass it through explicitly), so a
+  turn does not reorder the session sidebar twice per question. `mark_interrupted` at
+  startup flips rows left `running` by a process that died; `drain()` at shutdown cancels
+  what is left and waits, bounded by `CANCEL_WAIT_S`.
+- `TurnLog` wakes its subscribers through one `asyncio.Event` — set on append and on
+  close, cleared and re-checked by the waiter. A wake-up *task* per append cost hundreds
+  of milliseconds of loop time over a long turn, in the one process that also serves the
+  inbox.
+
 ## Pitfalls specific to this package
 
 1. Do not reorder providers or tools, do not put a timestamp in the system prompt: both
@@ -260,3 +315,6 @@ own transactions.
    route decides, not the runner.
 9. Do not read a setting inside the loop or a tool handler. `turn_settings` reads them
    once per run, before the stream opens.
+10. Do not cancel a turn because a client disconnected, and do not reach for
+    `app.api.tasks` from here — the API layer imports this package, not the other way
+    round (`CANCEL_WAIT_S` lives in `turns.py` for exactly that reason).
