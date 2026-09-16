@@ -80,6 +80,17 @@ BOT_PROTECTION_NO_RETRY_ERROR = (
     "the server)"
 )
 
+#: The same 403 again, when the retry was *withheld* rather than unavailable —
+#: the mock-transport interlock in :func:`refresh_feeds`, which is a test-only
+#: shape. Neither claim applies, so the message makes neither: blaming a wheel
+#: that is installed would be as wrong as claiming a retry that never ran.
+BOT_PROTECTION_PLAIN_ERROR = "HTTP 403 (blocked by the site's bot protection)"
+
+#: Why :meth:`_BrowserRetry.client` has no client to hand out. They read the same
+#: to the code and differently to the user, which is the whole point.
+RETRY_MISSING = "missing"
+RETRY_DISABLED = "disabled"
+
 #: Seeded by ``POST /api/feeds/seed-defaults``. Every URL was fetched and confirmed
 #: to return a parseable feed at implementation time.
 #:
@@ -298,14 +309,24 @@ class _BrowserRetry:
         self._timeout_s = timeout_s
         self._transport = transport
         self._enabled = enabled
+        #: Remembered rather than recomputed, so the second feed of a batch is
+        #: told the same thing as the first: once a build has failed, the reason
+        #: is "the wheel is absent", not "we never tried".
+        self._no_client_reason = None if enabled else RETRY_DISABLED
         self._client: httpx2.AsyncClient | None = None
         self._retired: list[httpx2.AsyncClient] = []
         self._lock = asyncio.Lock()
 
-    async def client(self) -> httpx2.AsyncClient | None:
-        """The retry client, or ``None`` when impersonation is not available."""
+    async def client(self) -> tuple[httpx2.AsyncClient | None, str | None]:
+        """The retry client, or ``None`` and *why* there is none.
+
+        The two reasons are different facts about the installation and get
+        different words on the feed row: :data:`RETRY_MISSING` is ``curl_cffi``
+        not being importable, :data:`RETRY_DISABLED` is this batch deliberately
+        withholding the client (the mock-transport interlock).
+        """
         if not self._enabled:
-            return None
+            return None, self._no_client_reason
         async with self._lock:
             if self._client is None:
                 self._client = build_impersonating_client(
@@ -313,7 +334,8 @@ class _BrowserRetry:
                 )
                 if self._client is None:
                     self._enabled = False
-            return self._client
+                    self._no_client_reason = RETRY_MISSING
+            return self._client, self._no_client_reason
 
     async def discard(self, client: httpx2.AsyncClient) -> None:
         """Stop handing out ``client`` after it failed, so the next 403 rebuilds.
@@ -342,7 +364,7 @@ async def _fetch_feed(
     client: httpx2.AsyncClient,
     retry: _BrowserRetry | None,
     url: str,
-) -> tuple[httpx2.Response, bool]:
+) -> tuple[httpx2.Response, str | None]:
     """Fetch one feed, retrying a 403 with a browser TLS fingerprint.
 
     The retry is automatic rather than a per-feed setting because the block is not a
@@ -351,19 +373,20 @@ async def _fetch_feed(
     Both attempts go through ``fetch_guarded``, so the redirect, address and size
     policy is identical whichever client wins.
 
-    Returns the response and whether a 403 went **unretried** because no browser-TLS
-    client could be built, which is the difference between the two 403 messages: the
-    caller must not tell the user a retry failed when none was made.
+    Returns the response and, when a 403 went **unretried**, why — which is what
+    picks the message: the caller must not tell the user a retry failed when none
+    was made, nor blame a missing wheel for a retry this batch withheld. ``None``
+    means a retry did happen (or the response was not a 403).
     """
     # The operator typed this URL, so its first hop is trusted (a feed reader on
     # the LAN is a legitimate target); every redirect it takes is still checked.
     response = await fetch_guarded(client, url, max_bytes=MAX_FEED_BYTES, validate_first_hop=False)
     if response.status_code != 403:
-        return response, False
+        return response, None
 
-    browser = await retry.client() if retry is not None else None
+    browser, reason = await retry.client() if retry is not None else (None, RETRY_DISABLED)
     if browser is None:
-        return response, True
+        return response, reason or RETRY_DISABLED
     logger.info("Feed %s answered 403; retrying with a browser TLS fingerprint", url)
     try:
         retried = await fetch_guarded(
@@ -375,7 +398,7 @@ async def _fetch_feed(
         # rest of the batch, and rebuilding one is cheap next to a wrong answer.
         await retry.discard(browser)
         raise
-    return retried, False
+    return retried, None
 
 
 async def _refresh_one(
@@ -392,10 +415,10 @@ async def _refresh_one(
     site_url: str | None = None
     rows: list[dict[str, Any]] = []
     fetched_at = utcnow()
-    retry_unavailable = False
+    unretried_because: str | None = None
 
     try:
-        response, retry_unavailable = await _fetch_feed(client, retry, url)
+        response, unretried_because = await _fetch_feed(client, retry, url)
         response.raise_for_status()
         parsed = await parse_feed(response.content)
 
@@ -421,8 +444,12 @@ async def _refresh_one(
         # Only the status code is used — a WAF's response body is a challenge page.
         if status_code != 403:
             error = f"HTTP {status_code}"
+        elif unretried_because is None:
+            error = BOT_PROTECTION_ERROR
+        elif unretried_because == RETRY_MISSING:
+            error = BOT_PROTECTION_NO_RETRY_ERROR
         else:
-            error = BOT_PROTECTION_NO_RETRY_ERROR if retry_unavailable else BOT_PROTECTION_ERROR
+            error = BOT_PROTECTION_PLAIN_ERROR
     except (httpx2.TimeoutException, TimeoutError):
         # ``TimeoutError`` is ``fetch_guarded``'s whole-fetch budget; httpx's is
         # per operation. Both mean the same thing on a feed row.
@@ -535,9 +562,12 @@ async def refresh_feeds(
 __all__ = [
     "BOT_PROTECTION_ERROR",
     "BOT_PROTECTION_NO_RETRY_ERROR",
+    "BOT_PROTECTION_PLAIN_ERROR",
     "DEFAULT_FEEDS",
     "INSERT_CHUNK_ROWS",
     "MAX_CONCURRENT_FEEDS",
+    "RETRY_DISABLED",
+    "RETRY_MISSING",
     "FeedRefreshResult",
     "RefreshResult",
     "parse_feed",
