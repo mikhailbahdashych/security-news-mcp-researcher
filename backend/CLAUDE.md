@@ -145,7 +145,7 @@ definition; each event's `to_sse()` returns `(event_name, payload)`.
 | `thinking_delta` | `{"text": "..."}` |
 | `text_delta` | `{"text": "..."}` |
 | `tool_use_start` | `{"tool_use_id", "name", "source"}` (`source` ∈ `builtin`/`server`/`mcp`) |
-| `tool_use_input` | `{"tool_use_id", "partial_json"}` — raw fragments, only valid JSON once concatenated |
+| `tool_use_input` | `{"tool_use_id", "partial_json"}` — raw fragments, only valid JSON once concatenated; sent for `server_tool_use` blocks too, patched onto the card by id |
 | `tool_result` | `{"tool_use_id", "name", "is_error", "duration_ms", "preview"}` (preview ≤ 600 chars) |
 | `server_tool_use` | `{"tool_use_id", "name", "input"}` |
 | `server_tool_result` | `{"tool_use_id", "name", "is_error", "results"}` |
