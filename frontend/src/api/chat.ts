@@ -506,6 +506,24 @@ function prettyJson(value: unknown): string | null {
   }
 }
 
+/**
+ * The expanded row's argument block.
+ *
+ * The sandbox is the exception: `{"code": "import json\\nresult = …"}` is the
+ * wire format, not source anyone can check, and the point of the card is that
+ * the work is auditable. So a sandbox step shows the code or the command
+ * verbatim, newlines and all, and everything else stays pretty-printed JSON.
+ */
+function stepArgs(spec: ToolStepSpec): string | null {
+  if (isSandboxTool(spec.name) && isRecord(spec.input)) {
+    const source = str(spec.input.code) ?? str(spec.input.command)
+    if (source) {
+      return source
+    }
+  }
+  return prettyJson(spec.input) ?? str(spec.rawInput ?? null)
+}
+
 /** A local or MCP tool's output is a string under `content`. */
 function contentText(result: unknown): string | null {
   if (typeof result === 'string') {
@@ -760,7 +778,7 @@ export function toolStep(spec: ToolStepSpec): TurnStep {
     status: spec.status,
     durationMs: spec.durationMs ?? null,
     body: isSandboxTool(spec.name) ? SANDBOX_NOTE : null,
-    args: prettyJson(spec.input) ?? str(spec.rawInput ?? null),
+    args: stepArgs(spec),
     links,
     preview: spec.preview !== undefined && spec.preview !== null
       ? truncate(spec.preview)

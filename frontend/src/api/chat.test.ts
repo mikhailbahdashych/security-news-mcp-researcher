@@ -597,4 +597,37 @@ describe('the sandbox card', () => {
     // `exit 0` on its own read as a result; it is the absence of one.
     expect(sandboxStep({}, sandboxResult()).preview).toBe('no output')
   })
+
+  it('shows the code as the model wrote it, not as JSON', () => {
+    // `{"code": "import json\\nresult = …"}` is the wire format, not source a
+    // reader can check. The expanded row is the audit trail, so it gets the
+    // real thing, newlines and all.
+    const code = 'import json\nresult = await web_search({"query": "kev"})\nprint(result)'
+    expect(sandboxStep({ code }).args).toBe(code)
+    expect(
+      toolStep({
+        key: 'live-3',
+        name: 'bash_code_execution',
+        source: 'server',
+        input: { command: 'ls -la /tmp' },
+        status: 'ok',
+      }).args,
+    ).toBe('ls -la /tmp')
+  })
+
+  it('falls back to pretty JSON for a sandbox call with neither', () => {
+    expect(sandboxStep({ file_path: '/tmp/a.py' }).args).toBe('{\n  "file_path": "/tmp/a.py"\n}')
+  })
+
+  it('still pretty-prints a tool that is not the sandbox', () => {
+    expect(
+      toolStep({
+        key: 'live-4',
+        name: 'search_feed_items',
+        source: 'builtin',
+        input: { q: 'kev' },
+        status: 'ok',
+      }).args,
+    ).toBe('{\n  "q": "kev"\n}')
+  })
 })
