@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
+import type { Turn } from '../../api/chat'
 import {
   activityLabel,
   emptyTurn,
@@ -7,6 +8,7 @@ import {
   isForeignSession,
   liveSteps,
   liveTurnReducer,
+  turnsBesideLive,
   type LiveAction,
   type LiveStep,
   type LiveTurn,
@@ -268,5 +270,87 @@ describe('formatElapsed', () => {
 
   it('never counts backwards', () => {
     expect(formatElapsed(-3)).toBe('0s')
+  })
+})
+
+describe('turnsBesideLive', () => {
+  function turn(overrides: Partial<Turn> = {}): Turn {
+    return {
+      key: 'turn-1',
+      question: 'What broke this week?',
+      attachments: [],
+      steps: [],
+      answer: '',
+      error: null,
+      ...overrides,
+    }
+  }
+
+  const step = {
+    key: 'step-1',
+    kind: 'tool' as const,
+    name: 'search_feed_items',
+    tag: 'local',
+    hint: '"kev"',
+    status: 'ok' as const,
+    durationMs: null,
+    body: null,
+    args: null,
+    links: [],
+    preview: null,
+    sources: [],
+  }
+
+  it('drops the transcript\u2019s echo of the question being answered', () => {
+    // The backend stores the user row before the first token, so the refetch
+    // that follows `createSession` already has a turn with the question and
+    // nothing under it — which rendered above the live turn asking the same
+    // thing, and the user saw their question twice.
+    expect(turnsBesideLive([turn()], 'What broke this week?')).toEqual([])
+  })
+
+  it('compares the stripped question, not the stored message', () => {
+    // The server appends an "Attached feed items:" block to what it stores;
+    // `groupTurns` already strips it, so `question` is the comparable half.
+    expect(turnsBesideLive([turn({ question: '  What broke this week?  ' })], 'What broke this week?')).toEqual(
+      [],
+    )
+  })
+
+  it('keeps a trailing turn that was answered', () => {
+    const turns = [turn({ answer: 'Three things.' })]
+    expect(turnsBesideLive(turns, 'What broke this week?')).toEqual(turns)
+  })
+
+  it('keeps a trailing turn that got as far as a step', () => {
+    const turns = [turn({ steps: [step] })]
+    expect(turnsBesideLive(turns, 'What broke this week?')).toEqual(turns)
+  })
+
+  it('keeps a trailing turn that ended in an error', () => {
+    const turns = [turn({ error: { type: 'refusal', message: 'No.', category: null } })]
+    expect(turnsBesideLive(turns, 'What broke this week?')).toEqual(turns)
+  })
+
+  it('keeps a trailing unanswered turn that asked something else', () => {
+    const turns = [turn({ question: 'Anything on the KEV catalog?' })]
+    expect(turnsBesideLive(turns, 'What broke this week?')).toEqual(turns)
+  })
+
+  it('drops nothing when no turn is live', () => {
+    const turns = [turn()]
+    expect(turnsBesideLive(turns, null)).toEqual(turns)
+  })
+
+  it('only ever drops the last turn', () => {
+    // The same question asked twice in one session: the earlier one has an
+    // answer under it and is part of the transcript.
+    const earlier = turn({ key: 'turn-1', answer: 'Three things.' })
+    const echo = turn({ key: 'turn-2' })
+    expect(turnsBesideLive([earlier, echo], 'What broke this week?')).toEqual([earlier])
+  })
+
+  it('leaves an empty transcript alone', () => {
+    expect(turnsBesideLive([], 'What broke this week?')).toEqual([])
   })
 })

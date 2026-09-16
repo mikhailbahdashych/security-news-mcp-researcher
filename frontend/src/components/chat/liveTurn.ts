@@ -12,6 +12,7 @@ import {
   type ToolResultPayload,
   type ToolUseInputPayload,
   type ToolUseStartPayload,
+  type Turn,
   type TurnEndPayload,
   type TurnStartPayload,
   type TurnStep,
@@ -359,6 +360,31 @@ export function liveTurnReducer(state: LiveTurn, action: LiveAction): LiveTurn {
  */
 export function isForeignSession(live: LiveTurn, routeSessionId: number | null): boolean {
   return routeSessionId !== null && live.sessionId !== null && live.sessionId !== routeSessionId
+}
+
+/**
+ * The stored transcript with the question being answered right now taken off it.
+ *
+ * The backend persists the user row before the first token, so the refetch that
+ * follows `createSession` already carries a turn holding the question and
+ * nothing else — which rendered above the live turn asking the very same thing,
+ * and the user saw their question twice, once as a heading and once as a
+ * follow-up. Only a *trailing* turn qualifies, and only one with no assistant
+ * content at all: the same question asked twice in a session is a real turn, and
+ * so is one that failed before it answered.
+ *
+ * Takes the prompt rather than the whole `LiveTurn` so a memo on it survives a
+ * turn's worth of deltas — the turn object is replaced on every one of them.
+ */
+export function turnsBesideLive(turns: Turn[], livePrompt: string | null): Turn[] {
+  if (livePrompt === null || turns.length === 0) {
+    return turns
+  }
+  const last = turns[turns.length - 1]
+  const unanswered = last.answer === '' && last.steps.length === 0 && last.error === null
+  // `question` is what `groupTurns` already stripped of the "Attached feed
+  // items:" block the server appends, so it is the comparable half.
+  return unanswered && last.question.trim() === livePrompt.trim() ? turns.slice(0, -1) : turns
 }
 
 /** The progress line's wording, for `activity` and whatever it is waiting on. */

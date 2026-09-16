@@ -32,6 +32,7 @@ import {
   isForeignSession,
   liveSteps,
   liveTurnReducer,
+  turnsBesideLive,
 } from '../components/chat/liveTurn'
 import GenerateNotesDialog from '../components/notes/GenerateNotesDialog'
 import Button from '../components/ui/Button'
@@ -144,7 +145,12 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
     () => collectFeedTitles(messages ?? [], cachedTitles),
     [messages, cachedTitles],
   )
-  const turns = useMemo(() => groupTurns(messages ?? [], feedTitles), [messages, feedTitles])
+  const stored = useMemo(() => groupTurns(messages ?? [], feedTitles), [messages, feedTitles])
+  // The backend persists the user row before the first token, so the refetch
+  // that follows `createSession` already holds the question the live turn is
+  // asking. Without this it rendered twice: once as this turn's heading and
+  // again as the live turn's follow-up, with the steps under the second copy.
+  const turns = useMemo(() => turnsBesideLive(stored, live.prompt), [stored, live.prompt])
 
   // Opening a conversation lands at its latest answer, without animating
   // through the whole history to get there.
