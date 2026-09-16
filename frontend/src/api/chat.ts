@@ -100,12 +100,14 @@ export const DEFAULT_SESSION_FILTERS: SessionFilters = { q: '', archived: 'false
  * The prefix every sessions list shares.
  *
  * Invalidating this one key refreshes every filtered variant below it, which is
- * what a rename, an archive or a delete needs — it cannot know which filter the
- * history drawer is showing.
+ * what a rename, an archive or a delete needs — it cannot know whether the rail's
+ * list or Settings' archived dialog is the one on screen.
  */
 export const sessionsQueryKey = ['sessions'] as const
+// `q` is trimmed here because `fetchSessions` trims it too: untrimmed, `'cve'`
+// and `'cve '` were two cache entries for one request.
 export const sessionsListKey = (filters: SessionFilters) =>
-  ['sessions', 'list', filters.archived, filters.q] as const
+  ['sessions', 'list', filters.archived, filters.q.trim()] as const
 export const sessionQueryKey = (id: number) => ['session', id] as const
 
 export function fetchSessions(
@@ -169,8 +171,8 @@ export const streamUrl = (id: number): string => `/api/sessions/${id}/stream`
 /**
  * Which sessions have a turn in flight.
  *
- * One key for the whole app: the rail's dot, the drawer's marks and the header
- * all read the same answer, and every place that starts or ends a turn
+ * One key for the whole app: the rail's dot, its chat list's marks and the chat
+ * header all read the same answer, and every place that starts or ends a turn
  * invalidates it. There is no interval — see `lib/useRunningTurns.ts`.
  */
 export const runningSessionsKey = ['sessions', 'running'] as const
@@ -1211,7 +1213,7 @@ const MONTHS = [
 ] as const
 
 /**
- * How the history drawer dates a chat: `16 Sep 2026`, always.
+ * How the app dates a chat: `16 Sep 2026`, always.
  *
  * Every row carries its exact date. "today" / "yesterday" / a weekday name read
  * well for the top of the list and told you nothing for the rest of it — and a
@@ -1229,4 +1231,38 @@ export function whenLabel(timestamp: string): string {
     return ''
   }
   return `${when.getDate()} ${MONTHS[when.getMonth()]} ${when.getFullYear()}`
+}
+
+/** A day's worth of chats, under the date they were last touched. */
+export interface SessionDay {
+  label: string
+  sessions: ResearchSession[]
+}
+
+/**
+ * The chat list, cut into days.
+ *
+ * The rail shows one date header per day rather than a date on every row: the
+ * list is the whole history, and a column of identical dates is noise on every
+ * row but the first of its day.
+ *
+ * Grouping is on `whenLabel` itself — the *rendered* day, in the viewer's zone —
+ * so a row can never sit under a header that disagrees with it. Input order is
+ * kept and never re-sorted: the server orders by `updated_at` and the list is
+ * paged, so sorting here would only order the rows loaded so far. A run of rows
+ * that comes back to a day already seen therefore opens a second group with the
+ * same label, which is the honest rendering of a list that arrived that way.
+ */
+export function groupSessionsByDay(sessions: ResearchSession[]): SessionDay[] {
+  const days: SessionDay[] = []
+  for (const session of sessions) {
+    const label = whenLabel(session.updated_at)
+    const current = days[days.length - 1]
+    if (current && current.label === label) {
+      current.sessions.push(session)
+    } else {
+      days.push({ label, sessions: [session] })
+    }
+  }
+  return days
 }

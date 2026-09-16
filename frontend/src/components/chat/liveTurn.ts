@@ -494,9 +494,10 @@ export function liveTurnReducer(state: LiveTurn, action: LiveAction): LiveTurn {
  * reset the live turn on the very first render of every chat started from the
  * empty view, and every SSE event after it landed on an invisible turn.
  *
- * Leaving deliberately is still handled — `newChat` and the history drawer
- * dispatch `reset` themselves — so the only case this lets through is a browser
- * back to `/chat` mid-turn, where keeping the turn on screen is the lesser evil.
+ * Leaving deliberately is still handled — `newChat` dispatches `reset` itself,
+ * and opening another chat from the rail's list is a navigation this rule
+ * catches — so the only case it lets through is a browser back to `/chat`
+ * mid-turn, where keeping the turn on screen is the lesser evil.
  */
 export function isForeignSession(live: LiveTurn, routeSessionId: number | null): boolean {
   return routeSessionId !== null && live.sessionId !== null && live.sessionId !== routeSessionId
@@ -587,7 +588,7 @@ function startedAfter(turnStartedAt: string | null, lastStartedAt: number | null
  * turn it had started. Attaching changed that: the runner persists **message by
  * message**, so a turn that has already called a tool has an assistant row in
  * the transcript *while it is still running*, and the page that joins it — a
- * reload, the drawer, a second tab, a focus refetch — read that half-written
+ * reload, the rail's list, a second tab, a focus refetch — read that half-written
  * turn and drew it above the live replay of the same turn. So the trailing turn
  * is identified by the turn that is replaying it: one asked at (or just before)
  * the live turn's start time is that turn's own stored half, whatever it holds.

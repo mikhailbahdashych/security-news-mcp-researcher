@@ -7,8 +7,8 @@ export type IconButtonTone = 'default' | 'accent' | 'amber' | 'danger'
 
 // `ComponentPropsWithRef<'button'>` rather than `ButtonHTMLAttributes`, so a
 // caller can hold a `ref` to the button: React 19 passes it as an ordinary prop
-// and the spread below hands it to the element. The history drawer's opener
-// needs one, so that a click on it does not read as a click outside the drawer.
+// and the spread below hands it to the element. That is what an overlay's opener
+// needs, so that a click on it does not read as a click outside the overlay.
 // (`RefAttributes` would do the same but drags `key` in with it, and `key` must
 // never be spread onto an element.)
 export interface IconButtonProps extends ComponentPropsWithRef<'button'> {
@@ -18,7 +18,7 @@ export interface IconButtonProps extends ComponentPropsWithRef<'button'> {
   /** Icon box in px; the padded hit area grows with it. */
   size?: number
   tone?: IconButtonTone
-  /** Held-down look, for toggles like the chat history drawer. */
+  /** Held-down look, for a toggle that stays on — the ⌘K opener, a rail entry. */
   active?: boolean
 }
 

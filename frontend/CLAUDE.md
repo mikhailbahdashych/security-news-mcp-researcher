@@ -20,15 +20,17 @@ Linting is **oxlint** (`.oxlintrc.json`), not ESLint.
 `src/main.tsx` mounts `QueryClientProvider` (defaults: `retry: 1`,
 `refetchOnWindowFocus: false`, `staleTime: 30_000`) inside `BrowserRouter`.
 `src/App.tsx` is the shell: the `Rail` on the left, one or two page panes on the
-right, `GlobalSearch` above everything.
+right, `GlobalSearch` above everything. The shell is also what tells the rail which
+chat the URL names (`useMatch('/chat/:id')` + `parseSessionId`) and whether Research
+is on screen in either pane, because the rail carries the chat history now.
 
 | Route | Page | Notes |
 |---|---|---|
 | `/` | `pages/Inbox.tsx` | Filters, triage, extraction, feed management. Reads `?q=`, `?status=`, `?item=` from a search deep link. |
-| `/chat`, `/chat/:id` | `pages/ChatPage.tsx` | The research view: transcript of turns, live stream, history drawer |
+| `/chat`, `/chat/:id` | `pages/ChatPage.tsx` | The research view: transcript of turns, live stream. The chat list is in the rail, not here. |
 | `/notes` | `pages/Notes.tsx` | Note list + the generate dialog |
 | `/notes/:id` | `pages/NoteDetail.tsx` | Markdown viewer/editor, sources, copy/download |
-| `/settings` | `pages/Settings.tsx` | Layout, API key, model, toggles, MCP panel |
+| `/settings` | `pages/Settings.tsx` | Layout, archived chats, API key, model, toggles, MCP panel |
 
 `pages/Page.tsx` is the container every page but Research sits in: it owns the scroll
 and the column width (`PAGE_WIDTH` in `ui/classes.ts`). Research fills its pane and
@@ -102,18 +104,28 @@ these rather than inventing a fifth slightly-different secondary button. Primiti
 - `Icon.tsx` is the whole icon set as inline paths (one 1.6 stroke weight in a 20×20
   box). **Do not add an icon library.** Icons are `aria-hidden`; an icon-only control
   gets its label from `IconButton`, not from the glyph. `IconButton`'s props are
-  `ComponentPropsWithRef<'button'>`, so it **takes a `ref`** — `ChatPage` holds one on
-  the history opener so a click on it is not a click outside the drawer.
+  `ComponentPropsWithRef<'button'>`, so it **takes a `ref`**, which is what an
+  overlay's opener needs if a click on it is not to read as a click outside.
+  The `settings` glyph is a **cog on a 24 grid** (eight teeth attached to the body,
+  `strokeWidth` scaled 1.6 × 24/20 to keep the set's one weight): the prototype's was a
+  ringed circle with eight detached rays, which is the same drawing as `sun` — and both
+  sit in the rail's bottom group. The number that decides whether it reads as a gear is
+  the **notch base**, the chord between two teeth where they meet the body: at 2 units it
+  is narrower than the stroke and every notch closes to a V. It is 3.1 now, as is the
+  tooth depth.
 - `modal.ts::useModalPanel(onClose)` is the keyboard contract every overlay owes:
   focus in on mount and back out on unmount, Escape from anywhere, Tab cycling inside
   the panel. Mount the panel **conditionally** — "open" is this hook's mount. A panel
   that says `aria-modal` without this is worse than one that never claimed it.
   `ConfirmDialog` builds on it to replace `window.confirm`, which is an OS box in a
   themed app and blocks the event loop so a pending mutation cannot report into it.
-  `modal.ts::isOutside(target, ...containers)` is the other half, for overlays that
-  also dismiss on a click away: pure, variadic, and **the opener counts as inside** —
-  without it the opener's `pointerdown` closes the panel and its `click` reopens it.
-  A missing target, or no mounted container, is not outside.
+  (It used to have a companion, `isOutside`, for overlays that also dismiss on a click
+  away. Its only caller was the history drawer; it went with it. If you add another
+  click-away overlay, the rule it encoded is worth re-deriving: **the opener counts as
+  inside**, or its `pointerdown` closes the panel and its `click` reopens it.)
+- `menuPosition.ts` is the placement half: where a `fixed` row menu goes, given its
+  trigger's box, its height and the viewport's. Pure, so the flip-and-clamp arithmetic is
+  tested without a DOM. See the rail chat list below for why `fixed`.
 - `GlobalSearch.tsx` owns the `Cmd/Ctrl+K` binding (not `/` — the composer and the
   note editor are text fields). It queries `GET /api/search`, groups the hits and
   follows `hit.link`, which the **backend** builds. The match is highlighted by
@@ -151,7 +163,7 @@ Every date must go through `parseUtc`. (It used to live in `api/inbox.ts`.)
 
 `lib/useDebouncedValue.ts` — every search box drives a query key, so without it each
 keystroke is its own request and its own cache entry. Used by `GlobalSearch`, `Inbox`,
-`Notes`, `ChatPage` (the history filter) and the two item pickers
+`Notes`, `ChatList`, `ArchivedChatsDialog` and the two item pickers
 (`AttachmentPicker`, `GenerateNotesDialog`).
 
 `lib/useElapsed.ts` — whole seconds since a timestamp, ticking once a second. The
@@ -234,14 +246,15 @@ a turn does not re-render differently the instant it is refetched.
   arguments" is a statement and it would be the wrong one.
 - Presentation helpers live here too: `hostOf`, `formatMs`, `formatTokens`, `toolTag`
   (`local`/`web`/`sandbox`/an MCP server name), `toolHint`, `whenLabel`. `whenLabel`
-  dates every history row exactly — `16 Sep 2026`, assembled from the parts, because
+  dates a chat exactly — `16 Sep 2026`, assembled from the parts, because
   `toLocaleDateString` reorders the fields and translates the month, and because
   "today"/"yesterday"/a weekday named the top of the list and told you nothing about
-  the rest of it.
+  the rest of it. `groupSessionsByDay(sessions)` cuts the chat list into
+  `{label, sessions}` days on that same label, keeping the input order.
 
 Components: `AnswerTurn`, `StepsCard`, `TurnProgress`, `SourcesGrid`, `Composer`,
-`AttachmentPicker`, `HistoryDrawer`, `EmptyResearch`, `TurnError`, `InterruptedNotice`,
-`Markdown`.
+`AttachmentPicker`, `ChatList`, `EmptyResearch`, `TurnError`, `InterruptedNotice`,
+`Markdown`, and the `useSessionActions` hook.
 
 ## Research: a turn outlives the page
 
@@ -290,7 +303,7 @@ watching are two requests.
   the old question's ids captioned the turn with items the server never saw.
 - **Where a turn shows while the user is elsewhere** — `lib/useRunningTurns.ts`.
   `useRunningTurns()` is one query on `GET /sessions/running` (`runningSessionsKey`)
-  behind three indicators: the rail's dot (`Rail`'s `busyPages`), the history drawer's
+  behind three indicators: the rail's dot (`Rail`'s `busyPages`), the rail chat list's
   `running` rows and the chat header's `running · 1m 05s` (`runningHeaderMeta`, a tested
   pure function, ticked by `useNow` inside a component of its own). **It has no
   interval** — this app polls nothing, and a turn is not a feed. Its only triggers are
@@ -386,27 +399,76 @@ foreign. react-router 7 wraps `BrowserRouter`'s location update in
 to `/chat/:id` lands — comparing `live.sessionId !== sessionId` reset the turn on the very
 first render of every chat started from the empty view (and of the Inbox's "Research
 these" handoff), and every SSE event after it landed on an invisible turn. Leaving
-deliberately still resets: `newChat`, the history drawer and `remove` all dispatch `reset`
-themselves. The one case this lets through is a browser-back to `/chat` mid-turn, where
-keeping the turn on screen is the lesser evil.
+deliberately still resets: `newChat` dispatches `reset` itself, and opening another chat
+from the rail's list is a plain navigation that this rule catches. The one case it lets
+through is a browser-back to `/chat` mid-turn, where keeping the turn on screen is the
+lesser evil.
 
-**The history drawer closes three ways**: its own Escape handler (which unwinds one
-layer at a time — the confirm dialog, the row menu, a rename, then the drawer), the
-opener toggling it, and a `pointerdown` anywhere else. The last one is a
-capture-phase document listener in `HistoryDrawer` over `ui/modal.ts::isOutside`,
-given the panel **and** the opener (`openerRef`, a ref `ChatPage` holds on the header
-button). Capture, and `pointerdown` rather than `click`, so the decision is made
-before anything inside re-renders the node the event landed on. Nothing in this app
-renders into a portal, so the row menu and the delete dialog are DOM children of the
-panel and one `contains` check covers them.
+## Research: the chat list lives in the rail
 
-**Clicking away saves a rename in flight**; Escape discards it. It used to be the
-input's `onBlur` that saved, and closing on `pointerdown` took that away — the drawer
-unmounts before focus moves, and an element removed from the DOM fires no `blur`. So
-the handler commits first and closes second, through a `useEffectEvent` — which is
-also what keeps the `document` listener from re-subscribing on every keystroke. The
-`onClose` it is given is a `useCallback` in `ChatPage` for the same reason: an inline
-arrow re-subscribed the drawer's Escape listener on every streamed delta.
+`components/chat/ChatList.tsx` replaced the overlay drawer the research page used to
+open from its header. `Rail` renders it in the space between the top nav and the bottom
+group, and **only** when the rail is expanded *and* Research is on screen in either pane
+— collapsed there is nowhere to put it, and 58px of truncated titles would say nothing.
+
+- **It owns its queries and takes only `activeId`.** The rail is app-level and Research
+  may be the pane the user is *not* looking at, so there is nothing above it to hand the
+  rows down: it runs its own `useInfiniteQuery` on `sessionsListKey`, its own
+  `useRunningTurns()` and `useSessionActions()`.
+- **Non-archived only**, and grouped by day: `api/chat.ts::groupSessionsByDay` cuts the
+  rows into `{label, sessions}` on `whenLabel` itself — the *rendered* day, so a row can
+  never sit under a header that disagrees with it — keeping the server's order and never
+  re-sorting, because the list is paged and a sort here would only order what has loaded.
+- **The next page loads on an IntersectionObserver sentinel**, not a "Load more" button;
+  the observer is re-armed after each page settles, and its first record fires on
+  `observe`, so a short page in a tall rail keeps loading until the sentinel drops below
+  the fold.
+- **Clicking a row is a plain `navigate('/chat/:id')`.** The rail cannot reach into the
+  page, and it does not need to: `isForeignSession` already resets the live turn when the
+  route names a different session.
+- **Deleting goes the same way round.** `useSessionActions`'s `remove` invalidates
+  `sessionsQueryKey` *and* `sessionQueryKey(id)`; that refetch answers 404 and
+  `ChatPage`'s missing-session effect abandons the turn, resets and leaves the URL —
+  the same path a chat deleted in another tab already took. Nothing is wired back from
+  the rail to the page.
+- **Archiving leaves the chat too, and is refused mid-turn.** It takes the chat out of
+  every list the rail shows, so a page still composing into it is a page pointing at
+  nothing: `archive` invalidates `sessionQueryKey(id)` as well, and `ChatPage` leaves on
+  the **transition** to `archived` — keyed on the session id, because a chat opened
+  deliberately from Settings' archived dialog arrives archived already and must render
+  normally. Archive is **disabled on a row with a turn in flight**, with a `title` saying
+  to stop it first: the rail's list is where a detached turn stays findable, and Stop and
+  Delete are this app's only two cancels.
+- **The row menu is `position: fixed`**, placed from the trigger's own
+  `getBoundingClientRect()` by the pure `ui/menuPosition.ts::menuPosition(rect,
+  menuHeight, viewportHeight)`: below and left-aligned to the button, flipped above when
+  it would run off the bottom, clamped to `MENU_VIEWPORT_MARGIN` either way. An
+  `absolute` menu inside the list's own scrollport was **clipped by it** — on a row near
+  the bottom, "Delete" was not drawn at all. That escape holds only while nothing above
+  the rail has a `transform`: a transformed ancestor becomes the containing block for
+  `fixed` and the clipping comes straight back. **Never give the rail a `transform`**
+  (`transition-[width]` is not one.) Scrolling the list closes the menu — placed in
+  viewport coordinates it does not travel with its row — through a capture-phase
+  `scroll` listener on the scroller — and a `resize`, which moves the row out from under
+  it just as effectively — while the `fixed inset-0` backdrop still catches the click
+  away. **The height it is placed against is measured, not guessed**: the click places it
+  as though the menu had none, and a `useLayoutEffect` re-places it from the real element
+  before the browser paints, so a fourth menu item cannot silently break the flip.
+- Escape unwinds the row menu, then a rename in progress. There is no third layer: the
+  list is part of the rail and has nothing to close, so a rename commits on Enter and on
+  blur (the panel no longer vanishes out from under the input, which is what made the
+  drawer's click-away commit necessary).
+
+`components/chat/useSessionActions.ts` is rename / archive / delete for both callers —
+the rail list and Settings' archived-chats dialog — and every one of them invalidates
+rather than patching the cache, because an archive is a change of membership rather than
+an edit to a row.
+
+**Archived chats are in Settings**, not behind a checkbox in the list:
+`components/settings/ArchivedChatsDialog.tsx` (filter, infinite list, **Open** and
+**Unarchive** per row) opens from the "Archived chats" section. A checkbox that swapped
+the contents of one list left no way of telling, from a row, which list you were in.
+Opening one navigates, which is Settings' sanctioned use of the router.
 
 **`/chat/:id` is parsed, not `Number()`d.** `api/chat.ts::parseSessionId(raw)` returns
 an id only for `/^\d+$/` and a positive safe integer; `Number('abc')` is `NaN` and
@@ -419,8 +481,8 @@ own, because a disabled query never errors.
 drives an effect that abandons the live turn, dispatches `reset` and calls
 `openSession(null, true)` — `navigate('/chat', {replace: true})` routed, a cleared
 `embeddedSessionId` embedded — and invalidates `sessionsQueryKey`, because the
-likeliest 404 is a chat deleted from another tab and the drawer's cached row would
-otherwise bounce the user for the 30 s of `staleTime`. Only a 404: a backend that is
+likeliest 404s are a chat deleted from another tab and one deleted from the rail's own
+list, and the cached row would otherwise bounce the user for the 30 s of `staleTime`. Only a 404: a backend that is
 down keeps today's error on screen. The detail query overrides the app-wide
 `retry: 1` with `retry: (n, e) => !isNotFound(e) && n < 1`, or a dead id is asked for
 twice and the redirect waits out the backoff under the dead URL.
@@ -435,8 +497,9 @@ the turn and its Stop button on screen with no id in the URL.
 **A turn that is left behind must be disowned, not forgotten.** `reset` alone cleared
 `streaming`, so the composer re-enabled while the reader ran on; the abandoned reader's
 `finally` then nulled the *replacement* turn's controller and dispatched `settle`, wiping a
-live question off the screen mid-stream. Every leave path — `newChat`, the history drawer,
-deleting the open session, the foreign-session effect and a second `send` — goes through
+live question off the screen mid-stream. Every leave path — `newChat`, the
+foreign-session effect (which is how opening another chat from the rail arrives), the
+missing-session effect and a second `send` — goes through
 `ChatPage.abandonTurn`, which aborts the reader and bumps a token. It does **not**
 cancel: the turn is the session's and keeps running (deleting the session is the
 exception, and there the server cancels it). `LiveTurn.token` carries the token, and the
@@ -468,15 +531,16 @@ hand-rolled `.prose-chat` block in `src/index.css`, deliberately instead of
 
 ## Tests
 
-`npx vitest run` — **11 files, 187 tests**, `environment: 'node'` with
+`npx vitest run` — **11 files, 188 tests**, `environment: 'node'` with
 **`TZ` pinned to `UTC`** (`test.env` in `vite.config.ts`: the backend sends naive UTC and
 the app renders the viewer's *local* day of it, so a test that asserts an instant would
 otherwise assert the machine's offset, and UTC+13/+14 roll a midday stamp over to the next
 day), so only pure modules are covered: `lib/sse.test.ts` (frames split across chunks,
 multi-line data, heartbeats ignored, a 204 raised as `SSEHttpError` rather than read as an
 empty stream, and a `GET` attachment sending no body), `api/chat.test.ts` (`blocksToText`,
-`groupTurns`, `parseSessionId`, `stepsFromMessage`, `toolCallStatus`, source extraction,
-the sandbox card, `resendPayload` and the attachment lines it reads back, the formatters),
+`groupTurns`, `groupSessionsByDay`, `parseSessionId`, `stepsFromMessage`,
+`toolCallStatus`, source extraction, the sandbox card, `resendPayload` and the
+attachment lines it reads back, the formatters),
 `components/chat/liveTurn.test.ts` (`isForeignSession`, `shouldAttach`, `turnsBesideLive`,
 `attach` + `turn_started` + `lastTurnId`'s replay guard, the streamed server-tool input,
 the `activity` transitions, turn scoping, `activityLabel`, `showsProgress`,
@@ -485,8 +549,9 @@ the `activity` transitions, turn scoping, `activityLabel`, `showsProgress`,
 `api/inbox.test.ts`, `components/ui/preferences.test.ts` (`parseStoredTheme`/
 `resolveTheme`, `parseRail`, `parseLayout`/`pageFromPath`),
 `components/ui/searchKeys.test.ts` (the shared overlay keyboard model),
-`components/ui/modal.test.ts` (`isOutside`, against `contains` stubs — there is no
-DOM here, which is the point), `api/client.test.ts` (`isNotFound`),
+`components/ui/menuPosition.test.ts` (fits below, flips above, clamps — there is no DOM
+here, which is the point: the caller measures, the function decides),
+`api/client.test.ts` (`isNotFound`),
 `components/notes/excerpt.test.ts` and `lib/ids.test.ts`.
 
 Component and E2E tests are deliberately out of scope — **do not add a jsdom
@@ -498,7 +563,9 @@ component.
 
 **...a page.** Create `src/pages/X.tsx` taking `EmbeddablePageProps`, wrap it in
 `Page`, add a `<Route>` in `App.tsx`, a `PageKey` + label + route in `ui/layout.ts`, a
-`case` in `ui/PageHost.tsx` and an icon in `Rail.tsx`'s `NAV_ICONS`. Components go in
+`case` in `ui/PageHost.tsx` and an icon in `Rail.tsx`'s `NAV_ICONS`. It joins the rail's
+top nav automatically (`TOP_NAV` is `PAGE_KEYS` minus `settings`, which sits in the
+bottom group with the theme and collapse toggles). Components go in
 `src/components/x/`.
 
 **...an endpoint call.** Add the interface + query key + request function to the
