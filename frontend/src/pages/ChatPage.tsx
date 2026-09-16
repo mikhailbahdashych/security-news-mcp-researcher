@@ -12,6 +12,7 @@ import {
   formatTokens,
   groupTurns,
   renameSession,
+  resendPayload,
   runningSessionsKey,
   sessionQueryKey,
   sessionsListKey,
@@ -29,6 +30,7 @@ import AnswerTurn from '../components/chat/AnswerTurn'
 import Composer from '../components/chat/Composer'
 import EmptyResearch from '../components/chat/EmptyResearch'
 import HistoryDrawer from '../components/chat/HistoryDrawer'
+import InterruptedNotice from '../components/chat/InterruptedNotice'
 import TurnError from '../components/chat/TurnError'
 import {
   emptyTurn,
@@ -381,6 +383,20 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
     [abandonTurn, attach, attached, openSession, queryClient, sessionId],
   )
 
+  /**
+   * Ask the interrupted question again, exactly as it was asked.
+   *
+   * Read back off the stored user row rather than kept in state: the restart
+   * that cut the turn short took this page's memory of it with it, and the row
+   * is the only record of which items were pinned.
+   */
+  const resend = useCallback(() => {
+    const payload = resendPayload(messages ?? [])
+    if (payload) {
+      void send(payload.content, payload.attached_item_ids)
+    }
+  }, [messages, send])
+
   const stop = useCallback(() => {
     // Cancelling is the whole of Stop now. Disconnecting stops nothing — the
     // turn is the server's — and aborting the reader here would also throw away
@@ -545,6 +561,10 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
               ) : null}
 
               {settledError ? <TurnError error={settledError} /> : null}
+
+              {turnStatus === 'interrupted' && !live.streaming ? (
+                <InterruptedNotice onResend={resend} busy={live.streaming} />
+              ) : null}
 
               <div ref={bottom} />
             </div>
