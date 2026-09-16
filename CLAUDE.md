@@ -59,7 +59,10 @@ Prerequisites: [uv](https://docs.astral.sh/uv/) and Node 22+.
 **Database.** SQLite at `backend/data/app.db` in dev (`/data/app.db` in Docker),
 gitignored. It holds the Anthropic key, feeds, items, transcripts, notes and MCP
 config. There is **no Alembic**: the whole schema is `Base.metadata.create_all` at
-startup, so **a schema change means deleting `backend/data/app.db`** in dev.
+startup, and a **new column** is added to an existing database by
+`app/db/init.py::ADDED_COLUMNS` (an `ALTER TABLE ADD COLUMN` per missing column, run by
+`init_db`). List it there when you add one — never tell anyone to delete the database;
+it holds their key, their feeds and their history.
 
 **`.env`.** Copy `.env.example` → `.env`. `app.config.Settings` reads it via
 pydantic-settings (`env_file=("../.env", ".env")`, so it works whether you run from
@@ -173,10 +176,16 @@ handler and was dropped.
   The frontend re-appends `Z` (`frontend/src/lib/dates.ts::parseUtc`).
 - SQLite runs in **WAL** with `busy_timeout=5000` and `foreign_keys=ON`. Docker uses a
   **named volume**, never a bind mount (macOS bind mounts break SQLite locking).
+- **A research turn is a session-owned task** (`app.agent.turns`) that outlives the
+  request: `POST /messages` answers 202 and pages attach with `GET /sessions/{id}/stream`,
+  which replays the turn from its first event. Leaving the stream never stops the turn;
+  only Stop does. The only refetch trigger for "is anything running" is window focus and
+  the page's own events — still no poller.
 - **A yield-dependency is finalised before a streamed body is sent.** A streaming route
   must not use `get_anthropic_client`; it builds its own client from `ChatClientFactory`
   and closes it in the stream's `finally`. Both streaming routes share
-  `app/api/streaming.py` (`pump_agent_events`, `SSE_PING_S`, `SSE_HEADERS`).
+  `app/api/streaming.py` (`stream_turn_log` for a chat turn, `pump_agent_events` for a
+  note generation, `SSE_PING_S`, `SSE_HEADERS`).
 - **The outbound `User-Agent` must never claim to be a browser.** It is the honest
   robot form `Mozilla/5.0 (compatible; SecurityNewsResearcher/0.1; +<repo>)`
   (`app/services/http.py::USER_AGENT`). A Chrome string over an OpenSSL handshake is

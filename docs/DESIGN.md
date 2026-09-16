@@ -136,7 +136,7 @@ Dockerfile docker-compose.yaml Makefile .env.example
 > - `frontend/src/components/ui/` *was* eventually built, by the redesign rather than by
 >   the original plan — see "Frontend redesign".
 
-### Data model (SQLite, all tables land in PR 2 → no Alembic; delete data/app.db on dev schema change)
+### Data model (SQLite, all tables land in PR 2 → no Alembic; a later column goes in `init.py::ADDED_COLUMNS`)
 
 - `feeds` (url unique, enabled, last_fetched_at, last_error)
 - `feed_items` (feed_id FK, guid, url, title, summary, content_text, published_at, status ∈ unread/starred/dismissed, UNIQUE(feed_id,guid))
@@ -163,8 +163,11 @@ Search = `LIKE '%q%'` (single user, thousands of rows; no FTS5).
 >   **sets `notes.session_id` to NULL**; deleting a note takes its `note_sources`;
 >   deleting a feed item leaves the `note_sources` row with a NULL `feed_item_id` and
 >   its stored `url`/`title`, so a note never loses a citation.
-> - **No Alembic, still.** `Base.metadata.create_all` at startup; a schema change means
->   deleting `backend/data/app.db` in dev.
+> - **No Alembic, still.** `Base.metadata.create_all` at startup — plus
+>   `app/db/init.py::ADDED_COLUMNS`, a table of the columns added after a table shipped,
+>   which `init_db` adds to an existing file with `ALTER TABLE ADD COLUMN`. A new column
+>   is therefore a line in that table, not "delete `backend/data/app.db`": the file holds
+>   the user's key, feeds, transcripts and notes.
 > - The `LIKE` rule is centralised in `app/db/util.py`: `matches(column, value)` builds
 >   `column LIKE '%value%' ESCAPE '\'` with `%`, `_` and `\` escaped, so a search for
 >   `100%` or `log4j_rce` means what it says. Plain `LIKE`, not `ilike()` — SQLite's
@@ -184,6 +187,15 @@ Search = `LIKE '%q%'` (single user, thousands of rows; no FTS5).
 
 > **Implementation notes.**
 >
+> - **A chat turn is no longer the request.** `POST /api/sessions/{id}/messages` hands the
+>   runner to `app.agent.turns.TurnRegistry` and answers **202** (`turn_id`, `session_id`,
+>   `started_at`); the turn runs as a session-owned task, `GET /api/sessions/{id}/stream`
+>   replays its log from the first event and then tails it (204 when nothing is running),
+>   and `GET /api/sessions/running` says which sessions are busy. A disconnect detaches a
+>   subscriber; only `POST /cancel` stops a turn. `research_sessions.turn_status`
+>   (`idle` | `running` | `interrupted`) is what a reloaded page reads to know whether to
+>   attach; rows left `running` by a dead process are flipped to `interrupted` at startup.
+>   Note generation still streams from its POST.
 > - **The two streaming routes share `app/api/streaming.py`**: `SSE_PING_S = 15`,
 >   `SSE_HEADERS` (`Cache-Control: no-cache`, `X-Accel-Buffering: no`) and
 >   `pump_agent_events`, which drives the runner inside a registered `asyncio.Task`,
