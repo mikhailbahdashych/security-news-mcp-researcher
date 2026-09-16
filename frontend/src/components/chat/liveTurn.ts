@@ -495,13 +495,23 @@ export interface LiveStepsContext {
  * it. An empty object is truthy, so preferring `input` meant a live `web_search`
  * row never showed its query and a `code_execution` row never showed its code —
  * both only appeared after a reload put the stored row on screen.
+ *
+ * A call still `running` with nothing parsed yet returns **null**, the
+ * `ToolStepSpec.input` contract for "still arriving": an empty object is a
+ * statement that the tool was called with no arguments, which for a sandbox
+ * block is rendered as `container start` and would be a lie about a block whose
+ * code is on the wire. Once the call has settled an empty input really is one.
  */
-function streamedInput(step: LiveTool): Record<string, unknown> {
+function streamedInput(step: LiveTool): Record<string, unknown> | null {
   const streamed = parseObject(step.partialJson)
   if (streamed && Object.keys(streamed).length > 0) {
     return streamed
   }
-  return step.input ?? {}
+  const opened = step.input
+  if (opened && Object.keys(opened).length > 0) {
+    return opened
+  }
+  return step.status === 'running' ? null : (opened ?? null)
 }
 
 /**

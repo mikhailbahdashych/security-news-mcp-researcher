@@ -574,8 +574,24 @@ describe('the sandbox card', () => {
     expect(sandboxStep({}).hint).toBe('container start')
   })
 
-  it('says nothing while the arguments are still streaming', () => {
+  it('says nothing before a single fragment has arrived', () => {
     expect(sandboxStep(null).hint).toBe('')
+  })
+
+  it('does not claim a container start while the code is still arriving', () => {
+    // `container start` is what an input-*less* block means. A block whose
+    // fragments have not concatenated into JSON yet has arguments — they are
+    // simply still on the wire, and saying the opposite reads as a fact.
+    const step = toolStep({
+      key: 'live-5',
+      name: 'code_execution',
+      source: 'server',
+      input: null,
+      rawInput: '{"code": "import js',
+      status: 'running',
+    })
+    expect(step.hint).toBe('…')
+    expect(step.args).toBe('{"code": "import js')
   })
 
   it('shows what the code printed, and never the encrypted copy', () => {

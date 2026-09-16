@@ -83,6 +83,34 @@ describe('server tool input', () => {
     expect(step.hint).toBe('"kev catalog"')
   })
 
+  it('does not read a half-written sandbox block as an empty one', () => {
+    // `{}` is what the API opens the block with; the code follows as fragments.
+    // Treating the opening as the arguments made every live sandbox row say
+    // `container start` — the one thing it demonstrably was not doing.
+    const live = apply([
+      START,
+      sse('server_tool_use', { tool_use_id: 'srvtoolu_3', name: 'code_execution', input: {} }),
+      sse('tool_use_input', { tool_use_id: 'srvtoolu_3', partial_json: '{"code": "import js' }),
+    ])
+    const [step] = stepsOf(live.steps)
+    expect(step.hint).toBe('…')
+  })
+
+  it('reads a settled sandbox block with no input at all as a container start', () => {
+    const live = apply([
+      START,
+      sse('server_tool_use', { tool_use_id: 'srvtoolu_4', name: 'code_execution', input: {} }),
+      sse('server_tool_result', {
+        tool_use_id: 'srvtoolu_4',
+        name: 'code_execution',
+        is_error: false,
+        results: { content: { content: [], return_code: 0, stdout: '', stderr: '' } },
+      }),
+    ])
+    const [step] = stepsOf(live.steps)
+    expect(step.hint).toBe('container start')
+  })
+
   it('still shows nothing for a local tool whose input has not arrived', () => {
     const live = apply([
       START,

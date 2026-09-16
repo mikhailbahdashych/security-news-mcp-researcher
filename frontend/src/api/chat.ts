@@ -496,6 +496,17 @@ export function toolHint(source: string | null, name: string | null, input: unkn
   return scalars.map(([key, value]) => `${key}: ${value}`).join(' · ')
 }
 
+/**
+ * What a collapsed row says while its arguments are still on the wire.
+ *
+ * `input_json_delta` fragments are not JSON until the last one lands, so there
+ * is no key to read out of them — but a blank hint over a buffer that is
+ * visibly filling reads as "this tool was called with nothing".
+ */
+function streamingHint(raw: string | null | undefined): string {
+  return raw && raw.trim() !== '' ? '…' : ''
+}
+
 /** The first non-empty line, collapsed and cut to `limit`. */
 export function firstLine(text: string, limit = 200): string {
   const line = text.split('\n').find((candidate) => candidate.trim() !== '') ?? ''
@@ -783,7 +794,7 @@ export function toolStep(spec: ToolStepSpec): TurnStep {
     // names for one thing the user cares about: the model's sandbox.
     name: isSandboxTool(spec.source, spec.name) ? 'Sandbox' : (spec.name ?? 'tool'),
     tag: toolTag(spec.source, spec.name, spec.serverName),
-    hint: toolHint(spec.source, spec.name, spec.input),
+    hint: toolHint(spec.source, spec.name, spec.input) || streamingHint(spec.rawInput),
     status: spec.status,
     durationMs: spec.durationMs ?? null,
     body: isSandboxTool(spec.source, spec.name) ? SANDBOX_NOTE : null,
