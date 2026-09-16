@@ -7,6 +7,8 @@ import Markdown from './Markdown'
 import SourcesGrid from './SourcesGrid'
 import StepsCard from './StepsCard'
 import TurnError from './TurnError'
+import TurnProgress from './TurnProgress'
+import type { ActiveTool, LiveActivity } from './liveTurn'
 
 export interface AnswerTurnProps {
   question: string
@@ -18,6 +20,11 @@ export interface AnswerTurnProps {
   followUp: boolean
   /** The turn currently on the wire. */
   streaming?: boolean
+  /** What the live turn is doing. A stored turn has none and shows no line. */
+  activity?: LiveActivity
+  activeTool?: ActiveTool | null
+  /** `Date.now()` when the live turn started, for the elapsed counter. */
+  startedAt?: number
 }
 
 function AttachedChip({ attachment }: { attachment: TurnAttachment }) {
@@ -67,6 +74,9 @@ function AnswerTurn({
   error,
   followUp,
   streaming = false,
+  activity,
+  activeTool = null,
+  startedAt = 0,
 }: AnswerTurnProps) {
   const sources = useMemo(() => collectSources(steps), [steps])
   const Heading = followUp ? 'h3' : 'h2'
@@ -93,16 +103,17 @@ function AnswerTurn({
       ) : null}
 
       <StepsCard steps={steps} />
+
+      {/* Directly under the steps, where the eye already is. Hidden while text
+          is flowing: the answer appearing word by word is its own progress
+          report, and a spinner over it would only compete. */}
+      {streaming && activity !== undefined && activity !== 'writing' ? (
+        <TurnProgress activity={activity} activeTool={activeTool} startedAt={startedAt} />
+      ) : null}
+
       <SourcesGrid sources={sources} />
 
       {answer ? <Markdown sources={sources}>{answer}</Markdown> : null}
-
-      {streaming && !answer && steps.length === 0 ? (
-        <p className="flex items-center gap-2 text-[12px] text-faint">
-          <Icon name="spinner" size={13} />
-          Working…
-        </p>
-      ) : null}
 
       {error ? <TurnError error={error} /> : null}
     </article>

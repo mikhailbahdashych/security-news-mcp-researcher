@@ -1,4 +1,5 @@
 import {
+  isSandboxTool,
   thinkingStep,
   toolStep,
   type DeltaPayload,
@@ -44,6 +45,28 @@ export interface LiveTool {
 export type LiveStep = LiveThinking | LiveTool
 
 /**
+ * What the turn is doing right now, in the order it tends to happen.
+ *
+ * Settled steps show ticks and a finished tool row looks exactly like one that
+ * is about to be followed by twenty seconds of silent reasoning, so without
+ * this there was nothing on screen saying the turn was still alive.
+ */
+export type LiveActivity = 'starting' | 'thinking' | 'tool' | 'reading' | 'writing'
+
+/**
+ * The tool the turn is waiting on.
+ *
+ * Carries `toolUseId` as well as the two fields the label needs: parallel calls
+ * are the norm, so a result only clears this when it is the answer to *this*
+ * call rather than to a sibling that finished first.
+ */
+export interface ActiveTool {
+  toolUseId: string
+  name: string
+  source: string
+}
+
+/**
  * The in-flight turn.
  *
  * Only what is on the wire right now lives here; once `done` arrives the page
@@ -83,6 +106,11 @@ export interface LiveTurn {
   error: ErrorPayload | null
   turn: number
   usage: { input_tokens?: number; output_tokens?: number } | null
+  /** What the turn is doing, for the progress line under the steps card. */
+  activity: LiveActivity
+  activeTool: ActiveTool | null
+  /** `Date.now()` when `start` was dispatched, for the elapsed counter. */
+  startedAt: number
 }
 
 export const emptyTurn: LiveTurn = {
@@ -95,10 +123,13 @@ export const emptyTurn: LiveTurn = {
   error: null,
   turn: 0,
   usage: null,
+  activity: 'starting',
+  activeTool: null,
+  startedAt: 0,
 }
 
 export type LiveAction =
-  | { kind: 'start'; prompt: string; sessionId: number }
+  | { kind: 'start'; prompt: string; sessionId: number; startedAt: number }
   | { kind: 'sse'; event: string; payload: unknown }
   | { kind: 'failed'; error: ErrorPayload }
   | { kind: 'settle' }
@@ -115,6 +146,21 @@ export type LiveAction =
  */
 const RENDERED_BY_TRANSCRIPT = new Set<ErrorPayload['type']>(['refusal', 'max_tokens'])
 
+/**
+ * The activity fields a tool result moves on.
+ *
+ * The model now has the answer and is deciding what to do with it, which is the
+ * one moment nothing else is on the wire. `activeTool` only clears when the
+ * result belongs to the call being waited on — calls run in parallel, and a
+ * sibling coming back first does not mean the turn stopped waiting.
+ */
+function settledBy(state: LiveTurn, toolUseId: string): Pick<LiveTurn, 'activity' | 'activeTool'> {
+  return {
+    activity: 'reading',
+    activeTool: state.activeTool?.toolUseId === toolUseId ? null : state.activeTool,
+  }
+}
+
 function patchTool(steps: LiveStep[], toolUseId: string, patch: Partial<LiveTool>): LiveStep[] {
   return steps.map((step) =>
     step.kind === 'tool' && step.toolUseId === toolUseId ? { ...step, ...patch } : step,
@@ -126,7 +172,13 @@ export function liveTurnReducer(state: LiveTurn, action: LiveAction): LiveTurn {
     case 'reset':
       return emptyTurn
     case 'start':
-      return { ...emptyTurn, sessionId: action.sessionId, prompt: action.prompt, streaming: true }
+      return {
+        ...emptyTurn,
+        sessionId: action.sessionId,
+        prompt: action.prompt,
+        streaming: true,
+        startedAt: action.startedAt,
+      }
     case 'failed':
       return { ...state, streaming: false, error: action.error }
     case 'settle':
@@ -153,6 +205,9 @@ export function liveTurnReducer(state: LiveTurn, action: LiveAction): LiveTurn {
         // otherwise the answer visibly reflows the moment the turn settles.
         text: state.text === '' ? '' : `${state.text}\n\n`,
         interrupted: false,
+        // Only the first turn is news. The tool loop and `pause_turn` both emit
+        // this again, and the model has not gone back to a blank page.
+        activity: state.activity === 'starting' ? 'thinking' : state.activity,
       }
     case 'thinking_delta': {
       // Deltas are contiguous within a block, so appending to a trailing
@@ -164,12 +219,14 @@ export function liveTurnReducer(state: LiveTurn, action: LiveAction): LiveTurn {
         return {
           ...state,
           interrupted: true,
+          activity: 'thinking',
           steps: [...state.steps.slice(0, -1), { ...last, text: last.text + text }],
         }
       }
       return {
         ...state,
         interrupted: true,
+        activity: 'thinking',
         steps: [...state.steps, { kind: 'thinking', key: `think-${state.steps.length}`, text }],
       }
     }
@@ -180,13 +237,20 @@ export function liveTurnReducer(state: LiveTurn, action: LiveAction): LiveTurn {
       // paragraph.
       const delta = (payload as DeltaPayload).text
       const gap = state.interrupted && state.text !== '' && !state.text.endsWith('\n\n')
-      return { ...state, text: gap ? `${state.text}\n\n${delta}` : state.text + delta, interrupted: false }
+      return {
+        ...state,
+        text: gap ? `${state.text}\n\n${delta}` : state.text + delta,
+        interrupted: false,
+        activity: 'writing',
+      }
     }
     case 'tool_use_start': {
       const start = payload as ToolUseStartPayload
       return {
         ...state,
         interrupted: true,
+        activity: 'tool',
+        activeTool: { toolUseId: start.tool_use_id, name: start.name, source: start.source },
         steps: [
           ...state.steps,
           {
@@ -218,6 +282,7 @@ export function liveTurnReducer(state: LiveTurn, action: LiveAction): LiveTurn {
       const result = payload as ToolResultPayload
       return {
         ...state,
+        ...settledBy(state, result.tool_use_id),
         steps: patchTool(state.steps, result.tool_use_id, {
           status: result.is_error ? 'error' : 'ok',
           preview: result.preview,
@@ -232,6 +297,8 @@ export function liveTurnReducer(state: LiveTurn, action: LiveAction): LiveTurn {
       return {
         ...state,
         interrupted: true,
+        activity: 'tool',
+        activeTool: { toolUseId: use.tool_use_id, name: use.name, source: 'server' },
         steps: [
           ...state.steps,
           {
@@ -255,6 +322,7 @@ export function liveTurnReducer(state: LiveTurn, action: LiveAction): LiveTurn {
       const result = payload as ServerToolResultPayload
       return {
         ...state,
+        ...settledBy(state, result.tool_use_id),
         steps: patchTool(state.steps, result.tool_use_id, {
           status: result.is_error ? 'error' : 'ok',
           results: result.results,
@@ -291,6 +359,65 @@ export function liveTurnReducer(state: LiveTurn, action: LiveAction): LiveTurn {
  */
 export function isForeignSession(live: LiveTurn, routeSessionId: number | null): boolean {
   return routeSessionId !== null && live.sessionId !== null && live.sessionId !== routeSessionId
+}
+
+/** The progress line's wording, for `activity` and whatever it is waiting on. */
+export function activityLabel(
+  activity: LiveActivity,
+  activeTool: { name: string; source: string } | null,
+): string {
+  switch (activity) {
+    case 'starting':
+      return 'Starting…'
+    case 'thinking':
+      return 'Thinking…'
+    case 'reading':
+      return 'Reading results…'
+    case 'writing':
+      return 'Writing the answer…'
+    case 'tool':
+      break
+  }
+  if (!activeTool) {
+    return 'Working…'
+  }
+  const { name, source } = activeTool
+  if (name === 'web_search') {
+    return 'Searching the web…'
+  }
+  if (name === 'web_fetch') {
+    return 'Fetching a page…'
+  }
+  if (isSandboxTool(name)) {
+    return 'Running code in the sandbox…'
+  }
+  if (name === 'search_feed_items') {
+    return 'Searching the inbox…'
+  }
+  if (name === 'get_feed_item') {
+    return 'Opening an item…'
+  }
+  if (name === 'fetch_article') {
+    return 'Fetching an article…'
+  }
+  if (source === 'mcp') {
+    // The registered name is `mcp__<server>__<tool>`; the SSE frame carries no
+    // server column of its own.
+    const parts = /^mcp__([^_]+(?:_[^_]+)*?)__(.+)$/.exec(name)
+    if (parts) {
+      return `Calling ${parts[2]} on ${parts[1]}…`
+    }
+  }
+  return `Calling ${name}…`
+}
+
+/** `12s`, then `1m 05s`. Seconds are padded so the line stops jittering. */
+export function formatElapsed(seconds: number): string {
+  const total = Math.max(0, Math.floor(seconds))
+  if (total < 60) {
+    return `${total}s`
+  }
+  return `${Math.floor(total / 60)}m ${String(total % 60).padStart(2, '0')}s`
 }
 
 function parseObject(raw: string): Record<string, unknown> | null {

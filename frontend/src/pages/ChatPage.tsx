@@ -206,7 +206,7 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
 
       const itemIds = attached.map((item) => item.id)
       setAttached([])
-      dispatch({ kind: 'start', prompt: text, sessionId: id })
+      dispatch({ kind: 'start', prompt: text, sessionId: id, startedAt: Date.now() })
 
       const controller = new AbortController()
       abort.current = controller
@@ -401,6 +401,9 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
                   error={live.error}
                   followUp={turns.length > 0}
                   streaming={live.streaming}
+                  activity={live.activity}
+                  activeTool={live.activeTool}
+                  startedAt={live.startedAt}
                 />
               ) : null}
 
