@@ -12,6 +12,7 @@ import {
   formatTokens,
   groupTurns,
   messagesUrl,
+  parseSessionId,
   renameSession,
   sessionQueryKey,
   sessionsListKey,
@@ -20,6 +21,7 @@ import {
   type ErrorPayload,
   type SessionFilters,
 } from '../api/chat'
+import { isNotFound } from '../api/client'
 import { useFeedTitlesFromCache, type FeedItem } from '../api/inbox'
 import { fetchSettings, settingsQueryKey } from '../api/settings'
 import AnswerTurn from '../components/chat/AnswerTurn'
@@ -56,7 +58,12 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
   // view's right pane) the URL belongs to the other pane, so it is local state
   // and every "open this session" goes through `openSession` instead.
   const [embeddedSessionId, setEmbeddedSessionId] = useState<number | null>(null)
-  const sessionId = embedded ? embeddedSessionId : params.id ? Number(params.id) : null
+  // `parseSessionId`, not `Number()`: the router matches `:id` against anything,
+  // and `Number('abc')` is `NaN`, `Number('1.5')` is `1.5`. Those went to the API
+  // and came back 422, which the 404 path below cannot act on. Null here keeps
+  // the detail query disabled, so the bad request is never made at all.
+  const routeSessionId = parseSessionId(params.id)
+  const sessionId = embedded ? embeddedSessionId : routeSessionId
 
   const openSession = useCallback(
     (id: number | null, replace = false) => {
@@ -86,6 +93,10 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
   const turnSeq = useRef(0)
   const scroller = useRef<HTMLDivElement>(null)
   const bottom = useRef<HTMLDivElement>(null)
+  // The drawer closes on a click outside itself, and the button that opens it is
+  // not "outside" — otherwise pressing it while open closes and reopens the
+  // drawer in one gesture.
+  const historyButton = useRef<HTMLButtonElement>(null)
 
   /**
    * Leave the turn on the wire: stop it, stop it being billed, and disown it.
@@ -135,6 +146,11 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
     queryKey: sessionQueryKey(sessionId ?? 0),
     queryFn: () => fetchSession(sessionId as number),
     enabled: sessionId !== null,
+    // The app-wide default is `retry: 1`, which asked a known-dead id for a
+    // second time and delayed the redirect below by the ~1 s backoff — long
+    // enough to show the empty new-chat view under the dead URL. A 404 is an
+    // answer, not a blip; everything else still gets its one retry.
+    retry: (failureCount, error) => !isNotFound(error) && failureCount < 1,
   })
 
   // The configured model, for the composer's "what will answer this" line. The
@@ -156,6 +172,49 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
       dispatch({ kind: 'reset' })
     }
   }, [abandonTurn, liveSession, staleSession])
+
+  // ...and an id the router accepted but nothing could ever have owned goes back
+  // to `/chat` on its own, since a disabled query never errors and the page would
+  // otherwise render the empty new-chat view under a URL that says `/chat/abc`.
+  // Routed only: the embedded pane does not read the URL, and the id it does read
+  // is a number already. There is no live state to drop — a route that never
+  // named a session cannot have started a turn on one.
+  const badRouteId = !embedded && params.id !== undefined && routeSessionId === null
+  useEffect(() => {
+    if (badRouteId) {
+      navigate('/chat', { replace: true })
+    }
+  }, [badRouteId, navigate])
+
+  // A session that is not there — a hand-typed id, a stale bookmark, a tab left
+  // open while the chat was deleted from another one. The empty view under
+  // `/chat/999` looks like a working new chat until you send into it and the
+  // POST 404s too, so the page goes back to `/chat` (replace: the dead id does
+  // not deserve a history entry) and drops the live state with it. Only a 404:
+  // every other failure keeps the error on screen, because a backend that is
+  // down is not a session that is gone.
+  //
+  // The sessions list is refreshed too. The likeliest source of a 404 is the chat
+  // having been deleted from another tab, and the drawer's cached list — 30 s of
+  // `staleTime` — still holds the row: without this, clicking it bounces the user
+  // back to `/chat` with no explanation, and clicking it again does the same.
+  const missingSession = isNotFound(detail.error)
+  useEffect(() => {
+    if (!missingSession) {
+      return
+    }
+    void queryClient.invalidateQueries({ queryKey: sessionsQueryKey })
+    abandonTurn(liveSession)
+    dispatch({ kind: 'reset' })
+    // Routed: navigate. Embedded: the URL belongs to the other pane, so this
+    // clears the local selection instead — `openSession` owns that fork, and in
+    // that mode it is a `setState`. The server answering 404 is the external
+    // system this effect exists to synchronise with, and there is nothing to
+    // derive during render: the id being cleared is what the query that failed
+    // was keyed on, so clearing it is what stops the effect running again.
+    // oxlint-disable-next-line react/set-state-in-effect
+    openSession(null, true)
+  }, [abandonTurn, liveSession, missingSession, openSession, queryClient])
 
   // Clear the handover off the history entry so a reload does not re-attach.
   useEffect(() => {
@@ -333,6 +392,11 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
     }
   }, [live.sessionId, sessionId])
 
+  // Stable, because the drawer's Escape listener is subscribed to `document` for
+  // as long as this prop is unchanged: an inline arrow re-subscribed it on every
+  // render, and during a streaming turn this page renders many times a second.
+  const closeHistory = useCallback(() => setHistoryOpen(false), [])
+
   const newChat = useCallback(() => {
     abandonTurn(live.sessionId)
     dispatch({ kind: 'reset' })
@@ -386,6 +450,7 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
     <section className="relative flex h-full flex-col overflow-hidden bg-bg text-ink">
       <header className="flex h-[49px] shrink-0 items-center gap-2 border-b border-line px-4">
         <IconButton
+          ref={historyButton}
           icon="history"
           label="Chat history"
           size={16}
@@ -437,7 +502,8 @@ export default function ChatPage({ embedded = false }: EmbeddablePageProps) {
           onArchive={(id, archived) => archive.mutate({ id, archived })}
           onDelete={(id) => remove.mutateAsync(id).then(() => undefined)}
           onLoadMore={() => void sessions.fetchNextPage()}
-          onClose={() => setHistoryOpen(false)}
+          onClose={closeHistory}
+          openerRef={historyButton}
         />
       ) : null}
 

@@ -1074,35 +1074,55 @@ export function citationFor(
 }
 
 /**
- * How the history drawer dates a chat.
+ * The session id a `/chat/:id` route names, or null when it names nothing that
+ * could be one.
  *
- * `now` is a parameter so the boundaries can be tested without freezing time;
- * every caller leaves it out.
+ * `Number()` is too generous to be the router's gate: `Number('abc')` is `NaN`,
+ * `Number('1.5')` is `1.5` and `Number('-3')` is `-3`, and all three used to be
+ * sent to the API, which answers **422** — not the 404 the missing-session path
+ * knows how to handle, so the page sat on a dead URL showing an error. Ids are
+ * SQLite rowids, so the whole of a valid one is digits and it is positive.
  */
-export function whenLabel(timestamp: string, now: Date = new Date()): string {
+export function parseSessionId(raw: string | undefined): number | null {
+  if (raw === undefined || !/^\d+$/.test(raw)) {
+    return null
+  }
+  const id = Number(raw)
+  return Number.isSafeInteger(id) && id > 0 ? id : null
+}
+
+const MONTHS = [
+  'Jan',
+  'Feb',
+  'Mar',
+  'Apr',
+  'May',
+  'Jun',
+  'Jul',
+  'Aug',
+  'Sep',
+  'Oct',
+  'Nov',
+  'Dec',
+] as const
+
+/**
+ * How the history drawer dates a chat: `16 Sep 2026`, always.
+ *
+ * Every row carries its exact date. "today" / "yesterday" / a weekday name read
+ * well for the top of the list and told you nothing for the rest of it — and a
+ * week's worth of rows all saying "Monday" is a list you cannot scan.
+ *
+ * Built from the parts rather than through `toLocaleDateString`, because that
+ * reorders the fields and translates the month to whatever the browser is set
+ * to: the same chat would be dated `16 Sept 2026`, `Sep 16, 2026` or
+ * `16 сен 2026` depending on the machine. Naive-UTC in, the viewer's own day
+ * out, as everywhere else in the app.
+ */
+export function whenLabel(timestamp: string): string {
   const when = parseUtc(timestamp)
   if (Number.isNaN(when.getTime())) {
     return ''
   }
-  const days = Math.round(
-    (startOfDay(now).getTime() - startOfDay(when).getTime()) / 86_400_000,
-  )
-  if (days <= 0) {
-    return 'today'
-  }
-  if (days === 1) {
-    return 'yesterday'
-  }
-  if (days < 7) {
-    return when.toLocaleDateString(undefined, { weekday: 'long' })
-  }
-  const sameYear = when.getFullYear() === now.getFullYear()
-  return when.toLocaleDateString(
-    undefined,
-    sameYear ? { month: 'short', day: 'numeric' } : { year: 'numeric', month: 'short', day: 'numeric' },
-  )
-}
-
-function startOfDay(date: Date): Date {
-  return new Date(date.getFullYear(), date.getMonth(), date.getDate())
+  return `${when.getDate()} ${MONTHS[when.getMonth()]} ${when.getFullYear()}`
 }

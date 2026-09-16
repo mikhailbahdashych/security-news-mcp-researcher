@@ -9,6 +9,10 @@ export default defineConfig({
     // Node is enough: the only unit tests are for the hand-rolled SSE parser.
     environment: 'node',
     include: ['src/**/*.test.ts'],
+    // Pin the zone. The backend stores naive UTC and the app renders the
+    // viewer's local day, so a date assertion is only reproducible against a
+    // known offset — `2026-09-16T12:00:00` is the 17th in UTC+13 and UTC+14.
+    env: { TZ: 'UTC' },
   },
   server: {
     proxy: {

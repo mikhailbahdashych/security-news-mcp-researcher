@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useEffectEvent, useRef, useState, type RefObject } from 'react'
 
 import { whenLabel, type ResearchSession } from '../../api/chat'
 import { ApiError } from '../../api/client'
@@ -9,6 +9,7 @@ import Icon from '../ui/Icon'
 import IconButton from '../ui/IconButton'
 import Input from '../ui/Input'
 import { cx } from '../ui/classes'
+import { isOutside } from '../ui/modal'
 
 interface HistoryDrawerProps {
   sessions: ResearchSession[]
@@ -30,6 +31,12 @@ interface HistoryDrawerProps {
   onDelete: (id: number) => Promise<void>
   onLoadMore: () => void
   onClose: () => void
+  /**
+   * The button that opened the drawer, so a click on it is not "outside".
+   * Without it the opener's `pointerdown` closes the drawer and its `click`
+   * reopens it, and the toggle never appears to do anything.
+   */
+  openerRef?: RefObject<HTMLButtonElement | null>
 }
 
 /**
@@ -57,7 +64,9 @@ export default function HistoryDrawer({
   onDelete,
   onLoadMore,
   onClose,
+  openerRef,
 }: HistoryDrawerProps) {
+  const panelRef = useRef<HTMLDivElement>(null)
   const [editingId, setEditingId] = useState<number | null>(null)
   const [menuId, setMenuId] = useState<number | null>(null)
   const [draft, setDraft] = useState('')
@@ -97,6 +106,49 @@ export default function HistoryDrawer({
     }
   }
 
+  /**
+   * What a click outside the drawer does: **save a rename in flight, then close**.
+   *
+   * Clicking away used to save, because the click blurred the title input and
+   * `onBlur` committed it. Closing on `pointerdown` took that away — the drawer
+   * unmounts before the browser moves focus, and an element removed from the DOM
+   * fires no `blur`, so the typed title vanished with no feedback. Saving is the
+   * behaviour to keep: the user typed it, and Escape is right there to discard.
+   * (Escape stays a one-layer-at-a-time unwind; clicking away closes outright,
+   * which is what the gesture asks for.)
+   *
+   * `useEffectEvent`, so the listener below sees the current `editingId` and
+   * `draft` without re-subscribing to `document` on every keystroke and every
+   * parent render.
+   */
+  const closeFromOutside = useEffectEvent(() => {
+    if (editingId !== null) {
+      commit(editingId)
+    }
+    onClose()
+  })
+
+  // A click anywhere else closes the drawer — the panel covers the left edge of
+  // the answer column, and reaching for the text under it had to go via the
+  // header button.
+  //
+  // `pointerdown`, in the capture phase, so the decision is made on the way down
+  // and before anything inside re-renders the node the event landed on: a
+  // `click` handler that removed its own row would leave a target no longer in
+  // the document, which `contains` reads as outside. Everything the drawer owns
+  // — the row menu, its dismissal overlay and the delete dialog — is a DOM child
+  // of the panel (nothing here renders into a portal), so one `contains` check
+  // covers all of it.
+  useEffect(() => {
+    const onPointerDown = (event: PointerEvent) => {
+      if (isOutside(event.target as Node | null, panelRef.current, openerRef?.current ?? null)) {
+        closeFromOutside()
+      }
+    }
+    document.addEventListener('pointerdown', onPointerDown, true)
+    return () => document.removeEventListener('pointerdown', onPointerDown, true)
+  }, [openerRef])
+
   const startEditing = (session: ResearchSession) => {
     setDraft(session.title ?? '')
     setEditingId(session.id)
@@ -131,6 +183,7 @@ export default function HistoryDrawer({
 
   return (
     <div
+      ref={panelRef}
       className="absolute top-[49px] bottom-0 left-0 z-20 flex w-[262px] flex-col border-r border-line bg-panel shadow-[8px_0_24px_rgba(0,0,0,0.06)]"
     >
       <div className="border-b border-line p-2.5">
