@@ -17,7 +17,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.schema import CreateColumn
 
 from app.config import Settings
-from app.db.engine import create_db_engine, create_session_factory
+from app.db.engine import create_db_engine, create_session_factory, extension_status
 from app.db.init import ADDED_COLUMNS, init_db
 from app.db.models import Base, Feed, FeedItem, Message, ResearchSession, Setting, utcnow
 from app.main import create_app
@@ -345,3 +345,49 @@ async def test_create_app_uses_the_injected_db_path(tmp_path: Path):
     assert stored == ("claude-sonnet-5",)
     # Shutdown released the engine.
     assert application.state.session_factory is None
+
+
+async def test_sqlite_vec_is_loaded_on_every_connection(db_engine):
+    """Every connection the engine hands out can create and query a vec0 table.
+
+    The KB's ``kb_chunk_vec`` is a ``vec0`` virtual table, so a connection without
+    the extension cannot read the schema at all — ``VACUUM`` and ``.dump`` fail on
+    the unknown module. The load therefore belongs to the engine's ``connect``
+    hook, beside the pragmas, and not to whichever code happens to want a vector.
+    """
+    async with db_engine.begin() as conn:
+        assert (await conn.execute(text("SELECT vec_version()"))).scalar_one().startswith("v0.1.")
+        await conn.execute(
+            text(
+                "CREATE VIRTUAL TABLE probe USING vec0(id INTEGER PRIMARY KEY, embedding float[4])"
+            )
+        )
+        await conn.execute(
+            text("INSERT INTO probe(id, embedding) VALUES (1, '[1,2,3,4]'), (2, '[9,9,9,9]')")
+        )
+        rows = (
+            await conn.execute(
+                text(
+                    "SELECT id FROM probe WHERE embedding MATCH '[1,2,3,4]' AND k = 2 "
+                    "ORDER BY distance"
+                )
+            )
+        ).all()
+
+    assert [row[0] for row in rows] == [1, 2]
+
+
+async def test_fts5_is_compiled_in(db_engine):
+    async with db_engine.connect() as conn:
+        options = {row[0] for row in (await conn.execute(text("PRAGMA compile_options"))).all()}
+
+    assert "ENABLE_FTS5" in options
+
+
+async def test_extension_status_reports_vec_and_fts5(db_session):
+    """The helper behind the Settings "index stats" panel."""
+    status = await extension_status(db_session)
+
+    assert status.vec_version.startswith("v0.1.")
+    assert status.fts5 is True
+    assert status.sqlite_version.count(".") == 2
