@@ -466,6 +466,36 @@ class KbService:
             activity=activity,
         )
 
+    async def current_text(self, entry_id: int) -> str:
+        """The entry's current snapshot text, or ``""``.
+
+        Deliberately not ``summary_md``: a compiled summary is model-written and
+        is never handed back to the model as evidence (spec §4.7). This is the
+        only text the chat tools are allowed to quote.
+        """
+        async with self.session_factory() as session:
+            entry = await session.get(KbEntry, entry_id)
+            if entry is None or entry.current_snapshot_id is None:
+                return ""
+            snapshot = await session.get(KbSnapshot, entry.current_snapshot_id)
+            return snapshot.text if snapshot is not None else ""
+
+    async def topic_by_name(self, name: str) -> Topic | None:
+        """Resolve a topic the model named. Exact, case-insensitive."""
+        wanted = (name or "").strip().lower()
+        if not wanted:
+            return None
+        async with self.session_factory() as session:
+            return await session.scalar(
+                select(Topic).where(func.lower(Topic.name) == wanted).limit(1)
+            )
+
+    async def topic_names(self) -> list[str]:
+        async with self.session_factory() as session:
+            return list(
+                (await session.execute(select(Topic.name).order_by(Topic.name))).scalars().all()
+            )
+
     async def facts(self, entries: Sequence[KbEntry]) -> dict[int, EntryFacts]:
         """Batched per-entry aggregates for a whole page."""
         async with self.session_factory() as session:

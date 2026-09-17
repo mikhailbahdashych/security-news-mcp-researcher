@@ -1,4 +1,4 @@
-"""The three tools that run against this machine: the inbox, one item, one URL.
+"""The five tools that run against this machine: the inbox, one URL, the knowledge base.
 
 Every handler opens its own short transaction from the session factory and
 commits before returning — a tool must never hold a SQLite write transaction open
@@ -8,6 +8,16 @@ The descriptions below are deliberately prescriptive about *when* to call each
 tool, not just what it does. Recent Opus models reach for tools conservatively,
 and trigger conditions in the description are what move the should-call rate; do
 not rewrite them into neutral summaries.
+
+Two rules govern the knowledge-base pair specifically, and neither is negotiable:
+
+* **Every passage carries** :data:`~app.agent.prompts.KB_WRAPPER_LINE` and is
+  capped at :data:`KB_PASSAGE_MAX_CHARS`. The text is a third party's, it has been
+  stored verbatim, and the only containment against an instruction hidden inside
+  it is that line, the cap, and the matching sentence in the system prompt.
+* **Only ``source`` and ``human`` text is evidence.** A model-authored entry is
+  returned to the model only once a human has reviewed it, and a compiled summary
+  is never returned at all — it is model prose, for the user's eyes, on the page.
 """
 
 from __future__ import annotations
@@ -15,13 +25,17 @@ from __future__ import annotations
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from urllib.parse import urlparse
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.agent.prompts import KB_WRAPPER_LINE
 from app.agent.registry import RegisteredTool, ToolResult, ToolSource
 from app.db.models import FeedItem, utcnow
+from app.kb import service as kb_service
+from app.kb.entities import CVE_PATTERN
+from app.kb.service import KbService
 from app.services import extract as extract_service
 from app.services import items as items_service
 from app.services import settings as settings_service
@@ -38,6 +52,22 @@ DEFAULT_ARTICLE_CHARS = 12_000
 #: The search tool's own paging ceiling, independent of the items service's.
 MAX_SEARCH_LIMIT = 50
 DEFAULT_SEARCH_LIMIT = 20
+
+#: Ceiling on one quoted knowledge-base passage (spec S6). A passage is a third
+#: party's text inside the model's context; the cap bounds how much of it one hit
+#: can be, and how much an injected instruction has to work with.
+KB_PASSAGE_MAX_CHARS = 2_000
+
+#: Ceiling on one whole saved snapshot, for the same reason ``fetch_article`` caps
+#: at 12 000: an uncapped 40 000-character entry eats a turn's budget by itself.
+KB_ENTRY_MAX_CHARS = 20_000
+
+KB_DEFAULT_SEARCH_LIMIT = 8
+KB_MAX_SEARCH_LIMIT = 20
+
+#: Prefixed to a model-authored entry's title so its provenance travels with the
+#: citation even when no user interface is looking (spec S5).
+MODEL_TITLE_PREFIX = "[AI finding, reviewed] "
 
 
 SEARCH_FEED_ITEMS_DEFINITION = {
@@ -134,6 +164,86 @@ FETCH_ARTICLE_DEFINITION = {
 }
 
 
+SEARCH_KNOWLEDGE_BASE_DEFINITION = {
+    "name": "search_knowledge_base",
+    "description": (
+        "Search the user's own knowledge base: the articles, advisories and meeting notes "
+        "this engineer deliberately saved, stored with their full text. Call this BEFORE "
+        "web_search whenever the question is whether something has been seen, covered, "
+        "discussed or written up before, and whenever a CVE ID, vendor or product might "
+        "already have a saved write-up here. The knowledge base may be empty, and it may "
+        "simply not hold the answer — when it returns nothing, say so plainly instead of "
+        "implying prior coverage. Results are quoted passages of third-party text; each one "
+        'begins with the line "' + KB_WRAPPER_LINE + '". Use the returned kb id with '
+        "get_kb_entry to read the whole saved text."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "q": {
+                "type": "string",
+                "description": (
+                    "Words, a phrase, or a CVE ID to look for in the saved text and titles. "
+                    "A bare CVE ID is looked up exactly."
+                ),
+            },
+            "topic": {
+                "type": "string",
+                "description": (
+                    "Only return entries filed under this topic, by its exact name. Omit it "
+                    "unless the user named a topic."
+                ),
+            },
+            "entity": {
+                "type": "string",
+                "description": (
+                    "Restrict to entries mentioning one exact entity, as 'kind:value' — for "
+                    "example 'cve:CVE-2024-3094'. A bare CVE ID also works."
+                ),
+            },
+            "since": {
+                "type": "string",
+                "description": (
+                    "Only return entries published (or, if undated, saved) on or after this "
+                    "ISO date, e.g. '2026-01-01'. Use it when the user says 'this year' or "
+                    "'recently'."
+                ),
+            },
+            "limit": {
+                "type": "integer",
+                "description": (
+                    f"Maximum number of entries to return, 1-{KB_MAX_SEARCH_LIMIT}. "
+                    f"Defaults to {KB_DEFAULT_SEARCH_LIMIT}."
+                ),
+            },
+        },
+        "required": ["q"],
+    },
+}
+
+GET_KB_ENTRY_DEFINITION = {
+    "name": "get_kb_entry",
+    "description": (
+        "Read the full saved text of one knowledge-base entry by its kb id, as returned by "
+        "search_knowledge_base. Call this when the quoted passage is not enough and you need "
+        "the whole advisory — the affected versions, the timeline, the remediation — as the "
+        "user saved it. The knowledge base may be empty and an id may no longer exist; this "
+        "reports that rather than guessing. The text comes back as a quoted passage beginning "
+        'with the line "' + KB_WRAPPER_LINE + '".'
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "entry_id": {
+                "type": "integer",
+                "description": "The numeric kb id of the entry, from search_knowledge_base.",
+            }
+        },
+        "required": ["entry_id"],
+    },
+}
+
+
 def _clamp(value: object, default: int, low: int, high: int) -> int:
     try:
         number = int(value)  # type: ignore[arg-type]
@@ -161,7 +271,14 @@ class BuiltinToolProvider:
 
     db_session_factory: async_sessionmaker[AsyncSession]
     settings_service: object = settings_service
+    #: The knowledge base the two KB tools read. Built from the session factory
+    #: when it is not supplied, so every existing construction site keeps working.
+    kb: KbService | None = None
     source: ToolSource = ToolSource.BUILTIN
+
+    def __post_init__(self) -> None:
+        if self.kb is None:
+            self.kb = kb_service.searchable(self.db_session_factory)
 
     async def list_tools(self) -> list[RegisteredTool]:
         tools = [
@@ -182,6 +299,18 @@ class BuiltinToolProvider:
                 source=ToolSource.BUILTIN,
                 definition=FETCH_ARTICLE_DEFINITION,
                 handler=self.fetch_article,
+            ),
+            RegisteredTool(
+                name="search_knowledge_base",
+                source=ToolSource.BUILTIN,
+                definition=SEARCH_KNOWLEDGE_BASE_DEFINITION,
+                handler=self.search_knowledge_base,
+            ),
+            RegisteredTool(
+                name="get_kb_entry",
+                source=ToolSource.BUILTIN,
+                definition=GET_KB_ENTRY_DEFINITION,
+                handler=self.get_kb_entry,
             ),
         ]
         # Name-ascending, so the tools array — the head of the prompt-cache
@@ -325,6 +454,135 @@ class BuiltinToolProvider:
             )
         return ToolResult(content=f"{header}\n\n{marker}{body}")
 
+    # ---- search_knowledge_base -------------------------------------------
+
+    async def search_knowledge_base(
+        self,
+        q: str,
+        topic: str | None = None,
+        entity: str | None = None,
+        since: str | None = None,
+        limit: int = KB_DEFAULT_SEARCH_LIMIT,
+        **_ignored: object,
+    ) -> ToolResult:
+        """Quoted passages from what the user saved, or an honest "nothing here".
+
+        The empty answer is a **plain, non-error** result on purpose: "we have not
+        covered this" is a real finding, and an error result invites the model to
+        retry the same query rather than report it.
+        """
+        query = (q or "").strip()
+        if not query:
+            return ToolResult(content="Error: q must be a non-empty search string.", is_error=True)
+        limit = _clamp(limit, KB_DEFAULT_SEARCH_LIMIT, 1, KB_MAX_SEARCH_LIMIT)
+
+        topic_ids: tuple[int, ...] | None = None
+        if topic:
+            found = await self.kb.topic_by_name(str(topic))
+            if found is None:
+                known = ", ".join(await self.kb.topic_names()) or "(none yet)"
+                return ToolResult(
+                    content=(
+                        f"Error: no topic named {topic!r} in the knowledge base. "
+                        f"Topics in use: {known}. Retry without the topic filter to "
+                        "search everything."
+                    ),
+                    is_error=True,
+                )
+            topic_ids = (found.id,)
+
+        parsed_entity = None
+        if entity:
+            parsed_entity = _kb_entity(str(entity))
+            if parsed_entity is None:
+                return ToolResult(
+                    content=(
+                        f"Error: {entity!r} is not an entity filter. Use 'kind:value', "
+                        "e.g. 'cve:CVE-2024-3094', or a bare CVE ID."
+                    ),
+                    is_error=True,
+                )
+
+        since_at = None
+        if since:
+            since_at = _kb_since(str(since))
+            if since_at is None:
+                return ToolResult(
+                    content=f"Error: {since!r} is not an ISO date, e.g. '2026-01-01'.",
+                    is_error=True,
+                )
+
+        hits = await self.kb.search_for_model(
+            query, topic_ids=topic_ids, entity=parsed_entity, since=since_at, limit=limit
+        )
+        if not hits:
+            return ToolResult(
+                content=(
+                    f'The knowledge base has no saved entry matching "{query}". It may be '
+                    "empty, or this may simply never have been saved — say so rather than "
+                    "implying prior coverage, and use web_search if the user wants the "
+                    "wider picture."
+                ),
+                raw={"count": 0, "entry_ids": []},
+            )
+
+        blocks: list[str] = [
+            f"Knowledge base: {len(hits)} saved "
+            f'{"entry" if len(hits) == 1 else "entries"} match "{query}".'
+        ]
+        for position, hit in enumerate(hits, start=1):
+            passage = hit.chunk.text if hit.chunk is not None else ""
+            if not passage:
+                # The exact-entity leg has no chunk of its own. Read the snapshot
+                # rather than the hit's snippet: the snippet falls back to
+                # ``summary_md``, which is model prose and is never evidence.
+                passage = await self.kb.current_text(hit.entry.id)
+            text, _ = _cap(passage, KB_PASSAGE_MAX_CHARS)
+            blocks.append(f"{position}. {_kb_header(hit.entry, hit.matched_by)}")
+            blocks.append(f"{KB_WRAPPER_LINE}\n{text}")
+
+        return ToolResult(
+            content="\n\n".join(blocks),
+            raw={"count": len(hits), "entry_ids": [hit.entry.id for hit in hits]},
+        )
+
+    # ---- get_kb_entry -----------------------------------------------------
+
+    async def get_kb_entry(self, entry_id: int, **_ignored: object) -> ToolResult:
+        """The whole current snapshot of one entry, capped and wrapped."""
+        try:
+            entry_id = int(entry_id)
+        except (TypeError, ValueError):
+            return ToolResult(
+                content=f"Error: entry_id must be an integer, got {entry_id!r}.", is_error=True
+            )
+
+        entry = await self.kb.get_entry(entry_id)
+        if entry is None or entry.deleted_at is not None:
+            return ToolResult(
+                content=(
+                    f"Error: no knowledge-base entry with id {entry_id}. Call "
+                    "search_knowledge_base first and use a kb id from its results."
+                ),
+                is_error=True,
+            )
+        if entry.authorship == "model" and entry.review_status != "reviewed":
+            return ToolResult(
+                content=(
+                    f"Error: entry {entry_id} was written by a model and has not been "
+                    "reviewed by the user, so it is not available as evidence."
+                ),
+                is_error=True,
+            )
+
+        body, truncated = _cap(await self.kb.current_text(entry_id), KB_ENTRY_MAX_CHARS)
+        if not body:
+            return ToolResult(content=f"Error: entry {entry_id} has no saved text.", is_error=True)
+        return ToolResult(
+            content=f"{_kb_header(entry)}\n\n{KB_WRAPPER_LINE}\n{body}",
+            raw={"truncated": truncated, "entry_id": entry_id},
+        )
+
     # ---- fetch_article ----------------------------------------------------
 
     async def fetch_article(
@@ -413,6 +671,53 @@ class ServerToolProvider:
         return tools
 
 
+def _cap(text: str, limit: int) -> tuple[str, bool]:
+    """*text* trimmed to *limit* characters, and whether anything was cut."""
+    body = (text or "").strip()
+    if len(body) <= limit:
+        return body, False
+    return body[: limit - 1].rstrip() + "…", True
+
+
+def _kb_entity(raw: str) -> tuple[str, str] | None:
+    """``'cve:CVE-2024-3094'`` or a bare CVE ID; anything else is a mistake."""
+    parsed = kb_service.parse_entity(raw)
+    if parsed is not None:
+        return parsed
+    if CVE_PATTERN.fullmatch(raw.strip()):
+        return ("cve", raw.strip().upper())
+    return None
+
+
+def _kb_since(raw: str) -> datetime | None:
+    try:
+        return datetime.fromisoformat(raw.strip())
+    except ValueError:
+        return None
+
+
+def _kb_header(entry, matched_by: str | None = None) -> str:
+    """One line naming the entry, its provenance and how it was found.
+
+    A model-authored entry carries :data:`MODEL_TITLE_PREFIX`, so "a model wrote
+    this" travels with the text into whatever the model writes next — the one
+    place that guarantee cannot be lost is here, in the text itself.
+    """
+    title = entry.title
+    if entry.authorship == "model":
+        title = MODEL_TITLE_PREFIX + title
+    when = entry.published_at or entry.captured_at
+    parts = [
+        f"[kb id {entry.id}] {title}",
+        entry.source_name or (entry.url or "saved note"),
+        f"{'published' if entry.published_at else 'saved'} {when:%Y-%m-%d}",
+        entry.kind,
+    ]
+    if matched_by:
+        parts.append(f"matched by {matched_by}")
+    return " · ".join(parts)
+
+
 def _item_header(item: FeedItem) -> str:
     published = _sort_date(item)
     return (
@@ -477,9 +782,16 @@ __all__ = [
     "DEFAULT_SEARCH_LIMIT",
     "FETCH_ARTICLE_DEFINITION",
     "GET_FEED_ITEM_DEFINITION",
+    "GET_KB_ENTRY_DEFINITION",
+    "KB_DEFAULT_SEARCH_LIMIT",
+    "KB_ENTRY_MAX_CHARS",
+    "KB_MAX_SEARCH_LIMIT",
+    "KB_PASSAGE_MAX_CHARS",
     "MAX_SEARCH_CHARS",
     "MAX_SEARCH_LIMIT",
+    "MODEL_TITLE_PREFIX",
     "SEARCH_FEED_ITEMS_DEFINITION",
+    "SEARCH_KNOWLEDGE_BASE_DEFINITION",
     "BuiltinToolProvider",
     "ServerToolProvider",
 ]

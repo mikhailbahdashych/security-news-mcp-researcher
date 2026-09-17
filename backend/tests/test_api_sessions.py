@@ -657,7 +657,13 @@ async def test_server_tools_are_absent_when_both_toggles_are_off(app, client, wi
     await finish_turn(app, session_id)
 
     names = [definition["name"] for definition in scripted.calls[0]["tools"]]
-    assert names == ["fetch_article", "get_feed_item", "search_feed_items"]
+    assert names == [
+        "fetch_article",
+        "get_feed_item",
+        "get_kb_entry",
+        "search_feed_items",
+        "search_knowledge_base",
+    ]
 
 
 async def test_a_second_concurrent_turn_is_a_conflict(app, with_key, session_factory):

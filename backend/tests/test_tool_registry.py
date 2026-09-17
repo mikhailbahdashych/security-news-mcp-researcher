@@ -61,7 +61,9 @@ async def test_ordering_is_stable_across_calls_and_rebuilds(session_factory):
         # builtin, name-ascending...
         "fetch_article",
         "get_feed_item",
+        "get_kb_entry",
         "search_feed_items",
+        "search_knowledge_base",
         # ...then server, in fixed literal order.
         "web_search",
         "web_fetch",
@@ -76,7 +78,9 @@ async def test_server_tools_absent_when_both_toggles_are_off(session_factory):
     assert [definition["name"] for definition in definitions] == [
         "fetch_article",
         "get_feed_item",
+        "get_kb_entry",
         "search_feed_items",
+        "search_knowledge_base",
     ]
     assert not any("type" in definition for definition in definitions)
 

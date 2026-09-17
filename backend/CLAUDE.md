@@ -72,11 +72,11 @@ explains why vector search is unavailable.
 | `app/db/init.py` | `init_db(engine, session_factory=None)` — `create_all` + `ADDED_COLUMNS` top-up + the KB's virtual tables and triggers + `ADDED_INDEXES` top-up + `seed_defaults`, then one WARNING if the stored index format is outdated. Idempotent. |
 | `app/db/util.py` | `matches(column, value)` / `escape_like` / `like_pattern` / `LIKE_ESCAPE_CHAR` — **the** substring-match rule for the whole app. |
 | `app/schemas/` | Pydantic request/response models, one module per domain, plus `common.py` for what genuinely crosses domains (`CancelResponse`). |
-| `app/api/` | Routers (`health`, `settings`, `models`, `feeds`, `items`, `sessions`, `notes`, `search`, `mcp`) wired in `app/api/__init__.py`; `deps.py`; `streaming.py` (shared SSE plumbing, **not** a router); `tasks.py` (**not** a router — the cancel registry, notes only). |
+| `app/api/` | Routers (`health`, `settings`, `models`, `feeds`, `items`, `sessions`, `notes`, `search`, `kb`, `mcp`) wired in `app/api/__init__.py`; `deps.py`; `streaming.py` (shared SSE plumbing, **not** a router); `tasks.py` (**not** a router — the cancel registry, notes only). |
 | `app/services/` | Domain logic, no FastAPI imports: `settings` (kv store + key precedence), `feeds` (ingest), `extract` (trafilatura), `items` (inbox queries + keyset cursor + the public `sort_key()`), `notes` (context, sources, save), `search` (cross-entity queries), `http` (UA/timeout policy + the browser-TLS transport), `url_guard` (SSRF + body/time caps), `anthropic_models` (model list + key check, 1 h in-process cache keyed on a digest of the key). |
 | `app/agent/` | The agent loop, the tool registry and the **turn registry** (`turns.py`, `turnlog.py`) — see `app/agent/CLAUDE.md`. |
 | `app/mcp/` | The MCP client — see `app/mcp/CLAUDE.md`. |
-| `app/kb/` | The knowledge base: `models` (its tables), `schema` (the two **frozen** virtual tables, their versions and the rebuilds), `chunking`, `fts`, `entities`, `embeddings`, `store`, `retrieval`. |
+| `app/kb/` | The knowledge base: `models` (its tables), `schema` (the two **frozen** virtual tables, their versions and the rebuilds), `chunking`, `fts`, `entities`, `embeddings`, `store`, `retrieval`, `urls` (canonicalisation), `capture` (the writes), `service` (`KbService`, the one door). |
 
 `research_sessions` carries the turn state: `turn_status` (`idle` | `running` |
 `interrupted`) and `turn_started_at`, written only by the registry — and written with
@@ -119,7 +119,16 @@ Everything configurable is a TEXT row in `settings`; typed accessors do the pars
 Keys: `anthropic_api_key` (""), `model` (`claude-opus-5`), `effort` (`high`),
 `thinking_display` (`summarized`), `web_search_enabled` (true), `web_search_max_uses` (8),
 `web_fetch_enabled` (true), `max_tool_turns` (12), `note_template`
-(`DEFAULT_NOTE_TEMPLATE`), `system_prompt_extra` (""), `feed_timeout_s` (15).
+(`DEFAULT_NOTE_TEMPLATE`), `system_prompt_extra` (""), `feed_timeout_s` (15),
+`kb_capture_starred` (true), `kb_capture_notes` (true), `kb_min_snapshot_chars` (400),
+`kb_reviewed_only` (false).
+
+`kb_reviewed_only` is deliberately **not** on `SettingsRead`: it is read by
+`KbService.search_for_model` and nothing else, and the API contract the frontend was
+built against names only the three capture keys. `kb_min_snapshot_chars`'s default is
+the literal `"400"` rather than `app.kb.capture.DEFAULT_MIN_SNAPSHOT_CHARS`, because
+this module is imported *by* the capture path (through `services/extract.py`) and the
+import back would be a cycle; `tests/test_settings_service.py` pins the two together.
 
 `kb_schema_version` is the one row that is **not** a preference: it records what the
 knowledge base's two virtual tables were actually built with
@@ -148,7 +157,12 @@ tail, **204** only when nothing is running *and* nothing finished in the last
 `RECENT_TURN_S = 30` s) ·
 `GET /api/notes`, `GET|PATCH|DELETE /api/notes/{id}`, `GET /api/notes/{id}/export.md`,
 `POST /api/notes/generate` (**SSE**), `POST /api/notes/generate/cancel` ·
-`GET /api/search` · `GET|PUT /api/mcp/servers`,
+`GET /api/search` ·
+`POST /api/kb/entries`, `GET /api/kb/entries`, `GET|PATCH /api/kb/entries/{id}`,
+`POST /api/kb/entries/{id}/delete|undelete|refresh|merge|topics|tags`,
+`POST /api/kb/purge`, `POST /api/kb/search`, `GET /api/kb/stats`,
+`GET /api/kb/activity`, `GET|POST /api/kb/topics`, `PATCH|DELETE /api/kb/topics/{id}` ·
+`GET|PUT /api/mcp/servers`,
 `POST /api/mcp/servers/{name}/reconnect`, `GET /api/mcp/tools`,
 `PATCH /api/mcp/tools/{namespaced}`.
 
@@ -253,6 +267,48 @@ cited in the finished note. `save_note` writes note + sources in one transaction
 item or the session meanwhile, so the insert is retried once with the vanished
 references dropped — each orphaned source keeps its URL and title.
 
+## The knowledge base (`app/api/kb.py`, `app/kb/`)
+
+`KbService` (`app/kb/service.py`, reached through `deps.py::KbServiceDep`) is the **one
+door**: the routes, the two capture triggers and the two chat tools all go through it and
+none of them touches `capture`/`retrieval`/`store` directly. Three things live in it
+because they are policy, and policy in a route is policy the next route forgets:
+
+- the capture policy (`kb_capture_starred` / `kb_capture_notes`);
+- the **authorship gate**, as two named methods rather than one argument —
+  `search_for_model` never passes `include_model_authored` and `search_for_user` always
+  does, so the chat tools cannot see a model-authored entry until a human has reviewed it
+  (spec S5) while the Knowledge page shows the user everything they captured;
+- `transport`, the single HTTP seam every outbound fetch it makes goes through, which is
+  what lets the tests hand it an `httpx2.MockTransport` instead of stubbing the code under
+  test.
+
+**A capture trigger runs after the user's write has committed, and cannot fail it.**
+`PATCH /api/items/{id}` with `status=starred` and `PATCH /api/notes/{id}` call
+`capture_star_if_enabled` / `capture_note_if_enabled` *after* their own `commit()`;
+generation calls the latter after `save_note`. Each wraps the capture in
+`KbService.guarded`, which turns any exception into a `kb_activity` row with
+`action='skip'` — a paywall, a 403 or a Voyage outage must never cost someone the star
+they pressed. **Bulk starring does not capture**: 50 items is 50 extractions, which is the
+Phase 2 SSE job (`kb:bulk:{id}`), not a request.
+
+Capture order is fixed (spec §4.5): canonicalise the URL → dedup (canonical URL, else feed
+item id, else content hash — the hash is the *fallback*, not an extra check, because two
+URLs carrying the same syndicated text are two articles) → the minimum-length check, which
+skips with an activity row → entry + snapshot v1 + chunks + regex entities in one
+transaction → embed **outside** it. `published_at` is the feed item's date, else the
+extractor's, else NULL — **never** the capture time. No function here holds a transaction
+across the embedder call, because SQLite has exactly one writer.
+
+`POST /entries` answers **201** for a new entry and **200** for one that was already held
+and has just gained a back-link; **409** is text below `kb_min_snapshot_chars` or a
+collision only the user can resolve (an Undo whose URL was re-captured, a purge naming a
+live entry — `app/kb/capture.py::KbConflict`). A **deleted entry is readable**, not a 404:
+that is what Undo and the trash view (`?deleted=true`) need. `GET /entries` answers with
+`entries` when it lists and with `hits` when `q` is present, and the absent key is dropped
+from the JSON rather than sent as `null`, so an empty list can never be read as "the search
+found nothing".
+
 ## Cancellation (`app/agent/turns.py`, `app/api/tasks.py`)
 
 **An SSE disconnect does not stop billing** — and, for a chat turn, it does not stop the
@@ -337,7 +393,7 @@ Three more ingest invariants worth not re-litigating (`app/services/feeds.py`):
 
 ## Tests (`backend/tests/`)
 
-`make test` → `uv run pytest` (**853 tests**, ~48 s) then the frontend's vitest. One
+`make test` → `uv run pytest` (**857 tests**, ~36 s) then the frontend's vitest. One
 `test_<area>.py` per area, `fakes/` for client stand-ins, `fixtures/` for XML/HTML.
 
 One test is **opt-in**: `tests/test_kb_benchmark.py` builds 20 000 chunks and times
