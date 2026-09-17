@@ -60,15 +60,16 @@ uvicorn's own loggers alone. Without it every `app.*` record had no handler at a
 | `app/config.py` | `Settings` (pydantic-settings): `db_path`, `port`, `static_dir`, `cors_origins`, `anthropic_api_key`, `log_level`. Reads `../.env` then `.env`. `cors_origins` is `Annotated[list[str], NoDecode]` with a validator, so a comma-separated `CORS_ORIGINS` no longer raises at import; `*` and non-http(s) entries are refused (`ValidationError`). `effort`/`thinking_display` are coerced to their allowed literals in `services/settings.py`, the one place both the API and the agent loop read them. |
 | `app/logging_config.py` | `configure_logging` / `installed_handler`, `LOG_FORMAT`, `HANDLER_NAME`. |
 | `app/static.py` | `mount_spa` — serves `frontend/dist` in Docker; a no-op when the dir is absent (dev). Path-traversal safe. |
-| `app/db/engine.py` | `create_db_engine` (WAL / `synchronous=NORMAL` / `busy_timeout=5000` / `foreign_keys=ON` pragmas on every connect), `create_session_factory`. No module-level engine. |
+| `app/db/engine.py` | `create_db_engine` (WAL / `synchronous=NORMAL` / `busy_timeout=5000` / `foreign_keys=ON` pragmas on every connect **and `sqlite-vec` loaded on every connect**), `create_session_factory`, `extension_status`. No module-level engine. |
 | `app/db/models.py` | The **complete, frozen** schema + `utcnow()`. No Alembic. |
-| `app/db/init.py` | `init_db(engine, session_factory=None)` — `create_all` + `ADDED_COLUMNS` top-up + `seed_defaults`. Idempotent. |
+| `app/db/init.py` | `init_db(engine, session_factory=None)` — `create_all` + `ADDED_COLUMNS` top-up + the KB's virtual tables and triggers + `ADDED_INDEXES` top-up + `seed_defaults`, then one WARNING if the stored index format is outdated. Idempotent. |
 | `app/db/util.py` | `matches(column, value)` / `escape_like` / `like_pattern` / `LIKE_ESCAPE_CHAR` — **the** substring-match rule for the whole app. |
 | `app/schemas/` | Pydantic request/response models, one module per domain, plus `common.py` for what genuinely crosses domains (`CancelResponse`). |
 | `app/api/` | Routers (`health`, `settings`, `models`, `feeds`, `items`, `sessions`, `notes`, `search`, `mcp`) wired in `app/api/__init__.py`; `deps.py`; `streaming.py` (shared SSE plumbing, **not** a router); `tasks.py` (**not** a router — the cancel registry, notes only). |
 | `app/services/` | Domain logic, no FastAPI imports: `settings` (kv store + key precedence), `feeds` (ingest), `extract` (trafilatura), `items` (inbox queries + keyset cursor + the public `sort_key()`), `notes` (context, sources, save), `search` (cross-entity queries), `http` (UA/timeout policy + the browser-TLS transport), `url_guard` (SSRF + body/time caps), `anthropic_models` (model list + key check, 1 h in-process cache keyed on a digest of the key). |
 | `app/agent/` | The agent loop, the tool registry and the **turn registry** (`turns.py`, `turnlog.py`) — see `app/agent/CLAUDE.md`. |
 | `app/mcp/` | The MCP client — see `app/mcp/CLAUDE.md`. |
+| `app/kb/` | The knowledge base: `models` (its tables), `schema` (the two **frozen** virtual tables, their versions and the rebuilds), `chunking`, `fts`, `entities`, `embeddings`, `store`, `retrieval`. |
 
 `research_sessions` carries the turn state: `turn_status` (`idle` | `running` |
 `interrupted`) and `turn_started_at`, written only by the registry — and written with
@@ -112,6 +113,12 @@ Keys: `anthropic_api_key` (""), `model` (`claude-opus-5`), `effort` (`high`),
 `thinking_display` (`summarized`), `web_search_enabled` (true), `web_search_max_uses` (8),
 `web_fetch_enabled` (true), `max_tool_turns` (12), `note_template`
 (`DEFAULT_NOTE_TEMPLATE`), `system_prompt_extra` (""), `feed_timeout_s` (15).
+
+`kb_schema_version` is the one row that is **not** a preference: it records what the
+knowledge base's two virtual tables were actually built with
+(`{version, vec_ddl_version, vec_dimensions, fts_ddl_version, tokenizer}`) so
+`app/kb/schema.py::index_status` can compare the file with the constants in this
+build. Nothing rewrites it except a rebuild.
 
 **Key precedence: process environment → `Settings.anthropic_api_key` (i.e. `.env`) →
 the stored row.** `external_api_key(settings)` covers the first two; `get_effective_api_key`
@@ -375,6 +382,30 @@ for that column (`CreateColumn(...).compile(dialect=sqlite.dialect())`), which f
 `NOT NULL` column means declaring a `server_default` on the model: SQLite refuses to add
 one without a default, and a fresh database and an upgraded one must end up with the
 same table. `tests/test_db.py` asserts both.
+
+**...a new index.** Declare it in the model's `__table_args__` *and* list it in
+`app/db/init.py::ADDED_INDEXES` with the DDL. `create_all` makes a missing *table*
+with its indexes, but it never adds an index to a table that already exists — so an
+index added after a release is simply absent from every database in the field. The
+literal is `CREATE INDEX IF NOT EXISTS ...`, exactly what `create_all` emits
+(`CreateIndex(...).compile(dialect=sqlite.dialect())`) plus the `IF NOT EXISTS`
+SQLite strips when it records the statement; `tests/test_kb_schema_evolution.py`
+compiles every listed index and compares.
+
+**...a change to a virtual table.** Don't, unless you mean it. `kb_chunk_vec` and
+`kb_chunks_fts` are created from frozen DDL in `app/kb/schema.py`: vec0 has **no
+`ALTER`** (and `ALTER TABLE ... RENAME` on a vec0 table leaves its shadow tables
+behind under the old name, so it is not a swap), and an FTS5 tokenizer is baked into
+the `CREATE`. A change is a **versioned rebuild**: edit the DDL, bump
+`VEC_DDL_VERSION` / `FTS_DDL_VERSION` (and `VEC_DIMENSIONS` if that moved), and the
+app reports "index format outdated" until the user presses rebuild.
+**`init_db` never rebuilds by itself** — a vector rebuild re-embeds every chunk,
+which costs money and minutes. `rebuild_vec(session_factory, dimensions)` builds the
+replacement under a second name, fills it, and only then drops and recreates the
+real one from it; it never drops first. `rebuild_fts(session_factory)` reruns the
+FTS5 `'rebuild'` command (the content table is the source of truth, so there is
+nothing to lose), and `recreate=True` drops and recreates first, which is what a
+tokenizer change needs.
 
 **...a new setting.** Add the key + default to `DEFAULT_SETTINGS` in
 `app/services/settings.py` (this is also what `seed_defaults` inserts on an existing DB),

@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
 from app.db.models import Setting, utcnow
+from app.kb.schema import KB_SCHEMA_VERSION_KEY, default_schema_version
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,10 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "note_template": DEFAULT_NOTE_TEMPLATE,
     "system_prompt_extra": "",
     "feed_timeout_s": "15",
+    # What the knowledge base's two virtual tables were actually built with. Not a
+    # preference: the app compares it with the constants in ``app.kb.schema`` and
+    # reports "index format outdated" when they disagree.
+    KB_SCHEMA_VERSION_KEY: default_schema_version(),
 }
 
 #: Settings whose value is one of a closed set, and what that set is.
@@ -193,9 +198,7 @@ def external_api_key(settings: Settings | None = None) -> str:
     return (settings.anthropic_api_key or "").strip() if settings is not None else ""
 
 
-async def get_effective_api_key(
-    session: AsyncSession, settings: Settings | None = None
-) -> str:
+async def get_effective_api_key(session: AsyncSession, settings: Settings | None = None) -> str:
     """The API key actually used for Anthropic calls.
 
     Precedence: process environment, then the app ``Settings`` (i.e. ``.env``),
@@ -208,9 +211,7 @@ async def get_effective_api_key(
     return (await get(session, "anthropic_api_key") or "").strip()
 
 
-async def get_key_source(
-    session: AsyncSession, settings: Settings | None = None
-) -> KeySource:
+async def get_key_source(session: AsyncSession, settings: Settings | None = None) -> KeySource:
     """Which of the three sources :func:`get_effective_api_key` would use.
 
     Purely informational: ``has_api_key`` still means "a key is stored in this
