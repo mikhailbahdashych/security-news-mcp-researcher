@@ -243,13 +243,23 @@ blocks and **nothing else** — not the names, not the descriptions.
   all prompt-cache prefix: the line, the two tool descriptions that quote it, and the
   knowledge-base paragraph of `DEFAULT_SYSTEM_PROMPT`. Defining it once makes that true by
   construction (spec S6).
+  The **whole** rendered search result is capped too, at `MAX_SEARCH_CHARS` (8 000) —
+  the same budget `search_feed_items` has always had, and the same loop: hits are appended
+  until the next one would not fit, at least one always gets through, and a
+  "*N* more hits omitted" line says what was cut. Per-hit caps alone did not bound it:
+  20 hits × 2 000 is 40 000 characters from the one tool the model is told to call first.
+  The wrapper goes **above the title and the URL**, not below them: those are the same
+  third party's words as the body. Outside it sit only the kb id, the date, the kind and
+  `matched_by`, all of which this application wrote.
 - **Only `source` and `human` text is evidence.** `search_for_model` never passes
   `include_model_authored`, so a `authorship='model'` entry is returned only once a human
   has reviewed it — whatever `kb_reviewed_only` says — and its title then carries
   `MODEL_TITLE_PREFIX` (`[AI finding, reviewed] `) so the provenance travels with the text.
-  **A compiled summary is never returned to the model.** The exact-entity leg has no chunk
-  of its own, and `Hit.snippet` falls back to `summary_md`; both tools therefore read the
-  current snapshot through `KbService.current_text` instead of using that snippet.
+  **A compiled summary is never returned to the model.** Both tools read the current
+  snapshot through `KbService.current_text` and never `Hit.snippet`: the exact-entity leg
+  matches an entry rather than a chunk, so it has nothing of its own to quote, and the
+  snippet is a 400-character extract built for a list row — it falls back to the entry's
+  *title* when there is no body chunk, which is a label, not evidence.
 - **An empty knowledge base is a plain result, not an error.** "We have not covered this"
   is a real finding; an error result invites the model to retry the same query instead of
   reporting it. Both descriptions say in as many words that the base may be empty.

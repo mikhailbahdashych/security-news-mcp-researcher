@@ -12,9 +12,14 @@ not rewrite them into neutral summaries.
 Two rules govern the knowledge-base pair specifically, and neither is negotiable:
 
 * **Every passage carries** :data:`~app.agent.prompts.KB_WRAPPER_LINE` and is
-  capped at :data:`KB_PASSAGE_MAX_CHARS`. The text is a third party's, it has been
-  stored verbatim, and the only containment against an instruction hidden inside
-  it is that line, the cap, and the matching sentence in the system prompt.
+  capped at :data:`KB_PASSAGE_MAX_CHARS`, and the whole rendered result is capped
+  at :data:`MAX_SEARCH_CHARS` as the inbox search is. The text is a third party's,
+  it has been stored verbatim, and the only containment against an instruction
+  hidden inside it is that line, the cap, and the matching sentence in the system
+  prompt. **The title and the URL are inside the wrapper too** — they are the same
+  third party's words, and a title is exactly as able to carry an instruction as
+  the paragraph under it. Only the id, the date, the kind and how the hit was
+  found sit outside, because this application wrote them.
 * **Only ``source`` and ``human`` text is evidence.** A model-authored entry is
   returned to the model only once a human has reviewed it, and a compiled summary
   is never returned at all — it is model prose, for the user's eyes, on the page.
@@ -526,24 +531,51 @@ class BuiltinToolProvider:
                 raw={"count": 0, "entry_ids": []},
             )
 
-        blocks: list[str] = [
+        intro = (
             f"Knowledge base: {len(hits)} saved "
             f'{"entry" if len(hits) == 1 else "entries"} match "{query}".'
-        ]
+        )
+        blocks: list[str] = [intro]
+        used = len(intro)
+        shown = 0
         for position, hit in enumerate(hits, start=1):
             passage = hit.chunk.text if hit.chunk is not None else ""
             if not passage:
-                # The exact-entity leg has no chunk of its own. Read the snapshot
-                # rather than the hit's snippet: the snippet falls back to
-                # ``summary_md``, which is model prose and is never evidence.
+                # The exact-entity leg matches an entry, not a chunk, so there is
+                # nothing to quote from the hit itself. Read the current snapshot
+                # rather than ``Hit.snippet``: the snippet is a 400-character
+                # extract built for a list row, not a passage, and it falls back
+                # to the entry's title when there is no body chunk to take it
+                # from. The snapshot is the only text this tool may quote.
                 passage = await self.kb.current_text(hit.entry.id)
-            text, _ = _cap(passage, KB_PASSAGE_MAX_CHARS)
-            blocks.append(f"{position}. {_kb_header(hit.entry, hit.matched_by)}")
-            blocks.append(f"{KB_WRAPPER_LINE}\n{text}")
+            # Title and URL are inside the wrapper with the body, because both are
+            # a third party's words too — a title is short, but it is exactly as
+            # able to carry an instruction as the paragraph under it.
+            text, _ = _cap(_kb_passage(hit.entry, passage), KB_PASSAGE_MAX_CHARS)
+            block = (
+                f"{position}. {_kb_header(hit.entry, hit.matched_by)}\n\n{KB_WRAPPER_LINE}\n{text}"
+            )
+            # The whole rendering is bounded, not just each passage: 20 hits of
+            # 2 000 characters is 40 000, and this tool's description tells the
+            # model to call it first. ``search_feed_items`` has always had the
+            # same budget, and one hit always gets through.
+            if used + len(block) > MAX_SEARCH_CHARS and shown:
+                break
+            blocks.append(block)
+            used += len(block) + 2
+            shown += 1
 
+        rendered = "\n\n".join(blocks)
+        if shown < len(hits):
+            rendered += (
+                f"\n\n[{len(hits) - shown} more hits omitted to save space. "
+                "Narrow the query, or call get_kb_entry on a kb id above.]"
+            )
         return ToolResult(
-            content="\n\n".join(blocks),
-            raw={"count": len(hits), "entry_ids": [hit.entry.id for hit in hits]},
+            content=rendered,
+            # ``shown``, not ``len(hits)``: ``count`` has to describe what the
+            # model was handed, not what the search matched.
+            raw={"count": shown, "entry_ids": [hit.entry.id for hit in hits[:shown]]},
         )
 
     # ---- get_kb_entry -----------------------------------------------------
@@ -566,20 +598,25 @@ class BuiltinToolProvider:
                 ),
                 is_error=True,
             )
-        if entry.authorship == "model" and entry.review_status != "reviewed":
-            return ToolResult(
-                content=(
-                    f"Error: entry {entry_id} was written by a model and has not been "
-                    "reviewed by the user, so it is not available as evidence."
-                ),
-                is_error=True,
-            )
+        if entry.review_status != "reviewed":
+            # Two different gates, one message. Model authorship is refused
+            # unconditionally (spec S5); ``kb_reviewed_only`` is the user's own
+            # setting, and `search_knowledge_base` has always honoured it — an id
+            # the model kept from an earlier turn must not be the way around it.
+            if entry.authorship == "model" or await self.kb.reviewed_only():
+                return ToolResult(
+                    content=(
+                        f"Error: entry {entry_id} has not been reviewed by the user, "
+                        "so it is not available as evidence."
+                    ),
+                    is_error=True,
+                )
 
         body, truncated = _cap(await self.kb.current_text(entry_id), KB_ENTRY_MAX_CHARS)
         if not body:
             return ToolResult(content=f"Error: entry {entry_id} has no saved text.", is_error=True)
         return ToolResult(
-            content=f"{_kb_header(entry)}\n\n{KB_WRAPPER_LINE}\n{body}",
+            content=(f"{_kb_header(entry)}\n\n{KB_WRAPPER_LINE}\n{_kb_passage(entry, body)}"),
             raw={"truncated": truncated, "entry_id": entry_id},
         )
 
@@ -697,25 +734,35 @@ def _kb_since(raw: str) -> datetime | None:
 
 
 def _kb_header(entry, matched_by: str | None = None) -> str:
-    """One line naming the entry, its provenance and how it was found.
+    """The line **outside** the wrapper: only what this application itself wrote.
 
-    A model-authored entry carries :data:`MODEL_TITLE_PREFIX`, so "a model wrote
-    this" travels with the text into whatever the model writes next — the one
-    place that guarantee cannot be lost is here, in the text itself.
+    The id, the kind, the date and how the hit was found are facts about the row,
+    not text anybody else supplied, so they are safe to state in the model's own
+    voice. Everything a third party wrote — the title, the URL, the source name —
+    goes inside the wrapper with the body; see :func:`_kb_passage`.
     """
-    title = entry.title
-    if entry.authorship == "model":
-        title = MODEL_TITLE_PREFIX + title
     when = entry.published_at or entry.captured_at
     parts = [
-        f"[kb id {entry.id}] {title}",
-        entry.source_name or (entry.url or "saved note"),
+        f"[kb id {entry.id}]",
         f"{'published' if entry.published_at else 'saved'} {when:%Y-%m-%d}",
         entry.kind,
     ]
     if matched_by:
         parts.append(f"matched by {matched_by}")
     return " · ".join(parts)
+
+
+def _kb_passage(entry, body: str) -> str:
+    """The wrapped text: the entry's own title and URL, then the passage.
+
+    A model-authored entry's title carries :data:`MODEL_TITLE_PREFIX`, so "a model
+    wrote this" travels with the text into whatever the model writes next — the one
+    place that guarantee cannot be lost is here, in the text itself.
+    """
+    title = entry.title
+    if entry.authorship == "model":
+        title = MODEL_TITLE_PREFIX + title
+    return f"{title}\n{entry.url or entry.source_name or 'saved note'}\n\n{body}"
 
 
 def _item_header(item: FeedItem) -> str:

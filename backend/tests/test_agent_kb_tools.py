@@ -16,6 +16,7 @@ from sqlalchemy import select
 from app.agent.builtin import (
     KB_ENTRY_MAX_CHARS,
     KB_PASSAGE_MAX_CHARS,
+    MAX_SEARCH_CHARS,
     BuiltinToolProvider,
 )
 from app.agent.prompts import DEFAULT_SYSTEM_PROMPT, KB_WRAPPER_LINE
@@ -294,3 +295,59 @@ async def test_the_tools_see_the_same_database_the_routes_do(session_factory, db
     stored = (await db_session.execute(select(KbEntry.title))).scalars().all()
 
     assert stored == ["The xz backdoor"]
+
+
+# ------------------------------------------------- regressions, fix round 1
+
+
+async def test_the_whole_rendered_result_is_capped(session_factory):
+    """Per-passage caps do not bound the whole, and 20 hits of 2 000 chars did not.
+
+    ``search_feed_items`` has always bounded its rendered list at
+    ``MAX_SEARCH_CHARS``; this tool is told to be called first, so an unbounded
+    one would eat a turn's budget on every question.
+    """
+    paragraph = "The advisory repeats the mitigation for liblzma at length. " * 45
+    for index in range(20):
+        await _save(
+            session_factory,
+            title=f"Advisory {index}",
+            text=f"# Advisory {index}\n\n{paragraph}",
+        )
+
+    result = await _provider(session_factory).search_knowledge_base(q="liblzma", limit=20)
+
+    assert len(result.content) <= MAX_SEARCH_CHARS
+    assert "more hits omitted" in result.content
+    # ``count`` describes what the model was handed, not what matched.
+    assert result.content.count(KB_WRAPPER_LINE) == result.raw["count"] < 20
+
+
+async def test_the_title_and_url_sit_inside_the_wrapped_passage(session_factory):
+    """Both are third-party strings, so both belong behind the wrapper line."""
+    saved = await _save(session_factory, title="A third-party title")
+
+    result = await _provider(session_factory).search_knowledge_base(q="liblzma")
+
+    head, _, wrapped = result.content.partition(KB_WRAPPER_LINE)
+    assert f"kb id {saved.entry_id}" in head
+    assert "A third-party title" not in head
+    assert "A third-party title" in wrapped
+    assert "https://example.test/a-third-party-title" in wrapped
+
+
+async def test_get_kb_entry_honours_reviewed_only(session_factory, db_session):
+    saved = await _save(session_factory)
+    await settings_service.set_value(db_session, "kb_reviewed_only", "true")
+    await db_session.commit()
+
+    refused = await _provider(session_factory).get_kb_entry(entry_id=saved.entry_id)
+    assert refused.is_error is True
+    assert "reviewed" in refused.content
+
+    entry = await db_session.get(KbEntry, saved.entry_id)
+    entry.review_status = "reviewed"
+    await db_session.commit()
+
+    allowed = await _provider(session_factory).get_kb_entry(entry_id=saved.entry_id)
+    assert allowed.is_error is False
