@@ -43,8 +43,12 @@ DEFAULT_LEG_SIZE = 50
 def published_day(moment: datetime | None) -> int:
     """Days since the epoch, the only time unit vec0 can compare.
 
-    ``None`` becomes ``0``: a row with no date sorts before every real one rather
-    than being silently dropped from a ``since`` filter it cannot answer.
+    Callers pass ``COALESCE(published_at, captured_at)``, which is never NULL, so
+    the ``None`` branch should not arise. It returns ``0`` (1970-01-01) rather than
+    ``None`` because **vec0 rejects NULL in an INTEGER metadata column** — the
+    insert would fail outright. A row that did somehow reach it is therefore dated
+    to the epoch, which every ``since`` filter excludes; that is a dropped row, not
+    a preserved one, and the fix is to give the caller a date, not to change this.
     """
     return 0 if moment is None else (moment - EPOCH).days
 
@@ -95,11 +99,13 @@ class KnowledgeStore(Protocol):
         self, match: str, k: int, *, filters: SearchFilters
     ) -> list[tuple[int, float]]: ...
 
-    async def entities(self, kind: str, value: str) -> list[int]: ...
+    async def entities(self, kind: str, value: str, *, filters: SearchFilters) -> list[int]: ...
 
     async def filter_by_topics(
         self, entry_ids: Sequence[int], topic_ids: Sequence[int]
     ) -> list[int]: ...
+
+    async def first_body_chunks(self, entry_ids: Sequence[int]) -> dict[int, KbChunk]: ...
 
     async def load(
         self, entry_ids: Sequence[int], chunk_ids: Sequence[int]
@@ -256,6 +262,10 @@ class SqliteKnowledgeStore:
             return []
 
         clauses, params = self._sql_filters(filters)
+        if filters.chunk_kinds:
+            names = {f"chunk_kind_{n}": value for n, value in enumerate(filters.chunk_kinds)}
+            clauses.append(f"c.kind IN ({', '.join(':' + name for name in names)})")
+            params |= names
         params |= {"match": match, "k": k}
         statement = text(
             "SELECT c.id, bm25(kb_chunks_fts) AS rank"
@@ -276,14 +286,17 @@ class SqliteKnowledgeStore:
 
     @staticmethod
     def _sql_filters(filters: SearchFilters) -> tuple[list[str], dict[str, object]]:
-        """The same narrowing as the KNN, in SQL — one ordinary join, no ``k``."""
+        """Entry-level narrowing in SQL — one ordinary join, no ``k`` to blow.
+
+        Every leg that reaches ``kb_entries`` uses this, including the exact-entity
+        lookup: a filter the user set on the Knowledge page must not fall away the
+        moment their query happens to contain a CVE id. The chunk-level part
+        (``chunk_kinds``) is added by the keyword leg, which is the only leg with a
+        chunk to narrow.
+        """
         clauses = ["e.deleted_at IS NULL"]
         params: dict[str, object] = {}
 
-        if filters.chunk_kinds:
-            names = {f"chunk_kind_{n}": value for n, value in enumerate(filters.chunk_kinds)}
-            clauses.append(f"c.kind IN ({', '.join(':' + name for name in names)})")
-            params |= names
         if filters.kinds:
             names = {f"entry_kind_{n}": value for n, value in enumerate(filters.kinds)}
             clauses.append(f"e.kind IN ({', '.join(':' + name for name in names)})")
@@ -306,21 +319,29 @@ class SqliteKnowledgeStore:
 
     # -- entities and hydration -----------------------------------------
 
-    async def entities(self, kind: str, value: str) -> list[int]:
+    async def entities(self, kind: str, value: str, *, filters: SearchFilters) -> list[int]:
         """Entry ids carrying exactly this entity, newest first.
 
-        Exact, because "have we covered CVE-2024-3094?" is an exact question.
-        ``kb_entry_entities`` does not cascade on a soft delete, so deleted
-        entries are excluded here rather than left to a later filter.
+        Exact, because "have we covered CVE-2024-3094?" is an exact question — but
+        exact about the *entity*, not about everything else: it takes the same
+        :class:`SearchFilters` as the other legs, so a date range, a kind or a
+        topic the user chose still applies. ``kb_entry_entities`` does not cascade
+        on a soft delete, so deleted entries are excluded here rather than left to
+        a later filter.
         """
-        statement = (
+        clauses, params = self._sql_filters(filters)
+        params |= {"kind": kind, "value": value}
+        statement = text(
             "SELECT DISTINCT en.entry_id FROM kb_entry_entities en"
             " JOIN kb_entries e ON e.id = en.entry_id"
-            " WHERE en.kind = :kind AND en.value = :value AND e.deleted_at IS NULL"
-            " ORDER BY COALESCE(e.published_at, e.captured_at) DESC, en.entry_id"
+            " WHERE en.kind = :kind AND en.value = :value"
+            + "".join(f" AND {clause}" for clause in clauses)
+            + " ORDER BY COALESCE(e.published_at, e.captured_at) DESC, en.entry_id"
         )
+        if filters.since is not None:
+            statement = statement.bindparams(bindparam("since", type_=DateTime))
         async with self._session_factory() as session:
-            rows = (await session.execute(text(statement), {"kind": kind, "value": value})).all()
+            rows = (await session.execute(statement, params)).all()
         return [row[0] for row in rows]
 
     async def filter_by_topics(
@@ -341,6 +362,27 @@ class SqliteKnowledgeStore:
         async with self._session_factory() as session:
             rows = (await session.execute(statement)).scalars().all()
         return list(dict.fromkeys(rows))
+
+    async def first_body_chunks(self, entry_ids: Sequence[int]) -> dict[int, KbChunk]:
+        """The lowest-``ord`` **body** chunk of each entry.
+
+        The exact-entity leg matches an entry, not a passage, so it has no chunk of
+        its own to quote. This is what it shows instead — and it is deliberately
+        restricted to ``body``: a ``summary`` chunk holds compiled text, which
+        never leaves the knowledge base as evidence (spec S5).
+        """
+        if not entry_ids:
+            return {}
+        statement = (
+            select(KbChunk)
+            .where(KbChunk.entry_id.in_(entry_ids), KbChunk.kind == "body")
+            .order_by(KbChunk.entry_id, KbChunk.ord)
+        )
+        first: dict[int, KbChunk] = {}
+        async with self._session_factory() as session:
+            for chunk in (await session.execute(statement)).scalars():
+                first.setdefault(chunk.entry_id, chunk)
+        return first
 
     async def load(
         self, entry_ids: Sequence[int], chunk_ids: Sequence[int]

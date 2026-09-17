@@ -57,6 +57,9 @@ async def _run(db_session, match: str) -> list[int]:
         ("* ^ ( ) :", ""),
         ("and or not near", '"and" AND "or" AND "not" AND "near"'),
         ("Xz  Utils", '"xz" AND "utils"'),
+        ("a\x00b", '"ab"'),
+        ("\x00\x01\x02", ""),
+        ("liblzma\x07", '"liblzma"'),
     ],
 )
 def test_the_exact_match_string(typed: str, expected: str):
@@ -77,6 +80,8 @@ def test_the_exact_match_string(typed: str, expected: str):
         "NEAR(foo bar)",
         "a-b-c d_e_f",
         "Ünïcôdé",
+        "a\x00b",
+        "CVE-2024-3094\x00",
     ],
 )
 async def test_every_shape_executes_against_a_real_fts5_table(db_session, typed: str):

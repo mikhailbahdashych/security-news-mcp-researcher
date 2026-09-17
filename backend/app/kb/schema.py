@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, async_sessionmaker
 
 logger = logging.getLogger(__name__)
 
@@ -100,14 +100,20 @@ FTS_DDL = f"""CREATE VIRTUAL TABLE IF NOT EXISTS kb_chunks_fts USING fts5(
 
 #: Keeping an external-content FTS5 index in step is the caller's job, so the three
 #: content-sync triggers are part of the schema rather than of any one code path.
+#:
+#: ``kb_chunks_au`` is narrowed twice — ``UPDATE OF text`` and a ``WHEN`` guard —
+#: because every re-index writes ``embedded_at`` and ``embedding_model`` to every
+#: chunk. Unguarded, a 20 000-chunk rebuild becomes 40 000 FTS delete/insert pairs
+#: that all write the same text back.
 FTS_TRIGGERS = (
-    """CREATE TRIGGER IF NOT EXISTS kb_chunks_ai AFTER INSERT ON kb_chunks BEGIN
+    """CREATE TRIGGER kb_chunks_ai AFTER INSERT ON kb_chunks BEGIN
     INSERT INTO kb_chunks_fts(rowid, text) VALUES (new.id, new.text);
 END""",
-    """CREATE TRIGGER IF NOT EXISTS kb_chunks_ad AFTER DELETE ON kb_chunks BEGIN
+    """CREATE TRIGGER kb_chunks_ad AFTER DELETE ON kb_chunks BEGIN
     INSERT INTO kb_chunks_fts(kb_chunks_fts, rowid, text) VALUES ('delete', old.id, old.text);
 END""",
-    """CREATE TRIGGER IF NOT EXISTS kb_chunks_au AFTER UPDATE ON kb_chunks BEGIN
+    """CREATE TRIGGER kb_chunks_au AFTER UPDATE OF text ON kb_chunks
+WHEN old.text IS NOT new.text BEGIN
     INSERT INTO kb_chunks_fts(kb_chunks_fts, rowid, text) VALUES ('delete', old.id, old.text);
     INSERT INTO kb_chunks_fts(rowid, text) VALUES (new.id, new.text);
 END""",
@@ -117,9 +123,22 @@ END""",
 #: foreign_keys=ON`` does nothing for ``kb_chunk_vec``. This trigger is the only
 #: thing that keeps it in step — and because an FK cascade *does* fire the child
 #: table's triggers, a cascaded chunk delete cleans the vector as well.
-VEC_TRIGGER = """CREATE TRIGGER IF NOT EXISTS kb_chunks_ad_vec AFTER DELETE ON kb_chunks BEGIN
+VEC_TRIGGER = """CREATE TRIGGER kb_chunks_ad_vec AFTER DELETE ON kb_chunks BEGIN
     DELETE FROM kb_chunk_vec WHERE chunk_id = old.id;
 END"""
+
+#: Every trigger this schema owns, by name. This is what gives a trigger an
+#: upgrade path: :func:`ensure_triggers` compares each stored body with the one
+#: below and recreates any that differ. Triggers hold no state, so that is safe —
+#: and neither DDL version covers them, so without it a release that had to fix
+#: ``kb_chunks_au`` or ``kb_chunks_ad_vec`` would reach no database that already
+#: exists, silently.
+TRIGGERS: dict[str, str] = {
+    "kb_chunks_ai": FTS_TRIGGERS[0],
+    "kb_chunks_ad": FTS_TRIGGERS[1],
+    "kb_chunks_au": FTS_TRIGGERS[2],
+    "kb_chunks_ad_vec": VEC_TRIGGER,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,13 +213,24 @@ async def index_status(session: AsyncSession) -> dict[str, Any]:
 
 
 async def record_schema_version(session: AsyncSession, **overrides: Any) -> None:
-    """Write the current version, with any part a rebuild has just changed."""
+    """Merge *overrides* onto the **stored** row, never onto the constants.
+
+    A rebuild knows only what it rebuilt. Writing the whole of
+    :func:`current_schema_version` would have a vector rebuild declare the keyword
+    index current as well — so a user who sees "index format outdated" after a
+    tokenizer change, presses *Rebuild vectors* and watches the warning disappear
+    would be left on the old tokenizer with nothing to notice it by.
+
+    The constants are the floor: they fill in a key the stored row never had (a
+    database from before that key existed) and lose to it everywhere else.
+    """
     from app.services import settings as settings_service  # circular at module scope
 
+    stored = parse_schema_version(await settings_service.get(session, KB_SCHEMA_VERSION_KEY))
     await settings_service.set_value(
         session,
         KB_SCHEMA_VERSION_KEY,
-        json.dumps(current_schema_version() | overrides, sort_keys=True),
+        json.dumps({**current_schema_version(), **stored, **overrides}, sort_keys=True),
     )
 
 
@@ -223,6 +253,13 @@ async def rebuild_vec(
     columns = ", ".join(VEC_COLUMNS)
 
     async with session_factory() as session:
+        # One transaction for the whole swap. The statement *order* is not enough on
+        # its own: DDL does not start a transaction under pysqlite's legacy handling,
+        # so a crash after the DROP would leave the file with no kb_chunk_vec at all
+        # — every KNN raising "no such table" until a restart guessed a dimension for
+        # it. IMMEDIATE takes the write lock up front rather than discovering a busy
+        # database halfway through a rebuild.
+        await session.execute(text("BEGIN IMMEDIATE"))
         stored = parse_schema_version(await _read_setting(session, KB_SCHEMA_VERSION_KEY))
         carry = stored.get("vec_dimensions", VEC_DIMENSIONS) == dimensions
 
@@ -256,7 +293,9 @@ async def rebuild_vec(
         )
         pending = result.rowcount or 0
 
-        await record_schema_version(session, vec_dimensions=dimensions)
+        await record_schema_version(
+            session, vec_ddl_version=VEC_DDL_VERSION, vec_dimensions=dimensions
+        )
         await session.commit()
 
     logger.info(
@@ -285,7 +324,9 @@ async def rebuild_fts(
             await session.execute(text("DROP TABLE IF EXISTS kb_chunks_fts"))
             await session.execute(text(FTS_DDL))
         await session.execute(text("INSERT INTO kb_chunks_fts(kb_chunks_fts) VALUES ('rebuild')"))
-        await record_schema_version(session)
+        await record_schema_version(
+            session, fts_ddl_version=FTS_DDL_VERSION, tokenizer=FTS_TOKENIZER
+        )
         await session.commit()
 
 
@@ -298,10 +339,35 @@ async def _read_setting(session: AsyncSession, key: str) -> str | None:
 def virtual_table_statements() -> tuple[str, ...]:
     """Every statement ``init_db`` runs after ``create_all``, in order.
 
-    The triggers reference both ``kb_chunks`` (an ordinary table ``create_all``
-    has just made) and the virtual tables, so the tables come first.
+    Only the two tables, and both are ``IF NOT EXISTS``, so a second run writes
+    nothing at all. The triggers go through :func:`ensure_triggers`, which has to
+    read the file before it can decide.
     """
-    return (FTS_DDL, VEC_DDL, *FTS_TRIGGERS, VEC_TRIGGER)
+    return (FTS_DDL, VEC_DDL)
+
+
+async def ensure_triggers(conn: AsyncConnection) -> list[str]:
+    """Recreate any trigger whose stored body is not the one this build wants.
+
+    Conditional rather than a blanket drop-and-create: ``init_db`` runs at every
+    startup, and a routine that always writes takes the database's write lock
+    every time for nothing. Returns the names it recreated, which is what makes
+    "did this upgrade change anything?" answerable.
+    """
+    recreated: list[str] = []
+    for name, ddl in TRIGGERS.items():
+        stored = (
+            await conn.execute(
+                text("SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = :name"),
+                {"name": name},
+            )
+        ).scalar_one_or_none()
+        if stored is not None and " ".join(stored.split()) == " ".join(ddl.split()):
+            continue
+        await conn.execute(text(f"DROP TRIGGER IF EXISTS {name}"))
+        await conn.execute(text(ddl))
+        recreated.append(name)
+    return recreated
 
 
 __all__ = [
@@ -315,9 +381,11 @@ __all__ = [
     "VEC_DDL",
     "VEC_DDL_VERSION",
     "VEC_DIMENSIONS",
+    "TRIGGERS",
     "VEC_TRIGGER",
     "VecRebuild",
     "current_schema_version",
+    "ensure_triggers",
     "default_schema_version",
     "index_status",
     "parse_schema_version",

@@ -175,3 +175,37 @@ def test_a_nonsense_target_is_refused(bad: int):
 def test_overlap_may_not_reach_the_target():
     with pytest.raises(ValueError):
         split_markdown("text", target_tokens=10, overlap_tokens=10)
+
+
+def test_text_with_no_spaces_at_all_is_still_split():
+    """CJK prose has no ASCII spaces, and ``lang`` is a column on ``kb_entries``.
+
+    A word-boundary split alone turns a Japanese or Chinese advisory — or a base64
+    blob, or minified JSON — into exactly one unretrievable chunk.
+    """
+    text = "x" * 50_000
+
+    chunks = split_markdown(text, target_tokens=800, overlap_tokens=80)
+
+    assert len(chunks) > 15
+    assert max(chunk.token_estimate for chunk in chunks) <= int(800 * 1.2)
+    assert "".join(chunk.text for chunk in chunks).count("x") >= 50_000
+
+
+def test_cjk_prose_is_split_into_usable_chunks():
+    text = "あるソフトウェアに深刻な脆弱性が発見されました。" * 400
+
+    chunks = split_markdown(text, target_tokens=200, overlap_tokens=20)
+
+    assert len(chunks) > 5
+    assert max(chunk.token_estimate for chunk in chunks) <= int(200 * 1.3)
+
+
+def test_a_fenced_code_block_is_still_never_split_however_long():
+    """The spec says so, so nothing downstream may assume a chunk is near target."""
+    fence = "```\n" + "y" * 40_000 + "\n```"
+
+    chunks = split_markdown(fence, target_tokens=100, overlap_tokens=0)
+
+    assert len(chunks) == 1
+    assert chunks[0].token_estimate > 100

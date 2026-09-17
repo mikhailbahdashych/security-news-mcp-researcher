@@ -290,7 +290,7 @@ async def test_a_real_embedder_fuses_both_legs(session_factory, db_session):
 
     hits = await hybrid_search(store, embedder, "The xz backdoor sits in liblzma.")
 
-    assert [hit.matched_by for hit in hits] == ["hybrid"]
+    assert [hit.matched_by for hit in hits] == ["both"]
     assert hits[0].distance is not None
     assert hits[0].bm25 is not None
     assert embedder.queries == ["The xz backdoor sits in liblzma."]
@@ -394,3 +394,87 @@ def test_search_filters_defaults():
         reviewed_only=False,
         include_model_authored=False,
     )
+
+
+async def test_a_cve_id_anywhere_in_the_question_fires_the_exact_leg(session_factory, db_session):
+    """ "Have we covered CVE-2024-3094?" is the spec's own motivating question."""
+    exact = await _entry(db_session, "Advisory", "A full write-up of the backdoor.")
+    db_session.add(
+        KbEntryEntity(entry_id=exact.id, kind="cve", value="CVE-2024-3094", source="regex")
+    )
+    await db_session.commit()
+    store = SqliteKnowledgeStore(session_factory)
+
+    for typed in (
+        "CVE-2024-3094",
+        "Have we covered CVE-2024-3094?",
+        "cve-2024-3094 xz",
+        "what did we say about CVE-2024-3094 last month",
+    ):
+        hits = await hybrid_search(store, NullEmbedder(), typed)
+        assert [hit.matched_by for hit in hits][:1] == ["entity"], typed
+        assert hits[0].entry.id == exact.id
+
+
+async def test_the_exact_leg_obeys_the_same_filters_as_the_others(session_factory, db_session):
+    from app.kb.models import KbEntryTopic, Topic
+
+    old = await _entry(
+        db_session, "Old", "nothing to match", published_at=utcnow() - timedelta(days=900)
+    )
+    recent = await _entry(db_session, "Recent", "nothing to match", kind="note")
+    topic = Topic(name="supply chain")
+    db_session.add(topic)
+    await db_session.flush()
+    db_session.add(KbEntryTopic(entry_id=recent.id, topic_id=topic.id))
+    for entry in (old, recent):
+        db_session.add(
+            KbEntryEntity(entry_id=entry.id, kind="cve", value="CVE-2024-3094", source="regex")
+        )
+    await db_session.commit()
+    store = SqliteKnowledgeStore(session_factory)
+
+    async def ids(**kwargs) -> list[int]:
+        hits = await hybrid_search(store, NullEmbedder(), "CVE-2024-3094", **kwargs)
+        return sorted(hit.entry.id for hit in hits)
+
+    assert await ids() == sorted([old.id, recent.id])
+    assert await ids(since=utcnow() - timedelta(days=30)) == [recent.id]
+    assert await ids(kinds=("note",)) == [recent.id]
+    assert await ids(topic_ids=(topic.id,)) == [recent.id]
+    assert await ids(reviewed_only=True) == []
+
+
+async def test_an_entity_hit_never_shows_a_compiled_summary(session_factory, db_session):
+    """Spec S5: compiled summaries are never returned as evidence at all."""
+    entry = await _entry(db_session, "Advisory", "the body text the user captured")
+    entry.summary_md = "A compiled summary the model wrote."
+    db_session.add(
+        KbEntryEntity(entry_id=entry.id, kind="cve", value="CVE-2024-3094", source="regex")
+    )
+    await db_session.commit()
+    store = SqliteKnowledgeStore(session_factory)
+
+    hits = await hybrid_search(store, NullEmbedder(), "CVE-2024-3094")
+
+    assert hits[0].matched_by == "entity"
+    assert hits[0].snippet == "the body text the user captured"
+    assert "compiled summary" not in hits[0].snippet
+
+
+async def test_an_entity_hit_with_no_body_chunk_falls_back_to_the_title(
+    session_factory, db_session
+):
+    entry = KbEntry(kind="article", title="A title and nothing else", authorship="source")
+    db_session.add(entry)
+    await db_session.flush()
+    entry.summary_md = "A compiled summary the model wrote."
+    db_session.add(
+        KbEntryEntity(entry_id=entry.id, kind="cve", value="CVE-2024-3094", source="regex")
+    )
+    await db_session.commit()
+    store = SqliteKnowledgeStore(session_factory)
+
+    hits = await hybrid_search(store, NullEmbedder(), "CVE-2024-3094")
+
+    assert hits[0].snippet == "A title and nothing else"

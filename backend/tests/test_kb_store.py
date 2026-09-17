@@ -153,8 +153,73 @@ async def test_the_entity_leg_is_an_exact_lookup(session_factory, db_session):
     await db_session.commit()
     store = SqliteKnowledgeStore(session_factory)
 
-    assert await store.entities("cve", "CVE-2024-3094") == [hit.id, older.id]
-    assert await store.entities("cve", "CVE-2021-44228") == []
+    everything = SearchFilters()
+    assert await store.entities("cve", "CVE-2024-3094", filters=everything) == [hit.id, older.id]
+    assert await store.entities("cve", "CVE-2021-44228", filters=everything) == []
+
+
+async def test_the_entity_leg_narrows_like_every_other_leg(session_factory, db_session):
+    """The Knowledge page's date, kind and topic filters must not fall away the
+    moment the user types a CVE id."""
+    from app.kb.models import KbEntryEntity, KbEntryTopic, Topic
+
+    old_article = await _entry(db_session, published_at=utcnow() - timedelta(days=900))
+    recent_note = await _entry(db_session, kind="note", published_at=utcnow())
+    reviewed = await _entry(db_session, review_status="reviewed", published_at=utcnow())
+    topic = Topic(name="supply chain")
+    db_session.add(topic)
+    await db_session.flush()
+    db_session.add(KbEntryTopic(entry_id=recent_note.id, topic_id=topic.id))
+    for entry in (old_article, recent_note, reviewed):
+        db_session.add(
+            KbEntryEntity(entry_id=entry.id, kind="cve", value="CVE-2024-3094", source="regex")
+        )
+    await db_session.commit()
+    store = SqliteKnowledgeStore(session_factory)
+
+    async def found(**kwargs) -> list[int]:
+        return sorted(await store.entities("cve", "CVE-2024-3094", filters=SearchFilters(**kwargs)))
+
+    assert await found() == sorted([old_article.id, recent_note.id, reviewed.id])
+    assert await found(since=utcnow() - timedelta(days=30)) == sorted([recent_note.id, reviewed.id])
+    assert await found(kinds=("note",)) == [recent_note.id]
+    assert await found(topic_ids=(topic.id,)) == [recent_note.id]
+    assert await found(reviewed_only=True) == [reviewed.id]
+
+
+async def test_the_entity_leg_gates_model_authorship(session_factory, db_session):
+    from app.kb.models import KbEntryEntity
+
+    finding = await _entry(db_session, kind="finding", authorship="model")
+    db_session.add(
+        KbEntryEntity(entry_id=finding.id, kind="cve", value="CVE-2024-3094", source="regex")
+    )
+    await db_session.commit()
+    store = SqliteKnowledgeStore(session_factory)
+
+    assert await store.entities("cve", "CVE-2024-3094", filters=SearchFilters()) == []
+    assert await store.entities(
+        "cve", "CVE-2024-3094", filters=SearchFilters(include_model_authored=True)
+    ) == [finding.id]
+
+    finding.review_status = "reviewed"
+    await db_session.commit()
+
+    assert await store.entities("cve", "CVE-2024-3094", filters=SearchFilters()) == [finding.id]
+
+
+async def test_first_body_chunks_is_the_snippet_source_for_an_entity_hit(
+    session_factory, db_session
+):
+    entry = await _entry(db_session)
+    chunks = await _chunks(db_session, entry, "the opening paragraph", "a later paragraph")
+    await _chunks(db_session, entry, "a compiled summary", kind="summary")
+    store = SqliteKnowledgeStore(session_factory)
+
+    first = await store.first_body_chunks([entry.id])
+
+    assert first[entry.id].id == chunks[0].id
+    assert await store.first_body_chunks([]) == {}
 
 
 async def test_vectors_round_trip_and_knn_orders_by_distance(session_factory, db_session):

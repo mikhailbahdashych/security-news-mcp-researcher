@@ -95,27 +95,42 @@ def _blocks(text: str) -> list[_Block]:
 
 
 def _split_long_block(block: _Block, target_tokens: int) -> list[_Block]:
-    """Break a paragraph that is bigger than a whole chunk, on word boundaries.
+    """Break a paragraph that is bigger than a whole chunk.
 
-    A code block is never broken: the point of keeping it whole is that half a
-    command or half a diff is worse than a chunk over budget.
+    Word boundaries first, then a hard character cut for whatever is still over
+    budget. The second pass is not a fallback for odd input: **CJK prose has no
+    ASCII spaces at all**, and ``lang`` is a first-class column on ``kb_entries``,
+    so a word-only split would turn a Japanese or Chinese advisory into exactly one
+    unretrievable chunk. Base64 blobs and minified JSON do the same.
+
+    A code block is never broken either way: the point of keeping it whole is that
+    half a command or half a diff is worse than a chunk over budget. Nothing
+    downstream may therefore assume a chunk is near ``target_tokens``.
     """
     limit = int(target_tokens * CHARS_PER_TOKEN)
     if block.atomic or len(block.text) <= limit:
         return [block]
 
-    pieces: list[_Block] = []
+    pieces: list[str] = []
     current = ""
     for word in block.text.split(" "):
         candidate = f"{current} {word}" if current else word
         if current and len(candidate) > limit:
-            pieces.append(_Block(text=current, starts_chunk=False, atomic=False))
+            pieces.append(current)
             current = word
         else:
             current = candidate
     if current:
-        pieces.append(_Block(text=current, starts_chunk=False, atomic=False))
-    return pieces
+        pieces.append(current)
+
+    cut: list[_Block] = []
+    for piece in pieces:
+        if len(piece) <= limit:
+            cut.append(_Block(text=piece, starts_chunk=False, atomic=False))
+            continue
+        for start in range(0, len(piece), limit):
+            cut.append(_Block(text=piece[start : start + limit], starts_chunk=False, atomic=False))
+    return cut
 
 
 def _tail(text: str, overlap_tokens: int) -> str:

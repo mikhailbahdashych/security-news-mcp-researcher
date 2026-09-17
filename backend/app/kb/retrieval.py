@@ -20,7 +20,6 @@ contract change.
 
 from __future__ import annotations
 
-import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -31,8 +30,9 @@ from app.kb.fts import fts_query
 from app.kb.models import KbChunk, KbEntry
 from app.kb.store import DEFAULT_LEG_SIZE, KnowledgeStore, SearchFilters
 
-#: How a hit got here. ``entity`` is the exact leg; ``hybrid`` means both legs.
-MATCHED_BY = ("entity", "keyword", "vector", "hybrid")
+#: How a hit got here. ``entity`` is the exact leg; ``both`` means both legs
+#: found it. The API contract uses these spellings verbatim.
+MATCHED_BY = ("entity", "keyword", "vector", "both")
 
 #: The reciprocal-rank-fusion constant. 60 is the value the original paper used
 #: and the one every implementation since has kept.
@@ -44,8 +44,6 @@ ENTITY_SCORE = 1.0
 
 #: How much of a chunk is shown as the snippet.
 SNIPPET_CHARS = 400
-
-_CVE_ONLY = re.compile(rf"^\s*{CVE_PATTERN.pattern}\s*$", re.IGNORECASE)
 
 #: ``(entry_id, chunk_id, score)`` — what a leg looks like once hydrated.
 ScoredChunk = tuple[int, int, float]
@@ -104,23 +102,29 @@ def rrf(rankings: Sequence[Sequence[int]], *, k: int = RRF_K) -> list[tuple[int,
     return sorted(scores.items(), key=lambda row: (-row[1], row[0]))
 
 
-def _snippet(chunk: KbChunk | None, entry: KbEntry) -> str:
-    """Plain text, never markup: the client highlights by splitting it."""
-    if chunk is not None:
-        body = chunk.text
-    else:
-        body = entry.summary_md or entry.title
+def _snippet(body: str) -> str:
+    """Plain text, never markup: the client highlights by splitting it.
+
+    Callers pass a body chunk's text, or the entry's title when there is none.
+    **Never ``summary_md``**: a compiled summary is the model's own words and is
+    never returned as evidence (spec S5), and an entity hit — which has no chunk of
+    its own — is exactly the case that would otherwise reach for it.
+    """
     body = " ".join(body.split())
     return body if len(body) <= SNIPPET_CHARS else body[: SNIPPET_CHARS - 1].rstrip() + "…"
 
 
 def _entity_in(query: str, entity: tuple[str, str] | None) -> tuple[str, str] | None:
-    """The exact lookup this query deserves, if any."""
+    """The exact lookup this query deserves, if any.
+
+    A CVE id **anywhere** in the text counts, not only a query that is nothing but
+    the id: "Have we covered CVE-2024-3094?" is the question this leg exists for,
+    and it is not a bare id. The first id wins when there are several.
+    """
     if entity is not None:
         return entity
-    if _CVE_ONLY.match(query or ""):
-        return ("cve", query.strip().upper())
-    return None
+    match = CVE_PATTERN.search(query or "")
+    return ("cve", match.group(0).upper()) if match else None
 
 
 async def hybrid_search(
@@ -156,7 +160,7 @@ async def hybrid_search(
     exact_ids: list[int] = []
     lookup = _entity_in(q, entity)
     if lookup is not None:
-        exact_ids = await store.entities(*lookup)
+        exact_ids = await store.entities(*lookup, filters=filters)
 
     keyword_rows = await store.keyword(fts_query(q), leg_size, filters=filters)
     if not keyword_rows:
@@ -204,16 +208,22 @@ async def hybrid_search(
     hits: list[Hit] = []
     seen: set[int] = set()
 
+    # An entity hit matched the entry, not a passage, so it carries no chunk — but
+    # it still has to show the user something, and the first body chunk is the one
+    # thing that is both the entry's own text and not a compiled summary.
+    opening = await store.first_body_chunks(exact_ids) if exact_ids else {}
+
     for entry_id in exact_ids:
         entry = entries.get(entry_id)
-        if entry is None or not _passes_authorship(entry, filters):
+        if entry is None:
             continue
+        first = opening.get(entry_id)
         seen.add(entry_id)
         hits.append(
             Hit(
                 entry=entry,
                 chunk=None,
-                snippet=_snippet(None, entry),
+                snippet=_snippet(first.text if first is not None else entry.title),
                 distance=None,
                 bm25=None,
                 score=ENTITY_SCORE,
@@ -230,7 +240,7 @@ async def hybrid_search(
         keyword = keyword_by_entry.get(entry_id)
         vector = vector_by_entry.get(entry_id)
         if keyword and vector:
-            matched_by = "hybrid"
+            matched_by = "both"
         elif vector:
             matched_by = "vector"
         else:
@@ -242,7 +252,7 @@ async def hybrid_search(
             Hit(
                 entry=entry,
                 chunk=chunk,
-                snippet=_snippet(chunk, entry),
+                snippet=_snippet(chunk.text if chunk is not None else entry.title),
                 distance=vector[1] if vector else None,
                 bm25=keyword[1] if keyword else None,
                 score=score,
@@ -251,20 +261,6 @@ async def hybrid_search(
         )
 
     return hits[:limit]
-
-
-def _passes_authorship(entry: KbEntry, filters: SearchFilters) -> bool:
-    """The exact leg's copy of the gate the two query legs apply in SQL.
-
-    ``kb_entry_entities`` is looked up by value, not through the entry filters, so
-    a model-authored entry would otherwise reach the caller by the one route that
-    skipped the check (spec S5).
-    """
-    if filters.reviewed_only and entry.review_status != "reviewed":
-        return False
-    if filters.include_model_authored:
-        return True
-    return entry.authorship != "model" or entry.review_status == "reviewed"
 
 
 __all__ = [

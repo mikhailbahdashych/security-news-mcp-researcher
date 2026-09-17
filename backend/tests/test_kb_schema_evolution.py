@@ -19,6 +19,7 @@ from app.db.init import ADDED_INDEXES, init_db
 from app.db.models import Base, utcnow
 from app.kb.models import KbChunk, KbEntry
 from app.kb.schema import (
+    FTS_DDL_VERSION,
     FTS_TOKENIZER,
     KB_SCHEMA_VERSION_KEY,
     VEC_DDL_VERSION,
@@ -63,16 +64,27 @@ async def _add_vector(db_session, chunk_id: int, entry_id: int) -> None:
     )
 
 
-def test_added_indexes_say_exactly_what_the_models_say():
+def test_added_indexes_covers_every_index_the_models_declare():
+    """Iterating the *listed* set can never catch an omission — so iterate the
+    models instead. An index declared in ``__table_args__`` and forgotten here is
+    absent from every database that already exists, silently."""
+    for name, table in Base.metadata.tables.items():
+        if not (name.startswith("kb_") or name == "topics"):
+            continue
+        for index in table.indexes:
+            listed = ADDED_INDEXES.get(name, {})
+            assert index.name in listed, f"{name}.{index.name} is missing from ADDED_INDEXES"
+            compiled = str(CreateIndex(index).compile(dialect=sqlite.dialect()))
+            assert " ".join(compiled.split()) == listed[index.name].replace("IF NOT EXISTS ", "")
+
+
+def test_added_indexes_lists_nothing_the_models_do_not_declare():
     """Hand-written DDL that has drifted gives an upgraded database a different
     index from a fresh one — and nothing would ever notice."""
     for table, indexes in ADDED_INDEXES.items():
         assert table in Base.metadata.tables
-        declared = {index.name: index for index in Base.metadata.tables[table].indexes}
-        for name, ddl in indexes.items():
-            assert name in declared, f"{name} is not declared in the models"
-            compiled = str(CreateIndex(declared[name]).compile(dialect=sqlite.dialect()))
-            assert " ".join(compiled.split()) == ddl.replace("IF NOT EXISTS ", "")
+        declared = {index.name for index in Base.metadata.tables[table].indexes}
+        assert set(indexes) <= declared
 
 
 async def test_init_db_creates_an_index_a_previous_release_did_not_have(tmp_path: Path):
@@ -288,3 +300,153 @@ async def test_rebuild_fts_can_recreate_the_table_when_the_ddl_moved(session_fac
 async def test_rebuild_vec_refuses_a_nonsense_dimension(session_factory, dimensions: int):
     with pytest.raises(ValueError):
         await rebuild_vec(session_factory, dimensions=dimensions)
+
+
+async def test_a_rebuild_records_only_the_half_it_rebuilt(session_factory, db_session):
+    """Each rebuild writes its own keys onto the **stored** row.
+
+    Writing the whole of ``current_schema_version()`` means a vector rebuild
+    silently declares the keyword index current too: the user sees "index format
+    outdated" after a tokenizer change, presses *Rebuild vectors*, the warning
+    disappears, and the keyword index stays on the old tokenizer with nothing left
+    to notice.
+    """
+    await rebuild_vec(session_factory, dimensions=512)
+    db_session.expire_all()
+    assert (await index_status(db_session))["outdated"] is True
+
+    await rebuild_fts(session_factory)
+
+    db_session.expire_all()
+    stored = json.loads(await settings_service.get_str(db_session, KB_SCHEMA_VERSION_KEY))
+    assert stored["vec_dimensions"] == 512
+    assert stored["fts_ddl_version"] == FTS_DDL_VERSION
+    assert stored["tokenizer"] == FTS_TOKENIZER
+    assert (await index_status(db_session))["outdated"] is True
+
+
+async def test_a_rebuild_does_not_clear_an_unrelated_mismatch(session_factory, db_session):
+    behind = current_schema_version() | {"fts_ddl_version": FTS_DDL_VERSION - 1}
+    await settings_service.set_value(
+        db_session, KB_SCHEMA_VERSION_KEY, json.dumps(behind, sort_keys=True)
+    )
+    await db_session.commit()
+
+    await rebuild_vec(session_factory)
+
+    db_session.expire_all()
+    stored = json.loads(await settings_service.get_str(db_session, KB_SCHEMA_VERSION_KEY))
+    assert stored["fts_ddl_version"] == FTS_DDL_VERSION - 1
+    assert (await index_status(db_session))["outdated"] is True
+
+
+async def test_rebuild_fts_leaves_the_vector_half_alone(session_factory, db_session):
+    behind = current_schema_version() | {"vec_ddl_version": VEC_DDL_VERSION - 1}
+    await settings_service.set_value(
+        db_session, KB_SCHEMA_VERSION_KEY, json.dumps(behind, sort_keys=True)
+    )
+    await db_session.commit()
+
+    await rebuild_fts(session_factory)
+
+    db_session.expire_all()
+    stored = json.loads(await settings_service.get_str(db_session, KB_SCHEMA_VERSION_KEY))
+    assert stored["vec_ddl_version"] == VEC_DDL_VERSION - 1
+    assert (await index_status(db_session))["outdated"] is True
+
+
+@pytest.mark.parametrize("dimensions", [None, 512])
+async def test_an_interrupted_rebuild_never_leaves_the_database_without_the_table(
+    db_engine, session_factory, db_session, dimensions
+):
+    """The whole rebuild is one transaction.
+
+    The statement order alone is not enough: DDL does not start a transaction
+    under pysqlite's legacy handling, so a crash after the DROP would leave the
+    file with no ``kb_chunk_vec`` at all — every KNN raising ``no such table``
+    until a restart guessed a dimension for it.
+    """
+    chunk = await _chunk(db_session)
+    await _add_vector(db_session, chunk.id, chunk.entry_id)
+    await db_session.commit()
+
+    @event.listens_for(db_engine.sync_engine, "after_cursor_execute")
+    def _crash(conn, cursor, statement, parameters, context, executemany):
+        if " ".join(statement.split()) == "DROP TABLE kb_chunk_vec":
+            raise RuntimeError("power cut")
+
+    try:
+        with pytest.raises(RuntimeError, match="power cut"):
+            if dimensions is None:
+                await rebuild_vec(session_factory)
+            else:
+                await rebuild_vec(session_factory, dimensions=dimensions)
+    finally:
+        event.remove(db_engine.sync_engine, "after_cursor_execute", _crash)
+
+    names = {
+        row[0]
+        for row in (
+            await db_session.execute(
+                text("SELECT name FROM sqlite_master WHERE name LIKE 'kb_chunk_vec%'")
+            )
+        ).all()
+    }
+    assert "kb_chunk_vec" in names
+    assert not any(name.startswith("kb_chunk_vec_rebuild") for name in names)
+    assert (await db_session.execute(text("SELECT count(*) FROM kb_chunk_vec"))).scalar_one() == 1
+
+
+async def test_every_trigger_is_recreated_on_each_init_db(db_engine, db_session):
+    """Triggers are stateless, so they are dropped and recreated unconditionally.
+
+    Without that, a later release that has to fix ``kb_chunks_au`` or
+    ``kb_chunks_ad_vec`` would reach no database that already exists, silently —
+    neither DDL version covers a trigger.
+    """
+    await db_session.execute(text("DROP TRIGGER kb_chunks_ad_vec"))
+    await db_session.execute(
+        text("CREATE TRIGGER kb_chunks_ad_vec AFTER DELETE ON kb_chunks BEGIN SELECT 1; END")
+    )
+    await db_session.commit()
+
+    await init_db(db_engine, create_session_factory(db_engine))
+
+    db_session.expire_all()
+    body = (
+        await db_session.execute(
+            text("SELECT sql FROM sqlite_master WHERE name = 'kb_chunks_ad_vec'")
+        )
+    ).scalar_one()
+    assert "DELETE FROM kb_chunk_vec" in body
+
+
+async def test_a_non_text_update_does_not_touch_the_keyword_index(db_session):
+    """``embedded_at`` is written for every chunk on every re-index.
+
+    At 20 000 chunks a trigger that fires on any UPDATE is 40 000 needless FTS
+    delete/insert pairs per rebuild, all of them writing the same text back.
+    """
+    chunk = await _chunk(db_session, text_value="alpha beta gamma")
+
+    async def index_writes() -> int:
+        return (
+            await db_session.execute(text("SELECT count(*) FROM kb_chunks_fts_data"))
+        ).scalar_one()
+
+    before = await index_writes()
+    chunk.embedded_at = utcnow()
+    chunk.embedding_model = "fake-1"
+    await db_session.commit()
+    assert await index_writes() == before
+
+    # A real text change still reaches the index.
+    chunk.text = "delta epsilon"
+    await db_session.commit()
+    assert await index_writes() > before
+    found = (
+        await db_session.execute(
+            text("SELECT rowid FROM kb_chunks_fts WHERE kb_chunks_fts MATCH '\"delta\"'")
+        )
+    ).all()
+    assert [row[0] for row in found] == [chunk.id]

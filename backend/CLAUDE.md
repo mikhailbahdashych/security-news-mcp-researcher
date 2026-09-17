@@ -61,6 +61,13 @@ uvicorn's own loggers alone. Without it every `app.*` record had no handler at a
 | `app/logging_config.py` | `configure_logging` / `installed_handler`, `LOG_FORMAT`, `HANDLER_NAME`. |
 | `app/static.py` | `mount_spa` — serves `frontend/dist` in Docker; a no-op when the dir is absent (dev). Path-traversal safe. |
 | `app/db/engine.py` | `create_db_engine` (WAL / `synchronous=NORMAL` / `busy_timeout=5000` / `foreign_keys=ON` pragmas on every connect **and `sqlite-vec` loaded on every connect**), `create_session_factory`, `extension_status`. No module-level engine. |
+
+A failed extension load is **fatal by design** and says so: `RuntimeError` naming
+`uv sync` when the wheel is absent, or the Python build when its `sqlite3` has no
+`enable_load_extension`. Without the extension `kb_chunk_vec` is an unknown module and
+the schema cannot be read at all, so there is nothing to degrade to — but
+`extension_status` still answers (`vec_version=""`), because it is the one place that
+explains why vector search is unavailable.
 | `app/db/models.py` | The **complete, frozen** schema + `utcnow()`. No Alembic. |
 | `app/db/init.py` | `init_db(engine, session_factory=None)` — `create_all` + `ADDED_COLUMNS` top-up + the KB's virtual tables and triggers + `ADDED_INDEXES` top-up + `seed_defaults`, then one WARNING if the stored index format is outdated. Idempotent. |
 | `app/db/util.py` | `matches(column, value)` / `escape_like` / `like_pattern` / `LIKE_ESCAPE_CHAR` — **the** substring-match rule for the whole app. |
@@ -330,7 +337,7 @@ Three more ingest invariants worth not re-litigating (`app/services/feeds.py`):
 
 ## Tests (`backend/tests/`)
 
-`make test` → `uv run pytest` (**748 tests**, ~26 s) then the frontend's vitest. One
+`make test` → `uv run pytest` (**853 tests**, ~48 s) then the frontend's vitest. One
 `test_<area>.py` per area, `fakes/` for client stand-ins, `fixtures/` for XML/HTML.
 
 One test is **opt-in**: `tests/test_kb_benchmark.py` builds 20 000 chunks and times
@@ -409,10 +416,23 @@ app reports "index format outdated" until the user presses rebuild.
 **`init_db` never rebuilds by itself** — a vector rebuild re-embeds every chunk,
 which costs money and minutes. `rebuild_vec(session_factory, dimensions)` builds the
 replacement under a second name, fills it, and only then drops and recreates the
-real one from it; it never drops first. `rebuild_fts(session_factory)` reruns the
-FTS5 `'rebuild'` command (the content table is the source of truth, so there is
-nothing to lose), and `recreate=True` drops and recreates first, which is what a
-tokenizer change needs.
+real one from it; it never drops first, and the whole swap runs inside
+`BEGIN IMMEDIATE`, because DDL alone does not open a transaction and a crash after
+the `DROP` would otherwise leave the file with no `kb_chunk_vec` at all.
+`rebuild_fts(session_factory)` reruns the FTS5 `'rebuild'` command (the content
+table is the source of truth, so there is nothing to lose), and `recreate=True`
+drops and recreates first, which is what a tokenizer change needs. **Each rebuild
+records only the half it rebuilt** (`record_schema_version` merges onto the
+*stored* row): writing all five keys would have a vector rebuild declare the
+keyword index current too, and the "outdated" warning would vanish with the old
+tokenizer still in place.
+
+**The four triggers have no version of their own.** They hold no state, so
+`app/kb/schema.py::ensure_triggers` compares each stored body with the constant and
+recreates the ones that differ, on every `init_db` — that is their upgrade path, and
+without it a release that fixed `kb_chunks_au` or `kb_chunks_ad_vec` would reach no
+database that already exists. It is conditional rather than a blanket
+drop-and-create so that a steady-state `init_db` still writes nothing.
 
 **...a new setting.** Add the key + default to `DEFAULT_SETTINGS` in
 `app/services/settings.py` (this is also what `seed_defaults` inserts on an existing DB),

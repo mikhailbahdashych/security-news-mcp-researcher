@@ -35,6 +35,12 @@ def test_duplicates_collapse_and_order_is_first_appearance():
     ]
 
 
-def test_the_pattern_does_not_match_inside_a_longer_token():
+def test_the_pattern_has_no_word_boundaries():
+    """``CVE-\\d{4}-\\d{4,}`` is deliberately unanchored.
+
+    Five- and six-digit sequences are real ids, so there is no length to anchor
+    against, and a leading character does not stop the match. Both of these are
+    the documented behaviour, not accidents.
+    """
     assert extract_entities("XCVE-2024-3094") == [("cve", "CVE-2024-3094")]
     assert CVE_PATTERN.search("CVE-2024-30941234") is not None

@@ -14,9 +14,11 @@ from httpx2 import ASGITransport
 from sqlalchemy import inspect, select, text
 from sqlalchemy.dialects import sqlite
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.schema import CreateColumn
 
 from app.config import Settings
+from app.db import engine as engine_module
 from app.db.engine import create_db_engine, create_session_factory, extension_status
 from app.db.init import ADDED_COLUMNS, init_db
 from app.db.models import Base, Feed, FeedItem, Message, ResearchSession, Setting, utcnow
@@ -389,5 +391,43 @@ async def test_extension_status_reports_vec_and_fts5(db_session):
     status = await extension_status(db_session)
 
     assert status.vec_version.startswith("v0.1.")
+    assert status.fts5 is True
+    assert status.sqlite_version.count(".") == 2
+
+
+def test_a_missing_wheel_names_the_fix(monkeypatch):
+    """The app cannot open this file without sqlite-vec, so it must say so.
+
+    A bare ``ModuleNotFoundError`` at import, or an ``AttributeError`` on the first
+    connect, tells the user nothing they can act on — and ``extension_status``, the
+    one place that would have explained it, is never reached.
+    """
+    monkeypatch.setattr(engine_module, "sqlite_vec", None)
+
+    with pytest.raises(RuntimeError, match="uv sync"):
+        engine_module._load_sqlite_vec(object())
+
+
+def test_a_python_without_loadable_extensions_names_the_build(monkeypatch):
+    class Bare:
+        """An aiosqlite connection from a CPython built without extension support."""
+
+    class Adapter:
+        driver_connection = Bare()
+
+    with pytest.raises(RuntimeError, match="loadable SQLite extensions"):
+        engine_module._load_sqlite_vec(Adapter())
+
+
+async def test_extension_status_still_answers_without_the_extension(tmp_path: Path):
+    """Reachable even on the build that cannot load it — that is the whole point."""
+    plain = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'plain.db'}")
+    try:
+        async with plain.connect() as conn:
+            status = await extension_status(conn)
+    finally:
+        await plain.dispose()
+
+    assert status.vec_version == ""
     assert status.fts5 is True
     assert status.sqlite_version.count(".") == 2

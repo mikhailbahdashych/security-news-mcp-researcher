@@ -33,6 +33,13 @@ from __future__ import annotations
 #: initial-token ``^`` and the grouping parentheses. Removed from every term.
 OPERATOR_CHARS = "^*:()"
 
+#: C0 control characters, removed for the same reason as the punctuation above: a
+#: term containing ``\x00`` produces a phrase SQLite reads as an unterminated
+#: string, which is the one thing this module promises never to hand back. They
+#: reach us from a JSON request body and, in Phase 3, from model-supplied tool
+#: input; ``str.split`` already drops the whitespace ones between terms.
+CONTROL_CHARS = "".join(chr(code) for code in range(32))
+
 #: The bare operators. Uppercase only — that is how FTS5 itself reads them.
 OPERATORS = frozenset({"AND", "OR", "NOT", "NEAR"})
 
@@ -40,7 +47,7 @@ OPERATORS = frozenset({"AND", "OR", "NOT", "NEAR"})
 #: reaches for when ``AND`` returned nothing.
 JOINS = ("AND", "OR")
 
-_STRIPPER = str.maketrans("", "", OPERATOR_CHARS)
+_STRIPPER = str.maketrans("", "", OPERATOR_CHARS + CONTROL_CHARS)
 
 
 def fts_query(user_text: str, *, join: str = "AND") -> str:
@@ -64,4 +71,4 @@ def fts_query(user_text: str, *, join: str = "AND") -> str:
     return f" {join} ".join(terms)
 
 
-__all__ = ["JOINS", "OPERATORS", "OPERATOR_CHARS", "fts_query"]
+__all__ = ["CONTROL_CHARS", "JOINS", "OPERATORS", "OPERATOR_CHARS", "fts_query"]

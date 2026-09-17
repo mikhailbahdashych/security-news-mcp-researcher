@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession, a
 
 from app.db.engine import create_session_factory
 from app.db.models import Base
-from app.kb.schema import index_status, virtual_table_statements
+from app.kb.schema import ensure_triggers, index_status, virtual_table_statements
 from app.services.settings import seed_defaults
 
 logger = logging.getLogger(__name__)
@@ -53,10 +53,28 @@ ADDED_COLUMNS: dict[str, dict[str, str]] = {
 #: EXISTS`` SQLite strips when it records the statement. ``tests/
 #: test_kb_schema_evolution.py`` compiles every model index here and compares.
 ADDED_INDEXES: dict[str, dict[str, str]] = {
+    "kb_activity": {
+        "ix_kb_activity_at": ("CREATE INDEX IF NOT EXISTS ix_kb_activity_at ON kb_activity (at)"),
+    },
+    "kb_chunks": {
+        "ix_kb_chunks_embedded_at": (
+            "CREATE INDEX IF NOT EXISTS ix_kb_chunks_embedded_at ON kb_chunks (embedded_at)"
+        ),
+        "ix_kb_chunks_entry_id_ord": (
+            "CREATE INDEX IF NOT EXISTS ix_kb_chunks_entry_id_ord ON kb_chunks (entry_id, ord)"
+        ),
+    },
     "kb_entries": {
-        "uq_kb_entries_url": (
-            "CREATE UNIQUE INDEX IF NOT EXISTS uq_kb_entries_url ON kb_entries (url) "
-            "WHERE url IS NOT NULL AND deleted_at IS NULL"
+        "ix_kb_entries_content_hash": (
+            "CREATE INDEX IF NOT EXISTS ix_kb_entries_content_hash ON kb_entries (content_hash)"
+        ),
+        "ix_kb_entries_effective_at": (
+            "CREATE INDEX IF NOT EXISTS ix_kb_entries_effective_at ON kb_entries "
+            "(COALESCE(published_at, captured_at))"
+        ),
+        "uq_kb_entries_feed_item_id": (
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_kb_entries_feed_item_id ON kb_entries "
+            "(feed_item_id) WHERE feed_item_id IS NOT NULL"
         ),
         "uq_kb_entries_note_id": (
             "CREATE UNIQUE INDEX IF NOT EXISTS uq_kb_entries_note_id ON kb_entries (note_id) "
@@ -66,16 +84,25 @@ ADDED_INDEXES: dict[str, dict[str, str]] = {
             "CREATE UNIQUE INDEX IF NOT EXISTS uq_kb_entries_turn_message_id ON kb_entries "
             "(turn_message_id) WHERE turn_message_id IS NOT NULL"
         ),
-        "uq_kb_entries_feed_item_id": (
-            "CREATE UNIQUE INDEX IF NOT EXISTS uq_kb_entries_feed_item_id ON kb_entries "
-            "(feed_item_id) WHERE feed_item_id IS NOT NULL"
+        "uq_kb_entries_url": (
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_kb_entries_url ON kb_entries (url) "
+            "WHERE url IS NOT NULL AND deleted_at IS NULL"
         ),
-        "ix_kb_entries_content_hash": (
-            "CREATE INDEX IF NOT EXISTS ix_kb_entries_content_hash ON kb_entries (content_hash)"
+    },
+    "kb_entry_entities": {
+        "ix_kb_entry_entities_kind_value": (
+            "CREATE INDEX IF NOT EXISTS ix_kb_entry_entities_kind_value ON kb_entry_entities "
+            "(kind, value)"
         ),
-        "ix_kb_entries_effective_at": (
-            "CREATE INDEX IF NOT EXISTS ix_kb_entries_effective_at ON kb_entries "
-            "(COALESCE(published_at, captured_at))"
+    },
+    "kb_entry_links": {
+        "ix_kb_entry_links_entry_id": (
+            "CREATE INDEX IF NOT EXISTS ix_kb_entry_links_entry_id ON kb_entry_links (entry_id)"
+        ),
+    },
+    "kb_snapshots": {
+        "ix_kb_snapshots_entry_id": (
+            "CREATE INDEX IF NOT EXISTS ix_kb_snapshots_entry_id ON kb_snapshots (entry_id)"
         ),
     },
 }
@@ -119,6 +146,9 @@ async def init_db(
         # IF NOT EXISTS, so a second run is a no-op.
         for statement in virtual_table_statements():
             await conn.execute(text(statement))
+        # Triggers have no version of their own, so they are compared and
+        # recreated when their body has changed — see app.kb.schema.
+        await ensure_triggers(conn)
         for indexes in ADDED_INDEXES.values():
             await _ensure_indexes(conn, indexes)
 

@@ -18,8 +18,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import sqlite_vec
 from sqlalchemy import event, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import (
     AsyncConnection,
     AsyncEngine,
@@ -29,6 +29,11 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.util import await_only
 
+try:  # pragma: no cover - the wheel is a declared dependency; this is the diagnosis
+    import sqlite_vec
+except ModuleNotFoundError:  # pragma: no cover - see _load_sqlite_vec
+    sqlite_vec = None
+
 # WAL lets the feed poller write while a request reads; NORMAL synchronous is the
 # usual companion for WAL; busy_timeout turns "database is locked" into a short
 # wait; foreign_keys is off by default in SQLite and our cascades depend on it.
@@ -37,6 +42,22 @@ _PRAGMAS = (
     "PRAGMA synchronous=NORMAL",
     "PRAGMA busy_timeout=5000",
     "PRAGMA foreign_keys=ON",
+)
+
+
+#: What to tell a user whose installation cannot load the extension. This is fatal
+#: by design — ``kb_chunk_vec`` is a ``vec0`` table, so without the extension the
+#: schema cannot be read at all — so the message has to name the fix rather than
+#: leave a traceback to be interpreted.
+MISSING_WHEEL = (
+    "sqlite-vec is not installed, and this database cannot be opened without it "
+    "(kb_chunk_vec is a vec0 virtual table). Run `uv sync` in backend/."
+)
+NO_LOADABLE_EXTENSIONS = (
+    "This Python cannot load loadable SQLite extensions: its sqlite3 module has no "
+    "enable_load_extension, so it was built with --disable-loadable-sqlite-extensions. "
+    "The knowledge base needs sqlite-vec, so the application needs a Python build "
+    "that allows it."
 )
 
 
@@ -65,8 +86,18 @@ def _load_sqlite_vec(dbapi_connection: Any) -> None:
 
     Extension loading is re-disabled afterwards: leaving it on would let any later
     ``SELECT load_extension(...)`` pull arbitrary code into the process.
+
+    The two ways this can fail — no wheel, and a CPython built without loadable
+    extension support — are both fatal and both raise :class:`RuntimeError` naming
+    the fix. A bare ``ModuleNotFoundError`` at import or an ``AttributeError`` on
+    the first connect tells the user nothing they can act on, and takes
+    :func:`extension_status` down with it.
     """
+    if sqlite_vec is None:
+        raise RuntimeError(MISSING_WHEEL)
     driver_connection = dbapi_connection.driver_connection
+    if not hasattr(driver_connection, "enable_load_extension"):
+        raise RuntimeError(NO_LOADABLE_EXTENSIONS)
     await_only(driver_connection.enable_load_extension(True))
     try:
         await_only(driver_connection.load_extension(sqlite_vec.loadable_path()))
@@ -106,8 +137,15 @@ async def extension_status(executor: AsyncConnection | AsyncSession) -> Extensio
     application's control — a wheel that has to carry a loadable library, and a
     SQLite build that has to have been compiled with FTS5 — so the Settings panel
     states them rather than leaving a failed search to explain itself.
+
+    An absent ``vec_version()`` is reported as ``""`` rather than raised. This
+    function is the one place that explains *why* vector search is unavailable, so
+    it must survive the connection that cannot answer it.
     """
-    vec_version = (await executor.execute(text("SELECT vec_version()"))).scalar_one()
+    try:
+        vec_version = (await executor.execute(text("SELECT vec_version()"))).scalar_one()
+    except OperationalError:
+        vec_version = ""
     sqlite_version = (await executor.execute(text("SELECT sqlite_version()"))).scalar_one()
     options = {row[0] for row in (await executor.execute(text("PRAGMA compile_options"))).all()}
     return ExtensionStatus(
@@ -118,6 +156,8 @@ async def extension_status(executor: AsyncConnection | AsyncSession) -> Extensio
 
 
 __all__ = [
+    "MISSING_WHEEL",
+    "NO_LOADABLE_EXTENSIONS",
     "ExtensionStatus",
     "create_db_engine",
     "create_session_factory",
