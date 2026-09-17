@@ -399,6 +399,18 @@ export function cveChips(entry: KbEntry, max = 4): string[] {
   return seen.length > max ? [...seen.slice(0, max), `+${seen.length - max} more`] : seen
 }
 
+/**
+ * What the Settings panel says beside "Vector extension".
+ *
+ * The backend reports a missing `vec_version()` as the **empty string**, not
+ * `null` (`app/db/engine.py::extension_status` catches the `OperationalError`
+ * and returns `""`, typed `str`), so `?? 'not loaded'` never fired and the row
+ * drew its label with nothing beside it. `undefined` is a backend old enough not
+ * to send the field at all.
+ */
+export const vecVersionLabel = (version: string | null | undefined): string =>
+  version && version.trim() ? version : 'not loaded'
+
 /** Who published it: the recorded name, else the host, else nothing at all. */
 export const sourceLabel = (entry: KbEntry): string =>
   entry.source_name ?? hostOf(entry.url) ?? ''

@@ -22,6 +22,7 @@ import KnowledgeSection from '../components/settings/KnowledgeSection'
 import McpSection from '../components/settings/McpSection'
 import NumberField from '../components/settings/NumberField'
 import SettingsSection from '../components/settings/SettingsSection'
+import ErrorBoundary from '../components/ui/ErrorBoundary'
 import Button from '../components/ui/Button'
 import Card from '../components/ui/Card'
 import Checkbox from '../components/ui/Checkbox'
@@ -458,7 +459,7 @@ function Shell({ children }: { children: ReactNode }) {
         title="Settings"
         subtitle="Layout, API credentials, model preferences and the prompts used across the app."
       />
-      {children}
+      <ErrorBoundary>{children}</ErrorBoundary>
     </Page>
   )
 }

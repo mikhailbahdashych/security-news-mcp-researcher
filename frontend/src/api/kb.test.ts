@@ -12,6 +12,7 @@ import {
   parseEntryId,
   sinceDaysAgo,
   sourceLabel,
+  vecVersionLabel,
   type KbEntry,
   type KbHit,
 } from './kb'
@@ -237,5 +238,22 @@ describe('entityFilter', () => {
     expect(entityFilter('acme')).toBeNull()
     expect(entityFilter('cve:')).toBeNull()
     expect(entityFilter(':CVE-2026-60004')).toBeNull()
+  })
+})
+
+describe('vecVersionLabel', () => {
+  it('names the loaded version', () => {
+    expect(vecVersionLabel('v0.1.7-alpha.2')).toBe('v0.1.7-alpha.2')
+  })
+
+  it('reads the empty string the backend sends for a missing extension as absent', () => {
+    // `extension_status` catches the missing `vec_version()` and reports `""`,
+    // typed `str` — so `?? 'not loaded'` never fired and the row drew a label
+    // with nothing beside it.
+    expect(vecVersionLabel('')).toBe('not loaded')
+    expect(vecVersionLabel('   ')).toBe('not loaded')
+    expect(vecVersionLabel(null)).toBe('not loaded')
+    // An older backend that has no such field at all.
+    expect(vecVersionLabel(undefined)).toBe('not loaded')
   })
 })

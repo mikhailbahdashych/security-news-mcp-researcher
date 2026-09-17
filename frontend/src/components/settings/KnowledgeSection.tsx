@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 
-import { getStats, kbStatsKey, type KbStats } from '../../api/kb'
+import { getStats, kbStatsKey, vecVersionLabel, type KbStats } from '../../api/kb'
 import type { KbSchemaVersion } from '../../api/settings'
 import Checkbox from '../ui/Checkbox'
 import { FIELD_HINT } from '../ui/classes'
@@ -13,7 +13,8 @@ export interface KnowledgeSectionProps {
   captureStarred: boolean
   captureNotes: boolean
   minSnapshotChars: number
-  schema: KbSchemaVersion
+  /** Absent on a backend old enough not to report it — the row is then dropped. */
+  schema: KbSchemaVersion | undefined
   onCaptureStarred: (checked: boolean) => void
   onCaptureNotes: (checked: boolean) => void
   onMinSnapshotChars: (value: number) => void
@@ -84,7 +85,7 @@ function Stats({
   stats: KbStats | undefined
   isPending: boolean
   isError: boolean
-  schema: KbSchemaVersion
+  schema: KbSchemaVersion | undefined
 }) {
   if (isPending) {
     return <p className={FIELD_HINT}>Reading the index…</p>
@@ -93,6 +94,11 @@ function Stats({
     return <p className="text-[11.5px] text-red">The index could not be read.</p>
   }
 
+  // Every read here is guarded. These are facts about a *database*, sent by a
+  // backend that need not be the same version as this bundle, and one missing
+  // key used to take the whole SPA down with it — there was no error boundary
+  // anywhere. There is one now, and this panel no longer needs it.
+  const index = stats.index as KbStats['index'] | undefined
   const rows: [string, string][] = [
     ['Entries', `${stats.entries.toLocaleString()}${stats.deleted > 0 ? ` (${stats.deleted} deleted)` : ''}`],
     [
@@ -103,13 +109,15 @@ function Stats({
     ],
     ['Entities', stats.entities.toLocaleString()],
     ['Topics', stats.topics.toLocaleString()],
-    ['Keyword index (FTS5)', stats.index.fts5 ? 'available' : 'missing'],
+    ['Keyword index (FTS5)', index?.fts5 ? 'available' : 'missing'],
     // The vector extension is optional in Phase 1: without it the KB is a
     // keyword index, which is a working knowledge base and not a broken one.
-    ['Vector extension', stats.index.vec_version ?? 'not loaded'],
+    ['Vector extension', vecVersionLabel(index?.vec_version)],
     ['Embeddings', stats.embeddings_configured ? 'configured' : 'not configured yet'],
-    ['Schema', `v${schema.version} · ${schema.vec_dimensions} dims · ${schema.tokenizer}`],
   ]
+  if (schema) {
+    rows.push(['Schema', `v${schema.version} · ${schema.vec_dimensions} dims · ${schema.tokenizer}`])
+  }
 
   return (
     <div className="flex flex-col gap-1.5">
@@ -121,9 +129,9 @@ function Stats({
           </div>
         ))}
       </dl>
-      {stats.index.outdated ? (
+      {index?.outdated ? (
         <p className="text-[11.5px] text-amber">
-          The index was built by an older version of this app: {stats.index.reasons.join('; ')}. A
+          The index was built by an older version of this app: {(index.reasons ?? []).join('; ')}. A
           rebuild arrives with the embedding step.
         </p>
       ) : null}

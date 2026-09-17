@@ -33,6 +33,16 @@ is on screen in either pane, because the rail carries the chat history now.
 | `/knowledge`, `/knowledge/:id` | `pages/Knowledge.tsx` | The captured timeline, its search, and one entry in full |
 | `/settings` | `pages/Settings.tsx` | Layout, archived chats, API key, model, toggles, MCP panel |
 
+`components/ui/ErrorBoundary.tsx` is the **only class component** in the app — catching
+a render error is the one thing hooks cannot do. `SettingsSection` wraps every section's
+body in one, `Settings`' shell wraps the sections together, and the Knowledge page wraps
+each of its two modes (keyed, so opening another entry is a fresh attempt). The reason is
+version skew: this bundle and the backend it talks to need not agree, and one unguarded
+read of a payload — `stats.index`, `kb_schema_version` — used to unmount the **whole
+tree**, so a stats row nobody was looking at took the Inbox, the chat and the rail with
+it. The fallback is one line, deliberately: React already logs the error, and there is
+nothing to retry.
+
 `pages/Page.tsx` is the container every page but Research sits in: it owns the scroll
 and the column width (`PAGE_WIDTH` in `ui/classes.ts`). Research fills its pane and
 scrolls its answer column itself. Components are grouped by feature:
@@ -617,7 +627,12 @@ which leg answered.
   capture toggles and `kb_min_snapshot_chars` as part of the settings draft, and reads
   `GET /kb/stats` live beside them: the index counts are facts about the database, not
   preferences, so Save has nothing to do with them. `kb_schema_version` is read-only and
-  is therefore omitted from `Draft` and from `SettingsUpdate`.
+  is therefore omitted from `Draft` and from `SettingsUpdate`. Every read of that payload
+  is guarded and the schema row is dropped when the field is absent, because these are
+  facts about a *database* reported by a backend of possibly another version. The vector
+  row goes through `vecVersionLabel`: a missing extension is reported as the **empty
+  string**, not `null` (`extension_status` catches the `OperationalError`), so `??` never
+  fired and the row drew a label with nothing beside it.
 
 ## Markdown rendering
 
@@ -655,7 +670,7 @@ here, which is the point: the caller measures, the function decides),
 `lib/highlight.test.ts` (`splitOnQuery`, `splitOnTerms`),
 `api/kb.test.ts` (`kbEntryLink`, `parseEntryId`, `entryTimestamp`, the day grouping,
 `matchMarker`, `hitSnippet`, `cveChips`, `sourceLabel`, `kindLabel`, `sinceDaysAgo`,
-`entityFilter`),
+`entityFilter`, `vecVersionLabel`),
 `components/kb/autosave.test.ts` (`autosaveDecision`, `autosaveLabel`, `flushPlan`),
 `components/notes/excerpt.test.ts` and `lib/ids.test.ts`.
 

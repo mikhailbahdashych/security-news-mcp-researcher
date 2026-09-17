@@ -30,6 +30,7 @@ import SearchBox from '../components/kb/SearchBox'
 import Button from '../components/ui/Button'
 import Card from '../components/ui/Card'
 import EmptyState from '../components/ui/EmptyState'
+import ErrorBoundary from '../components/ui/ErrorBoundary'
 import Input from '../components/ui/Input'
 import PageHeader from '../components/ui/PageHeader'
 import type { EmbeddablePageProps } from '../components/ui/PageHost'
@@ -111,16 +112,22 @@ export default function KnowledgePage({ embedded = false }: EmbeddablePageProps)
     [embedded, navigate],
   )
 
+  // Keyed on what is on screen: a boundary that has caught an error stays
+  // caught, and opening another entry has to be a fresh attempt.
   if (entryId !== null) {
     return (
       <Page width="note">
-        <EntryDetail entryId={entryId} embedded={embedded} onBack={back} />
+        <ErrorBoundary key={entryId}>
+          <EntryDetail entryId={entryId} embedded={embedded} onBack={back} />
+        </ErrorBoundary>
       </Page>
     )
   }
 
   return (
-    <KnowledgeTimeline embedded={embedded} onOpen={openEntry} list={list} onList={setList} />
+    <ErrorBoundary key="timeline">
+      <KnowledgeTimeline embedded={embedded} onOpen={openEntry} list={list} onList={setList} />
+    </ErrorBoundary>
   )
 }
 
