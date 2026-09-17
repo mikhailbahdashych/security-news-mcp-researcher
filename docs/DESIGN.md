@@ -323,6 +323,50 @@ touched; what changed is everything around them.
   no component tests: logic that deserves a test lives in a `.ts` module.
 - `.playwright-mcp/` (browser artifacts from design review) is gitignored.
 
+### Knowledge base — Phase 1 (after the redesign)
+
+The first roadmap feature to land (`docs/ROADMAP.md` §1). The approved design is
+`docs/superpowers/specs/2026-09-17-knowledge-base-design.md` and the phased plan is
+`docs/superpowers/plans/2026-09-17-knowledge-base.md`; Phase 1 is a **keyword** knowledge
+base that is useful on its own — embeddings, the compile step and the topic taxonomy come
+later, and no key is needed to use what shipped.
+
+Implementation notes for the SPA half (the backend half is `backend/CLAUDE.md`):
+
+- **A fifth page key.** `knowledge`, with `/knowledge` and `/knowledge/:id`, a "Knowledge"
+  rail item between Notes and the bottom group, and a hand-drawn `book` glyph — no icon
+  library, like the rest of `ui/Icon.tsx`. It honours the `embedded` contract: in the
+  split view's right pane the open entry is React state and nothing touches the router.
+- **Listing and searching are the same view.** The timeline is `GET /api/kb/entries`
+  (keyset-paged, grouped by day on `COALESCE(published_at, captured_at)` — the same
+  expression the backend orders by); typing two characters switches it to
+  `POST /api/kb/search`, whose rows carry a snippet and a `keyword` / `vector` / `both` /
+  `exact` marker. Phase 1 answers `mode: "keyword"` and the page says so out loud rather
+  than letting a keyword miss look like a semantic one.
+- **Capture stays user-triggered.** Starring an item and generating a note capture
+  server-side inside the request that did it; the only capture the page drives itself is
+  "Save a URL". A 409 (too little text — a paywall or a cookie wall) is shown with the
+  reason the API gave, not swallowed.
+- **Delete is soft and reversible**: the entry stays readable, its page keeps a banner,
+  and the timeline's "Needs attention" strip offers Undo. The strip is drawn only when it
+  has something — in Phase 1 that is deleted entries alone, because auto-accepted
+  suggestions leave nothing routine to confirm.
+- **The notes editor autosaves** after a 1.2 s quiet period, never with a PATCH already in
+  flight (two writes over one field can land out of order and the loser is the newer
+  text). The decision is a tested pure function, `components/kb/autosave.ts`.
+- **The captured text is rendered by the existing safe Markdown component.** It is
+  somebody else's page: no `rehype-raw`, no `dangerouslySetInnerHTML`, and the search
+  marks are React `<mark>` nodes from `lib/highlight.ts::splitOnQuery` rather than server
+  markup.
+- **Settings → Knowledge** carries the capture toggles and `kb_min_snapshot_chars` in the
+  settings draft, and reads `GET /api/kb/stats` live beside them (entries, chunks, pending
+  embeddings, FTS5, the `sqlite-vec` version, and the index's "outdated" reasons) —
+  database facts, not preferences, so Save has nothing to do with them.
+- **Two shared helpers came out of it**: `lib/dates.ts` now owns `dayLabel`/`groupByDay`
+  (the chat list groups through the same pair) and `lib/highlight.ts` owns the query
+  splitting `GlobalSearch` used to do inline.
+- `.env.example` gains a **commented** `VOYAGE_API_KEY`: nothing reads it until Phase 2.
+
 ### Docker
 
 Multi-stage: node:22-bookworm-slim builds SPA → python:3.13-slim-bookworm runtime; copy Node binary + npm/npx from the node stage (same Debian release — required) so **stdio MCP servers via npx work in-container**; `pip install uv` for uvx servers. **Named volume** for /data (bind mounts on macOS Docker break SQLite locking). Document: stdio MCP servers run inside the container's namespace; for host-access MCP servers run backend on host (`make dev-api`) or use url-transport servers.

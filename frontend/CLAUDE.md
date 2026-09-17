@@ -30,12 +30,13 @@ is on screen in either pane, because the rail carries the chat history now.
 | `/chat`, `/chat/:id` | `pages/ChatPage.tsx` | The research view: transcript of turns, live stream. The chat list is in the rail, not here. |
 | `/notes` | `pages/Notes.tsx` | Note list + the generate dialog |
 | `/notes/:id` | `pages/NoteDetail.tsx` | Markdown viewer/editor, sources, copy/download |
+| `/knowledge`, `/knowledge/:id` | `pages/Knowledge.tsx` | The captured timeline, its search, and one entry in full |
 | `/settings` | `pages/Settings.tsx` | Layout, archived chats, API key, model, toggles, MCP panel |
 
 `pages/Page.tsx` is the container every page but Research sits in: it owns the scroll
 and the column width (`PAGE_WIDTH` in `ui/classes.ts`). Research fills its pane and
 scrolls its answer column itself. Components are grouped by feature:
-`components/{inbox,chat,notes,settings}/`, plus the shared `components/ui/` (the
+`components/{inbox,chat,notes,kb,settings}/`, plus the shared `components/ui/` (the
 primitives `Card`, `Dialog`, `ConfirmDialog`, `GlobalSearch`, `Select`, `Input`, … and
 the preference modules `layout.ts`, `railState.ts`, `theme.ts`, `storage.ts`,
 `modal.ts`, `searchKeys.ts`) and `components/BackendStatus.tsx` (rendered at the foot
@@ -44,8 +45,8 @@ contexts.
 
 ### Split view and the `embedded` contract
 
-`ui/layout.ts` holds the four `PAGE_KEYS` (`inbox` / `research` / `notes` /
-`settings`), `routeForPage`, `pageFromPath` and the stored `LayoutState`
+`ui/layout.ts` holds the five `PAGE_KEYS` (`inbox` / `research` / `notes` /
+`knowledge` / `settings`), `routeForPage`, `pageFromPath` and the stored `LayoutState`
 (`{split, paneB}`). With `split` on, the shell renders the router's `<Routes>`
 in the left pane and `<PageHost page={paneB} embedded />` in the right one. There is no
 stored left pane: the URL is the only statement of what the left pane shows.
@@ -54,7 +55,10 @@ stored left pane: the URL is the only statement of what the left pane shows.
 their own. So every page accepts `EmbeddablePageProps` (`ui/PageHost.tsx`) and, when
 `embedded` is true, must keep its own selection in React state — **no `useParams`, no
 `useSearchParams`, no navigation**. `ChatPage` keeps `embeddedSessionId`; `Notes` keeps
-`openNoteId` and renders `NoteDetailPage embedded noteId=… onBack=…` itself; `Inbox`
+`openNoteId` and renders `NoteDetailPage embedded noteId=… onBack=…` itself; `Knowledge`
+keeps `openId` and renders `EntryDetail embedded onBack=…` in place (its rows become
+buttons rather than `<Link>`s, and `EntryDetail`'s back-links go flat for the same
+reason — following one would swap the *other* pane out); `Inbox`
 ignores the deep-link query params. Everything else (fetching, dialogs, mutations) is
 identical in both modes. `Settings` is the sanctioned exception: it ignores `embedded`
 entirely, because it edits app state rather than a selection, and its Layout section
@@ -142,13 +146,15 @@ predicate a page navigates away on — a 404 means the thing is gone, while a ba
 that is down throws a `TypeError` out of `fetch` and must not lose the user's URL.
 
 One module per domain — `inbox.ts`, `chat.ts`, `notes.ts`, `search.ts`, `settings.ts`,
-`mcp.ts` — each exporting the response *interfaces* (mirroring the backend pydantic
+`mcp.ts`, `kb.ts` — each exporting the response *interfaces* (mirroring the backend pydantic
 schemas), the **query keys**, and thin request functions. Query keys are exported
 constants/factories, never inline literals: `feedsQueryKey`, `itemsQueryKey(filters)`,
 `sessionsQueryKey`/`sessionsListKey(filters)`/`sessionQueryKey(id)`,
 `notesQueryKey`/`notesListKey(q)`/`noteQueryKey(id)`, `searchQueryKey(q)`,
 `settingsQueryKey`, `modelsQueryKey`, `mcpServersQueryKey`, `mcpToolsQueryKey`,
-`runningSessionsKey` (`['sessions', 'running']`).
+`runningSessionsKey` (`['sessions', 'running']`),
+`kbQueryKey`/`kbEntriesKey(filters)`/`kbSearchKey(q, filters)`/`kbEntryKey(id)`/
+`kbStatsKey`/`kbTopicsKey`.
 A bare prefix (`['sessions']`, `['notes']`) exists so one `invalidateQueries` refreshes
 every filtered variant under it — a rename or a delete cannot know which filter is on
 screen.
@@ -159,7 +165,19 @@ notes — `getNextPageParam: page => page.next_cursor ?? undefined`), `useMutati
 
 `lib/dates.ts::parseUtc(value)` — the backend stores **naive UTC**, so a timestamp
 arrives without a zone designator and `new Date(...)` would read it as local time.
-Every date must go through `parseUtc`. (It used to live in `api/inbox.ts`.)
+Every date must go through `parseUtc`. (It used to live in `api/inbox.ts`.) Beside it,
+`dayLabel(timestamp)` is the one rendered day in the app (`16 Sep 2026`, built from the
+parts so the browser locale cannot reorder or translate it) and `groupByDay(rows,
+stampOf)` cuts a server-ordered list into days on that label — the chat list and the
+Knowledge timeline both go through it. `stampOf` returns the **timestamp**: handing it
+a label that `dayLabel` already rendered re-parses `16 Sep 2026` as midnight UTC, which
+V8 accepts and which slips every header a day west of Greenwich.
+
+`lib/highlight.ts::splitOnQuery(text, query)` — the query marked inside a plain-text
+string, returned as parts for the caller to render as `<mark>`. Parts rather than
+markup because a captured headline is text somebody else wrote: `GlobalSearch` and the
+Knowledge timeline both mark their snippets this way, and neither may reach for
+`dangerouslySetInnerHTML`.
 
 `lib/useDebouncedValue.ts` — every search box drives a query key, so without it each
 keystroke is its own request and its own cache entry. Used by `GlobalSearch`, `Inbox`,
@@ -520,6 +538,51 @@ inline emphasis from the API's excerpt so a two-line clamp reads as prose. It is
 deliberately **not** a parser — it runs on a preview usually cut mid-sentence.
 `components/notes/noteDate.ts` formats through `parseUtc`.
 
+## Knowledge (`pages/Knowledge.tsx`, `components/kb/`, `api/kb.ts`)
+
+The captured layer: everything the app kept a searchable copy of. Phase 1 of
+`docs/superpowers/specs/2026-09-17-knowledge-base-design.md` — a keyword knowledge base;
+the vector leg and the compile step arrive later and the page is already built to show
+which leg answered.
+
+- **One page, two modes.** `/knowledge` is the timeline and `/knowledge/:id` is one
+  entry; embedded, the selection is `openId` in React state and `EntryDetail` renders in
+  place. The id is read with `parseEntryId`, never `Number()`: `Number('abc')` is `NaN`
+  and both it and `1.5` reach the API as a **422**, a status `isNotFound` cannot act on,
+  so the page would sit on a dead URL instead of leaving it.
+- **Listing and searching are one list.** Under `KB_MIN_SEARCH_CHARS` (2) the timeline
+  stands; above it `POST /kb/search` answers, and the rows carry a snippet and a
+  `keyword` / `vector` / `both` / `exact` marker (`matchMarker`, which shows an unknown
+  leg from a newer backend verbatim rather than hiding a real hit). Hits are **not** cut
+  into days: they are ordered by score, and a date header over them would lie about the
+  ordering.
+- **The timeline dates rows on `published_at ?? captured_at`** (`entryTimestamp`),
+  because that is the `COALESCE` the backend orders by — group on anything else and a
+  row lands under a header it did not sort into.
+- **`GET /kb/entries` carries one leg, never both.** The backend *drops* the absent key,
+  so `entries === undefined` means "that answer was a search", not "the list is empty".
+- **Capture is a side effect of other pages.** Starring an item and generating a note
+  capture server-side, inside the request that did it, so `Inbox`'s triage mutations
+  invalidate `kbQueryKey` as well as `['items']` — in the split view the Knowledge pane
+  is often the one on screen beside them.
+- **The notes editor autosaves.** `components/kb/autosave.ts::autosaveDecision` is the
+  tested decision (typing / clean / in-flight / save) and `autosaveLabel` the line under
+  the box; a PATCH is never issued while one is in flight, because two writes over one
+  field can land out of order and the loser is the newer text. The title is seeded once
+  per entry through a `key`, not through an effect — a background refetch mid-edit would
+  otherwise throw the half-typed title away.
+- **A soft delete is readable.** The entry page stays open with a banner, and the
+  timeline's "Needs attention" strip lists what is in the bin with an Undo. The strip is
+  drawn only when it has something. A 409 on Undo means the URL was captured again while
+  the entry was deleted — it is shown, not swallowed.
+- **The snapshot is captured Markdown** and goes through `components/chat/Markdown.tsx`
+  like everything else. Never `dangerouslySetInnerHTML` — this is somebody else's page.
+- **Settings → Knowledge** (`components/settings/KnowledgeSection.tsx`) holds the two
+  capture toggles and `kb_min_snapshot_chars` as part of the settings draft, and reads
+  `GET /kb/stats` live beside them: the index counts are facts about the database, not
+  preferences, so Save has nothing to do with them. `kb_schema_version` is read-only and
+  is therefore omitted from `Draft` and from `SettingsUpdate`.
+
 ## Markdown rendering
 
 `components/chat/Markdown.tsx` wraps `ReactMarkdown` with `remarkPlugins={[remarkGfm]}`
@@ -531,7 +594,7 @@ hand-rolled `.prose-chat` block in `src/index.css`, deliberately instead of
 
 ## Tests
 
-`npx vitest run` — **11 files, 188 tests**, `environment: 'node'` with
+`npx vitest run` — **15 files, 226 tests**, `environment: 'node'` with
 **`TZ` pinned to `UTC`** (`test.env` in `vite.config.ts`: the backend sends naive UTC and
 the app renders the viewer's *local* day of it, so a test that asserts an instant would
 otherwise assert the machine's offset, and UTC+13/+14 roll a midday stamp over to the next
@@ -552,6 +615,11 @@ the `activity` transitions, turn scoping, `activityLabel`, `showsProgress`,
 `components/ui/menuPosition.test.ts` (fits below, flips above, clamps — there is no DOM
 here, which is the point: the caller measures, the function decides),
 `api/client.test.ts` (`isNotFound`),
+`lib/dates.test.ts` (`parseUtc`, `dayLabel`, `groupByDay`),
+`lib/highlight.test.ts` (`splitOnQuery`),
+`api/kb.test.ts` (`kbEntryLink`, `parseEntryId`, `entryTimestamp`, the day grouping,
+`matchMarker`, `hitSnippet`, `cveChips`, `sourceLabel`, `kindLabel`, `sinceDaysAgo`),
+`components/kb/autosave.test.ts` (`autosaveDecision`, `autosaveLabel`),
 `components/notes/excerpt.test.ts` and `lib/ids.test.ts`.
 
 Component and E2E tests are deliberately out of scope — **do not add a jsdom
