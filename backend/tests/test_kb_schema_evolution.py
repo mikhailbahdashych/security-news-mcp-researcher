@@ -22,9 +22,11 @@ from app.kb.schema import (
     FTS_DDL_VERSION,
     FTS_TOKENIZER,
     KB_SCHEMA_VERSION_KEY,
+    TRIGGERS,
     VEC_DDL_VERSION,
     VEC_DIMENSIONS,
     current_schema_version,
+    ensure_triggers,
     index_status,
     rebuild_fts,
     rebuild_vec,
@@ -397,16 +399,19 @@ async def test_an_interrupted_rebuild_never_leaves_the_database_without_the_tabl
     assert (await db_session.execute(text("SELECT count(*) FROM kb_chunk_vec"))).scalar_one() == 1
 
 
-async def test_every_trigger_is_recreated_on_each_init_db(db_engine, db_session):
-    """Triggers are stateless, so they are dropped and recreated unconditionally.
+@pytest.mark.parametrize("name", sorted(TRIGGERS))
+async def test_every_trigger_is_repaired_by_init_db(db_engine, db_session, name):
+    """Triggers are stateless, so a wrong one is replaced by the one this build wants.
 
     Without that, a later release that has to fix ``kb_chunks_au`` or
     ``kb_chunks_ad_vec`` would reach no database that already exists, silently —
-    neither DDL version covers a trigger.
+    neither DDL version covers a trigger. Parametrised over ``TRIGGERS`` rather
+    than spot-checking one of them: adding a fifth trigger and forgetting to list
+    it there is exactly the mistake this has to catch.
     """
-    await db_session.execute(text("DROP TRIGGER kb_chunks_ad_vec"))
+    await db_session.execute(text(f"DROP TRIGGER {name}"))
     await db_session.execute(
-        text("CREATE TRIGGER kb_chunks_ad_vec AFTER DELETE ON kb_chunks BEGIN SELECT 1; END")
+        text(f"CREATE TRIGGER {name} AFTER DELETE ON kb_chunks BEGIN SELECT 1; END")
     )
     await db_session.commit()
 
@@ -415,10 +420,36 @@ async def test_every_trigger_is_recreated_on_each_init_db(db_engine, db_session)
     db_session.expire_all()
     body = (
         await db_session.execute(
-            text("SELECT sql FROM sqlite_master WHERE name = 'kb_chunks_ad_vec'")
+            text("SELECT sql FROM sqlite_master WHERE name = :name"), {"name": name}
         )
     ).scalar_one()
-    assert "DELETE FROM kb_chunk_vec" in body
+    assert " ".join(body.split()) == " ".join(TRIGGERS[name].split())
+
+
+async def test_a_steady_state_init_db_writes_no_trigger_at_all(db_engine, db_session):
+    """The repair is conditional, and "conditional" has to mean "silent when correct".
+
+    ``init_db`` runs at every startup. A routine that dropped and recreated four
+    triggers each time would take the database's write lock for nothing — and
+    contend with whatever else was mid-transaction, which is how an unrelated
+    seeding test started failing.
+    """
+    written: list[str] = []
+
+    @event.listens_for(db_engine.sync_engine, "after_cursor_execute")
+    def _record(conn, cursor, statement, parameters, context, executemany):
+        head = statement.strip().split(None, 1)[0].upper() if statement.strip() else ""
+        if head in ("CREATE", "DROP") and "TRIGGER" in statement.upper():
+            written.append(" ".join(statement.split()))
+
+    try:
+        await init_db(db_engine, create_session_factory(db_engine))
+    finally:
+        event.remove(db_engine.sync_engine, "after_cursor_execute", _record)
+
+    assert written == []
+    async with db_engine.begin() as conn:
+        assert await ensure_triggers(conn) == []
 
 
 async def test_a_non_text_update_does_not_touch_the_keyword_index(db_session):
