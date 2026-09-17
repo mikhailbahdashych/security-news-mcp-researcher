@@ -61,13 +61,6 @@ uvicorn's own loggers alone. Without it every `app.*` record had no handler at a
 | `app/logging_config.py` | `configure_logging` / `installed_handler`, `LOG_FORMAT`, `HANDLER_NAME`. |
 | `app/static.py` | `mount_spa` — serves `frontend/dist` in Docker; a no-op when the dir is absent (dev). Path-traversal safe. |
 | `app/db/engine.py` | `create_db_engine` (WAL / `synchronous=NORMAL` / `busy_timeout=5000` / `foreign_keys=ON` pragmas on every connect **and `sqlite-vec` loaded on every connect**), `create_session_factory`, `extension_status`. No module-level engine. |
-
-A failed extension load is **fatal by design** and says so: `RuntimeError` naming
-`uv sync` when the wheel is absent, or the Python build when its `sqlite3` has no
-`enable_load_extension`. Without the extension `kb_chunk_vec` is an unknown module and
-the schema cannot be read at all, so there is nothing to degrade to — but
-`extension_status` still answers (`vec_version=""`), because it is the one place that
-explains why vector search is unavailable.
 | `app/db/models.py` | The **complete, frozen** schema + `utcnow()`. No Alembic. |
 | `app/db/init.py` | `init_db(engine, session_factory=None)` — `create_all` + `ADDED_COLUMNS` top-up + the KB's virtual tables and triggers + `ADDED_INDEXES` top-up + `seed_defaults`, then one WARNING if the stored index format is outdated. Idempotent. |
 | `app/db/util.py` | `matches(column, value)` / `escape_like` / `like_pattern` / `LIKE_ESCAPE_CHAR` — **the** substring-match rule for the whole app. |
@@ -77,6 +70,13 @@ explains why vector search is unavailable.
 | `app/agent/` | The agent loop, the tool registry and the **turn registry** (`turns.py`, `turnlog.py`) — see `app/agent/CLAUDE.md`. |
 | `app/mcp/` | The MCP client — see `app/mcp/CLAUDE.md`. |
 | `app/kb/` | The knowledge base: `models` (its tables), `schema` (the two **frozen** virtual tables, their versions and the rebuilds), `chunking`, `fts`, `entities`, `embeddings`, `store`, `retrieval`, `urls` (canonicalisation), `capture` (the writes), `service` (`KbService`, the one door). |
+
+A failed extension load is **fatal by design** and says so: `RuntimeError` naming
+`uv sync` when the wheel is absent, or the Python build when its `sqlite3` has no
+`enable_load_extension`. Without the extension `kb_chunk_vec` is an unknown module and
+the schema cannot be read at all, so there is nothing to degrade to — but
+`extension_status` still answers (`vec_version=""`), because it is the one place that
+explains why vector search is unavailable.
 
 `research_sessions` carries the turn state: `turn_status` (`idle` | `running` |
 `interrupted`) and `turn_started_at`, written only by the registry — and written with
@@ -289,8 +289,18 @@ because they are policy, and policy in a route is policy the next route forgets:
 generation calls the latter after `save_note`. Each wraps the capture in
 `KbService.guarded`, which turns any exception into a `kb_activity` row with
 `action='skip'` — a paywall, a 403 or a Voyage outage must never cost someone the star
-they pressed. **Bulk starring does not capture**: 50 items is 50 extractions, which is the
-Phase 2 SSE job (`kb:bulk:{id}`), not a request.
+they pressed. **The policy read is inside `guarded` too**, because reading
+`kb_capture_notes` is a database read like any other and the user's write has already
+gone in. All three triggers take the service through `KbServiceDep`, including the one
+inside the generation stream — `get_kb_service` does not *yield*, so there is nothing for
+the dependency teardown to close before the body is sent, and a trigger no override can
+reach is a trigger no test can drive. **Bulk starring does not capture**: 50 items is 50
+extractions, which is the Phase 2 SSE job (`kb:bulk:{id}`), not a request.
+
+The embedding call is likewise wrapped (`capture.py::_embed_pending_quietly`): it runs
+after the commit, so a provider outage leaves the chunks pending and writes an activity
+row rather than 500-ing a save that succeeded (spec §5). `embedded_at IS NULL` is the one
+definition of "pending" and what Re-index resumes from.
 
 Capture order is fixed (spec §4.5): canonicalise the URL → dedup (canonical URL, else feed
 item id, else content hash — the hash is the *fallback*, not an extra check, because two
@@ -301,13 +311,35 @@ extractor's, else NULL — **never** the capture time. No function here holds a 
 across the embedder call, because SQLite has exactly one writer.
 
 `POST /entries` answers **201** for a new entry and **200** for one that was already held
-and has just gained a back-link; **409** is text below `kb_min_snapshot_chars` or a
-collision only the user can resolve (an Undo whose URL was re-captured, a purge naming a
-live entry — `app/kb/capture.py::KbConflict`). A **deleted entry is readable**, not a 404:
-that is what Undo and the trash view (`?deleted=true`) need. `GET /entries` answers with
-`entries` when it lists and with `hits` when `q` is present, and the absent key is dropped
-from the JSON rather than sent as `null`, so an empty list can never be read as "the search
-found nothing".
+and has just gained a back-link. Saving something that is in the trash **revives it**, so
+the 200 always describes an entry the user can now see — `created=False` with
+`deleted_at` still set was a client saying "Saved" over a row the timeline did not list.
+The three ways a save writes nothing are three different status codes, off
+`CaptureResult.skipped_code`: **422** not an absolute http(s) URL, **502** the fetch
+failed, **409** the text was below `kb_min_snapshot_chars`. 409 is also the collision only
+the user can resolve (an Undo — or a revive — whose URL was re-captured, a purge naming a
+live entry, a topic name already in use — `app/kb/capture.py::KbConflict`).
+
+A **deleted entry is readable**, not a 404: that is what Undo and the trash view
+(`?deleted=true`) need. It is also **chunkless, and stays that way**: `soft_delete` drops
+the chunks so that "deleted" needs no filter anywhere, and `_replace_snapshot` therefore
+does not give them back when the source note is edited — it still stores the new version,
+and `undelete` re-chunks from it.
+
+`GET /entries` answers with `entries` when it lists and with `hits` when `q` is present,
+and the absent key is dropped from the JSON rather than sent as `null`, so an empty list
+can never be read as "the search found nothing". `next_cursor` goes with it on the hits
+branch: hits are ordered by score and there is no keyset to resume from. **Every filter
+applies to both branches** — `kind`, `topic_id`, `entity`, `since`, `review` and
+`deleted`. `review` and `deleted` cannot reach the search legs as SQL (`reviewed_only`
+narrows to *reviewed* and has no other half; nothing deleted is searchable at all, so the
+trash is a list and a search of it is empty by definition), so they narrow the hits
+afterwards and a page of hits can come back shorter than `limit`.
+
+`app/kb/urls.py::canonical_url` **filters** the query string, it never re-encodes it:
+`?b` is not `?b=` and `%20` is not `+`, and the canonical form is what "Refresh snapshot"
+re-fetches. Exactly one trailing slash is stripped (`/a//` → `/a/`) and the root keeps
+its own.
 
 ## Cancellation (`app/agent/turns.py`, `app/api/tasks.py`)
 
@@ -393,8 +425,9 @@ Three more ingest invariants worth not re-litigating (`app/services/feeds.py`):
 
 ## Tests (`backend/tests/`)
 
-`make test` → `uv run pytest` (**857 tests**, ~36 s) then the frontend's vitest. One
-`test_<area>.py` per area, `fakes/` for client stand-ins, `fixtures/` for XML/HTML.
+`make test` → `uv run pytest` (**877 passed, 3 skipped**, ~40 s) then the frontend's
+vitest. One `test_<area>.py` per area, `fakes/` for client stand-ins, `fixtures/` for
+XML/HTML.
 
 One test is **opt-in**: `tests/test_kb_benchmark.py` builds 20 000 chunks and times
 the keyword leg. Run it with `KB_BENCHMARK=1 uv run pytest tests/test_kb_benchmark.py -s`
