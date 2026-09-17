@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { splitOnQuery } from './highlight'
+import { splitOnQuery, splitOnTerms } from './highlight'
 
 describe('splitOnQuery', () => {
   it('marks the match and keeps the text around it', () => {
@@ -30,5 +30,33 @@ describe('splitOnQuery', () => {
 
   it('adds no empty run when the match is at either end', () => {
     expect(splitOnQuery('worm', 'worm')).toEqual([{ text: 'worm', match: true }])
+  })
+})
+
+describe('splitOnTerms', () => {
+  it('marks each term where it sits, not the phrase', () => {
+    // FTS5 matches `"chaindrop" AND "worm"`, which can be paragraphs apart —
+    // looking for the literal phrase finds nothing and leaves the hit unmarked.
+    const parts = splitOnTerms('A ChainDrop package hid a worm', 'chaindrop worm')
+    expect(parts.filter((part) => part.match).map((part) => part.text)).toEqual([
+      'ChainDrop',
+      'worm',
+    ])
+    expect(parts.map((part) => part.text).join('')).toBe('A ChainDrop package hid a worm')
+  })
+
+  it('is the plain split when the query is one term', () => {
+    expect(splitOnTerms('A worm', 'worm')).toEqual(splitOnQuery('A worm', 'worm'))
+  })
+
+  it('never marks inside a run another term already claimed', () => {
+    // `npm` occurs inside `npmjs`, and a second pass over an already-marked run
+    // would nest the marks.
+    const parts = splitOnTerms('npmjs registry', 'npmjs npm')
+    expect(parts.filter((part) => part.match).map((part) => part.text)).toEqual(['npmjs'])
+  })
+
+  it('gives back one unmatched run for an empty query', () => {
+    expect(splitOnTerms('A worm', '   ')).toEqual([{ text: 'A worm', match: false }])
   })
 })

@@ -12,7 +12,7 @@ import {
   type KbEntry,
   type KbHit,
 } from '../../api/kb'
-import { splitOnQuery } from '../../lib/highlight'
+import { splitOnTerms } from '../../lib/highlight'
 import { excerptFromMarkdown } from '../notes/excerpt'
 import Badge from '../ui/Badge'
 import { HOVER_ROW, SECTION_LABEL, cx } from '../ui/classes'
@@ -151,11 +151,16 @@ function EntryRow({ entry, hit, query, onOpen }: EntryRowProps) {
 /**
  * The query, marked inside a plain-text string.
  *
+ * Per *term*, because that is how the hit was found: FTS5 is handed
+ * `"chaindrop" AND "worm"` and happily matches two words a paragraph apart, so
+ * looking for the phrase would draw the row with no marks and no visible reason
+ * why it matched.
+ *
  * Split in React, never `dangerouslySetInnerHTML`: a captured headline is text
  * somebody else wrote.
  */
 function Marked({ text, query }: { text: string; query: string }): ReactNode {
-  return splitOnQuery(text, query).map((part, index) =>
+  return splitOnTerms(text, query).map((part, index) =>
     part.match ? (
       <mark key={index} className="rounded-[3px] bg-accent-soft text-accent">
         {part.text}

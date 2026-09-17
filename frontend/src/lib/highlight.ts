@@ -39,3 +39,24 @@ export function splitOnQuery(text: string, query: string): HighlightPart[] {
   }
   return parts
 }
+
+/**
+ * Split on every whitespace-separated *term* of `query`, not on the phrase.
+ *
+ * FTS5 is handed `"chaindrop" AND "worm"`, so a hit can match on two words that
+ * sit paragraphs apart; looking for the literal string `chaindrop worm` finds
+ * nothing and draws the row with no marks and no visible reason why it matched.
+ * `GlobalSearch` stays on `splitOnQuery`, because `LIKE '%q%'` really does match
+ * the whole string.
+ *
+ * Terms are applied in order and never re-split a run another term has already
+ * claimed, so `npmjs npm` marks `npmjs` once rather than nesting a mark inside it.
+ */
+export function splitOnTerms(text: string, query: string): HighlightPart[] {
+  const terms = query.trim().split(/\s+/).filter(Boolean)
+  return terms.reduce<HighlightPart[]>(
+    (parts, term) =>
+      parts.flatMap((part) => (part.match ? [part] : splitOnQuery(part.text, term))),
+    [{ text, match: false }],
+  )
+}
