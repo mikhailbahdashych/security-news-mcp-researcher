@@ -613,6 +613,11 @@ which leg answered.
   refetch mid-edit would otherwise throw the half-typed title away — and the rename is a
   mutation that **puts the field back and says so** when the write loses, because the
   blur that would have retried it has already happened.
+- **A re-read has three outcomes, not two.** `POST /entries/{id}/refresh` answers 200
+  whether the text moved, did not move, or could not be fetched at all, so `changed`
+  alone cannot tell the last two apart — `refreshMessage` / `refreshFailed` read `status`
+  and `reason`, and a failed re-read says "Refresh failed: …" in red instead of the
+  "unchanged" that used to sit over a Cloudflare 403.
 - **Capture failures are only visible in the entry's activity list**, so the detail page
   draws the `activity` rows `GET /kb/entries/{id}` already carries.
 - **Leaving a dead entry `replace`s.** `EntryDetail`'s 404 effect calls `onBack(true)`:
@@ -670,7 +675,7 @@ here, which is the point: the caller measures, the function decides),
 `lib/highlight.test.ts` (`splitOnQuery`, `splitOnTerms`),
 `api/kb.test.ts` (`kbEntryLink`, `parseEntryId`, `entryTimestamp`, the day grouping,
 `matchMarker`, `hitSnippet`, `cveChips`, `sourceLabel`, `kindLabel`, `sinceDaysAgo`,
-`entityFilter`, `vecVersionLabel`),
+`entityFilter`, `vecVersionLabel`, `refreshMessage`/`refreshFailed`),
 `components/kb/autosave.test.ts` (`autosaveDecision`, `autosaveLabel`, `flushPlan`),
 `components/notes/excerpt.test.ts` and `lib/ids.test.ts`.
 

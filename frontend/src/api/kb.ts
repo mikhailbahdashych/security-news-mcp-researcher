@@ -133,10 +133,17 @@ export interface KbSearchResponse {
   mode: 'keyword' | 'hybrid'
 }
 
+/** What `POST /entries/{id}/refresh` answers. Three outcomes, not two. */
+export type RefreshStatus = 'updated' | 'unchanged' | 'failed'
+
 export interface KbRefreshResult {
   entry: KbEntry
   changed: boolean
   version: number
+  /** `failed` is still a **200**: the entry keeps the text it already had. */
+  status: RefreshStatus
+  /** Why nothing was stored — only ever set on `failed`. */
+  reason: string | null
 }
 
 export interface KbIndexStatus {
@@ -398,6 +405,26 @@ export function cveChips(entry: KbEntry, max = 4): string[] {
   }
   return seen.length > max ? [...seen.slice(0, max), `+${seen.length - max} more`] : seen
 }
+
+/**
+ * The line the entry page shows after a re-read.
+ *
+ * A fetch that was refused and a page that has not moved are **both** a 200 with
+ * `changed: false`, so a client that reads only that flag tells the user a
+ * Cloudflare block was "the source has not moved" — the opposite of the truth.
+ * `reason` alone is enough to know better, which is why a backend that predates
+ * `status` still gets the right sentence.
+ */
+export function refreshMessage(result: KbRefreshResult): string {
+  if (refreshFailed(result)) {
+    return `Refresh failed: ${result.reason ?? 'the source could not be re-read'}`
+  }
+  return result.changed ? `Re-read — now v${result.version}` : 'Re-read — unchanged'
+}
+
+/** Whether that line is a failure — it is drawn in red, not in the faint tone. */
+export const refreshFailed = (result: KbRefreshResult): boolean =>
+  !result.changed && (result.status === 'failed' || Boolean(result.reason))
 
 /**
  * What the Settings panel says beside "Vector extension".

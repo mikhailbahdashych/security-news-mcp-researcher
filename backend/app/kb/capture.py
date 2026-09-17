@@ -29,6 +29,7 @@ import logging
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Literal
 
 import httpx2
 from sqlalchemy import delete, func, select
@@ -101,6 +102,10 @@ class CaptureResult:
     possible_duplicate_of: int | None = None
 
 
+#: The three outcomes of a re-read. ``changed`` alone collapses the last two.
+RefreshStatus = Literal["updated", "unchanged", "failed"]
+
+
 @dataclass(frozen=True, slots=True)
 class RefreshResult:
     """What re-reading an entry's source found.
@@ -113,6 +118,19 @@ class RefreshResult:
     changed: bool
     version: int
     reason: str | None = None
+
+    @property
+    def status(self) -> RefreshStatus:
+        """``updated`` | ``unchanged`` | ``failed`` — the three outcomes, named.
+
+        A failed fetch and an unchanged page are both ``changed=False``, and a
+        client that has only that flag has no way to tell "the source has not
+        moved" from "Cloudflare refused us". A ``reason`` is only ever set on the
+        paths that did not read the source.
+        """
+        if self.changed:
+            return "updated"
+        return "failed" if self.reason else "unchanged"
 
 
 def normalise_text(text: str | None) -> str:

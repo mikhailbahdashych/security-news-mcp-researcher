@@ -322,6 +322,12 @@ failed, **409** the text was below `kb_min_snapshot_chars`. 409 is also the coll
 the user can resolve (an Undo — or a revive — whose URL was re-captured, a purge naming a
 live entry, a topic name already in use — `app/kb/capture.py::KbConflict`).
 
+`POST /entries/{id}/refresh` has **three** outcomes and answers **200** to all of them,
+because a re-read that could not fetch is not an error — the entry keeps the text it
+already had. `RefreshResult.status` names which one it was (`updated` / `unchanged` /
+`failed`) and `reason` carries the detail; `changed` alone cannot separate the last two,
+and a client that had only that flag told the user a Cloudflare 403 was "unchanged".
+
 A **deleted entry is readable**, not a 404: that is what Undo and the trash view
 (`?deleted=true`) need. It is also **chunkless, and stays that way**: `soft_delete` drops
 the chunks so that "deleted" needs no filter anywhere, and `_replace_snapshot` therefore

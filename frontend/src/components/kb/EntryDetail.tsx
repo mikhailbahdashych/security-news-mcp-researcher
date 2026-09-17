@@ -11,6 +11,8 @@ import {
   kindLabel,
   patchEntry,
   refreshEntry,
+  refreshFailed,
+  refreshMessage,
   sourceLabel,
   undeleteEntry,
   type KbActivity,
@@ -171,17 +173,19 @@ export default function EntryDetail({ entryId, embedded, onBack }: EntryDetailPr
 
 /** Save, refresh, delete — the three things you can do to a captured entry. */
 function Actions({ entry, onChanged }: { entry: KbEntryDetail; onChanged: () => Promise<void> }) {
-  const [note, setNote] = useState<string | null>(null)
+  const [note, setNote] = useState<{ text: string; failed: boolean } | null>(null)
 
   const refresh = useMutation({
     mutationFn: () => refreshEntry(entry.id),
     onSuccess: async (result) => {
       // "Nothing changed" is a real answer and the one the user is most often
-      // checking for, so it is said out loud rather than left as a still page.
-      setNote(result.changed ? `Re-read — now v${result.version}` : 'Re-read — unchanged')
+      // checking for, so it is said out loud rather than left as a still page —
+      // but a refusal is a 200 with `changed: false` too, and saying "unchanged"
+      // over a 403 is the one answer that is worse than silence.
+      setNote({ text: refreshMessage(result), failed: refreshFailed(result) })
       await onChanged()
     },
-    onError: () => setNote('Could not re-read the source.'),
+    onError: () => setNote({ text: 'Could not re-read the source.', failed: true }),
   })
 
   const remove = useMutation({
@@ -195,7 +199,11 @@ function Actions({ entry, onChanged }: { entry: KbEntryDetail; onChanged: () => 
 
   return (
     <>
-      {note ? <span className="text-[11.5px] text-faint">{note}</span> : null}
+      {note ? (
+        <span className={cx('text-[11.5px]', note.failed ? 'text-red' : 'text-faint')}>
+          {note.text}
+        </span>
+      ) : null}
       <Button
         icon="refresh"
         loading={refresh.isPending}

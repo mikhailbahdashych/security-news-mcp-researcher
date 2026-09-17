@@ -20,6 +20,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
 
+from app.kb.capture import RefreshStatus
 from app.kb.models import KbEntry
 from app.kb.retrieval import Hit
 from app.kb.service import EntryDetail, EntryFacts
@@ -230,9 +231,21 @@ class ActivityListResponse(BaseModel):
 
 
 class RefreshResponse(BaseModel):
+    """The answer to "re-read this", which has three outcomes and not two.
+
+    ``changed`` alone cannot tell "the source has not moved" from "the fetch was
+    refused": both are ``False``, and both are a 200, because a failed re-read is
+    not an error — the entry still holds the text it had. ``status`` names which
+    one it was and ``reason`` is the detail the activity row already carried.
+    """
+
     entry: EntryRead
     changed: bool
     version: int
+    status: RefreshStatus
+    #: Why nothing was stored: an HTTP status, a timeout, "no URL to re-read".
+    #: Only ever set on ``failed``.
+    reason: str | None = None
 
 
 class PurgeResponse(BaseModel):

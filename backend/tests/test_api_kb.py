@@ -290,8 +290,41 @@ async def test_refresh_reports_whether_the_text_moved(client, kb):
 
     body = response.json()
     assert body["changed"] is False
+    assert body["status"] == "unchanged"
+    assert body["reason"] is None
     assert body["version"] == 1
     assert body["entry"]["id"] == created.json()["id"]
+
+
+async def test_a_refresh_that_could_not_fetch_says_why_rather_than_unchanged(client, kb):
+    """A blocked re-read is not "the source has not moved".
+
+    Both answers are ``changed=False`` and a 200, and with the reason dropped on
+    the floor the page said "Re-read — unchanged" over a Cloudflare 403.
+    """
+    saved = await _seed(kb, title="Gone", url="https://example.test/missing")
+
+    response = await client.post(f"/api/kb/entries/{saved.entry_id}/refresh")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["changed"] is False
+    assert body["status"] == "failed"
+    assert body["reason"]
+    assert body["version"] == 1
+
+
+async def test_a_refresh_of_an_entry_with_no_url_is_a_failure_with_a_reason(client, kb, db_session):
+    note = Note(title="Week 12", body_md=BODY, template_used="t")
+    db_session.add(note)
+    await db_session.commit()
+    saved = await kb.capture_note(note.id)
+
+    response = await client.post(f"/api/kb/entries/{saved.entry_id}/refresh")
+
+    body = response.json()
+    assert body["status"] == "failed"
+    assert "no URL" in body["reason"]
 
 
 async def test_merge_keeps_the_older_entry(client, kb):

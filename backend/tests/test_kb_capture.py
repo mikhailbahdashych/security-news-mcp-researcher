@@ -22,6 +22,7 @@ from app.kb import capture as capture_module
 from app.kb.capture import (
     DEFAULT_MIN_SNAPSHOT_CHARS,
     KbConflict,
+    RefreshResult,
     capture_article,
     capture_note,
     capture_url,
@@ -116,6 +117,17 @@ def test_canonical_url_refuses_anything_that_is_not_http():
     assert canonical_url("file:///etc/passwd") is None
     assert canonical_url("") is None
     assert canonical_url(None) is None
+
+
+def test_refresh_status_names_the_three_outcomes():
+    """A failed re-read and an unchanged one are not the same answer.
+
+    Both are ``changed=False``, and reporting them alike told the user a
+    Cloudflare block was "the source has not moved" — the opposite of the truth.
+    """
+    assert RefreshResult(entry_id=1, changed=True, version=2).status == "updated"
+    assert RefreshResult(entry_id=1, changed=False, version=1).status == "unchanged"
+    assert RefreshResult(entry_id=1, changed=False, version=1, reason="HTTP 403").status == "failed"
 
 
 def test_content_hash_ignores_case_and_whitespace():

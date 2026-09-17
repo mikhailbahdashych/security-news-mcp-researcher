@@ -256,6 +256,10 @@ async def refresh_entry(entry_id: int, kb: KbServiceDep) -> RefreshResponse:
         entry=await _read(kb, await _load(kb, entry_id)),
         changed=result.changed,
         version=result.version,
+        # A 403 and "the page is identical" are both 200 + ``changed=False``.
+        # Dropping the reason here made a blocked re-read read as "unchanged".
+        status=result.status,
+        reason=result.reason,
     )
 
 

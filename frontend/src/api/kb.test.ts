@@ -10,10 +10,13 @@ import {
   kindLabel,
   matchMarker,
   parseEntryId,
+  refreshFailed,
+  refreshMessage,
   sinceDaysAgo,
   sourceLabel,
   vecVersionLabel,
   type KbEntry,
+  type KbRefreshResult,
   type KbHit,
 } from './kb'
 
@@ -255,5 +258,47 @@ describe('vecVersionLabel', () => {
     expect(vecVersionLabel(null)).toBe('not loaded')
     // An older backend that has no such field at all.
     expect(vecVersionLabel(undefined)).toBe('not loaded')
+  })
+})
+
+function refreshed(overrides: Partial<KbRefreshResult> = {}): KbRefreshResult {
+  return { entry: entry(), changed: false, version: 1, status: 'unchanged', reason: null, ...overrides }
+}
+
+describe('refreshMessage', () => {
+  it('names the new version when the text moved', () => {
+    expect(refreshMessage(refreshed({ changed: true, version: 2, status: 'updated' }))).toBe(
+      'Re-read — now v2',
+    )
+  })
+
+  it('says the source has not moved only when that is what happened', () => {
+    expect(refreshMessage(refreshed())).toBe('Re-read — unchanged')
+  })
+
+  it('reports a failed re-read as a failure, with the reason', () => {
+    // A failed fetch is a 200 with `changed: false`, exactly like an unchanged
+    // page — so a client reading only that flag told the user a Cloudflare block
+    // was "the source has not moved".
+    expect(
+      refreshMessage(refreshed({ status: 'failed', reason: 'HTTP 403 from the source' })),
+    ).toBe('Refresh failed: HTTP 403 from the source')
+  })
+
+  it('still says it failed when the backend sent no reason', () => {
+    expect(refreshMessage(refreshed({ status: 'failed', reason: null }))).toBe(
+      'Refresh failed: the source could not be re-read',
+    )
+  })
+
+  it('marks the failures, and only those, for the red tone', () => {
+    expect(refreshFailed(refreshed())).toBe(false)
+    expect(refreshFailed(refreshed({ changed: true, version: 2, status: 'updated' }))).toBe(false)
+    expect(refreshFailed(refreshed({ status: 'failed', reason: 'HTTP 403' }))).toBe(true)
+  })
+
+  it('reads a reason from a backend that sends no status as a failure', () => {
+    const older = { entry: entry(), changed: false, version: 1, reason: 'timed out' }
+    expect(refreshMessage(older as KbRefreshResult)).toBe('Refresh failed: timed out')
   })
 })
