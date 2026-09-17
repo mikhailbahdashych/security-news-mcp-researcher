@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession, a
 
 from app.db.engine import create_session_factory
 from app.db.models import Base
+from app.kb.schema import virtual_table_statements
 from app.services.settings import seed_defaults
 
 #: ``{table: {column: DDL}}`` — columns declared in ``app.db.models`` after the
@@ -64,6 +65,11 @@ async def init_db(
         await conn.run_sync(Base.metadata.create_all)
         for table, columns in ADDED_COLUMNS.items():
             await _ensure_columns(conn, table, columns)
+        # create_all knows nothing about virtual tables; these are explicit,
+        # frozen, versioned DDL (see app.kb.schema) and every statement is
+        # IF NOT EXISTS, so a second run is a no-op.
+        for statement in virtual_table_statements():
+            await conn.execute(text(statement))
 
     async with session_factory() as session:
         await seed_defaults(session)
