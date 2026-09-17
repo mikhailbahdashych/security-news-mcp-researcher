@@ -8,6 +8,8 @@ Priority order (recommended): 1 → 2 → 3 → 4, then the rest as appetite all
 
 ## 1. Knowledge base with topics (highest value)
 
+> **Designed 2026-09-17.** The approved design is `docs/superpowers/specs/2026-09-17-knowledge-base-design.md` and the phased plan is `docs/superpowers/plans/2026-09-17-knowledge-base.md`; they supersede the sketch below where they differ (embedded RAG engine with `sqlite-vec` + FTS5, Voyage embeddings, capture/compile split with spend controls, encrypted S3 backups).
+
 ### Why
 Today every layer of the app is ephemeral: the inbox is triage, chat sessions are one-off research, notes are per-meeting. A knowledge base is the durable layer underneath all three. It compounds over time: the chat can answer "have we covered this vendor before?", notes can cite prior coverage automatically, and a year of saved articles becomes "everything we discussed about supply-chain attacks" for free.
 
