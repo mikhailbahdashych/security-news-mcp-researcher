@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   cveChips,
+  entityFilter,
   entryTimestamp,
   groupEntriesByDay,
   hitSnippet,
@@ -9,6 +10,7 @@ import {
   kindLabel,
   matchMarker,
   parseEntryId,
+  sinceDaysAgo,
   sourceLabel,
   type KbEntry,
   type KbHit,
@@ -201,5 +203,39 @@ describe('kindLabel', () => {
     expect(kindLabel('manual')).toBe('saved')
     // Phase 2 captures these; the page has to be able to draw one before then.
     expect(kindLabel('finding')).toBe('AI finding')
+  })
+})
+
+describe('sinceDaysAgo', () => {
+  it('is N days back, as the naive-UTC string the API parses', () => {
+    expect(sinceDaysAgo(7, new Date('2026-09-17T10:00:00Z'))).toBe('2026-09-10T10:00:00')
+  })
+
+  it('carries no zone designator and no fraction', () => {
+    // The backend parses naive UTC; a `Z` or a `.123` is a different string to
+    // SQLite's comparison, which is plain text.
+    expect(sinceDaysAgo(30, new Date('2026-01-05T00:00:00.456Z'))).toBe('2025-12-06T00:00:00')
+  })
+})
+
+describe('entityFilter', () => {
+  it('passes a qualified value straight through, lower-casing the kind', () => {
+    expect(entityFilter('cve:CVE-2026-60004')).toBe('cve:CVE-2026-60004')
+    expect(entityFilter('Vendor:Acme')).toBe('vendor:Acme')
+  })
+
+  it('qualifies a bare CVE id, because that is what people paste', () => {
+    expect(entityFilter('CVE-2026-60004')).toBe('cve:CVE-2026-60004')
+    expect(entityFilter('  cve-2026-60004  ')).toBe('cve:CVE-2026-60004')
+  })
+
+  it('is nothing when there is nothing to filter by', () => {
+    // The API reads an unqualified value as no filter at all (`parse_entity`
+    // wants a `kind:value`), so sending one would silently widen the search.
+    expect(entityFilter('')).toBeNull()
+    expect(entityFilter('   ')).toBeNull()
+    expect(entityFilter('acme')).toBeNull()
+    expect(entityFilter('cve:')).toBeNull()
+    expect(entityFilter(':CVE-2026-60004')).toBeNull()
   })
 })

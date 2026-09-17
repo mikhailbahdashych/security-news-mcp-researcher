@@ -18,6 +18,9 @@ export interface SearchBoxProps {
   onKind: (kind: EntryKind | 'all') => void
   sinceDays: number
   onSinceDays: (days: number) => void
+  /** The entity box's raw text; `entityFilter` qualifies it before it is sent. */
+  entity: string
+  onEntity: (entity: string) => void
   /** Topics with their entry counts. Empty until something has been compiled. */
   topics: KbTopic[]
   topicId: number | null
@@ -39,6 +42,8 @@ export default function SearchBox({
   onKind,
   sinceDays,
   onSinceDays,
+  entity,
+  onEntity,
   topics,
   topicId,
   onTopic,
@@ -81,6 +86,20 @@ export default function SearchBox({
             </option>
           ))}
         </Select>
+
+        {/* The exact-identifier leg, which runs ahead of both query legs. It
+            takes `kind:value`, and a bare CVE id is qualified for you — that is
+            the one form people paste. An unqualified word is *no* filter to the
+            API, so `entityFilter` refuses to send one rather than silently
+            widening the search. */}
+        <Input
+          type="search"
+          aria-label="Filter by entity"
+          value={entity}
+          placeholder="cve:CVE-2026-1234"
+          onChange={(event) => onEntity(event.target.value)}
+          className="max-w-[190px]"
+        />
       </div>
 
       {topics.length > 0 ? (

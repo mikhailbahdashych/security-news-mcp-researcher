@@ -1,4 +1,5 @@
 import { apiDelete, apiGet, apiPatch, apiPost } from './client'
+import { hostOf } from '../lib/urls'
 import { dayLabel, groupByDay } from '../lib/dates'
 
 /**
@@ -454,18 +455,6 @@ const PREVIEW_LIMIT = 1_800
 
 function truncate(text: string, limit = PREVIEW_LIMIT): string {
   return text.length > limit ? `${text.slice(0, limit)}…` : text
-}
-
-/** The host of a URL, without `www.`. `null` when it is not a URL at all. */
-export function hostOf(url: string | null | undefined): string | null {
-  if (!url) {
-    return null
-  }
-  try {
-    return new URL(url).host.replace(/^www\./, '')
-  } catch {
-    return null
-  }
 }
 
 /** `1 234 ms`. Grouped with a thin space, as the design has it. */

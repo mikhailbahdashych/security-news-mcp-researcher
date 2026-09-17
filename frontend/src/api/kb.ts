@@ -1,7 +1,7 @@
 import { groupByDay, type DayGroup } from '../lib/dates'
 import type { BadgeTone } from '../components/ui/Badge'
 import { apiGet, apiPatch, apiPost } from './client'
-import { hostOf } from './chat'
+import { hostOf } from '../lib/urls'
 
 /**
  * The knowledge base, as the SPA sees it.
@@ -122,7 +122,9 @@ export interface KbHit {
 export interface KbEntryPage {
   entries?: KbEntry[]
   hits?: KbHit[]
-  next_cursor: string | null
+  /** The list branch's alone: a search is ordered by score, so it has no page
+   *  after this one and the backend drops the key with the absent leg. */
+  next_cursor?: string | null
 }
 
 export interface KbSearchResponse {
@@ -192,6 +194,8 @@ export interface SearchBody {
 export interface EntryFilters {
   kind: EntryKind | null
   topicId: number | null
+  /** `"cve:CVE-2026-60004"` — already qualified, from `entityFilter`. */
+  entity: string | null
   /** Naive-UTC ISO string, or null for "everything". */
   since: string | null
   /** The trash view, which is what Undo reads. */
@@ -208,9 +212,17 @@ export const KB_DELETED_LIMIT = 10
 /** One prefix, so a capture or a delete can refresh every filtered variant. */
 export const kbQueryKey = ['kb'] as const
 export const kbEntriesKey = (filters: EntryFilters) =>
-  ['kb', 'entries', filters.kind, filters.topicId, filters.since, filters.deleted === true] as const
+  [
+    'kb',
+    'entries',
+    filters.kind,
+    filters.topicId,
+    filters.entity,
+    filters.since,
+    filters.deleted === true,
+  ] as const
 export const kbSearchKey = (q: string, filters: EntryFilters) =>
-  ['kb', 'search', q, filters.kind, filters.topicId, filters.since] as const
+  ['kb', 'search', q, filters.kind, filters.topicId, filters.entity, filters.since] as const
 export const kbEntryKey = (id: number) => ['kb', 'entry', id] as const
 export const kbStatsKey = ['kb', 'stats'] as const
 export const kbTopicsKey = ['kb', 'topics'] as const
@@ -222,6 +234,9 @@ function entryParams(filters: EntryFilters, limit: number, cursor?: string): str
   }
   if (filters.topicId !== null) {
     params.set('topic_id', String(filters.topicId))
+  }
+  if (filters.entity) {
+    params.set('entity', filters.entity)
   }
   if (filters.since) {
     params.set('since', filters.since)
@@ -236,11 +251,16 @@ function entryParams(filters: EntryFilters, limit: number, cursor?: string): str
 }
 
 /** One keyset page of the timeline. Never a search: `q` belongs to `searchEntries`. */
-export const listEntries = (
+export async function listEntries(
   filters: EntryFilters,
   cursor?: string,
   limit = KB_PAGE_SIZE,
-): Promise<KbEntryPage> => apiGet<KbEntryPage>(`/kb/entries?${entryParams(filters, limit, cursor)}`)
+): Promise<KbEntryPage> {
+  const page = await apiGet<KbEntryPage>(`/kb/entries?${entryParams(filters, limit, cursor)}`)
+  // Absent rather than null when the answer came back from the search branch;
+  // one shape out of here means one thing for `getNextPageParam` to read.
+  return { ...page, next_cursor: page.next_cursor ?? null }
+}
 
 /**
  * The search box.
@@ -395,6 +415,33 @@ const KIND_LABELS: Record<EntryKind, string> = {
 }
 
 export const kindLabel = (kind: EntryKind): string => KIND_LABELS[kind] ?? kind
+
+/** A bare CVE id, as people paste it out of an advisory. */
+const CVE_ID = /^cve-\d{4}-\d{4,}$/i
+
+/**
+ * The entity box's text, as the API's `kind:value` — or `null` for no filter.
+ *
+ * `parse_entity` wants the qualifier and reads anything without a `:` as *no
+ * filter at all*, so an unqualified word must not be sent: it would silently
+ * widen the search instead of narrowing it. A bare CVE id is the one thing
+ * qualified for the user, because it is what they have in the clipboard.
+ */
+export function entityFilter(raw: string): string | null {
+  const text = raw.trim()
+  if (!text) {
+    return null
+  }
+  if (CVE_ID.test(text)) {
+    return `cve:${text.toUpperCase()}`
+  }
+  const [kind, ...rest] = text.split(':')
+  const value = rest.join(':').trim()
+  if (!kind.trim() || !value) {
+    return null
+  }
+  return `${kind.trim().toLowerCase()}:${value}`
+}
 
 /** `since` for "the last N days", as the naive-UTC string the API expects. */
 export function sinceDaysAgo(days: number, now: Date = new Date()): string {

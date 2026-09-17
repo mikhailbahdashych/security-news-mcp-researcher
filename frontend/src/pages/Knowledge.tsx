@@ -8,6 +8,7 @@ import {
   KB_MIN_SEARCH_CHARS,
   KB_SEARCH_LIMIT,
   createEntry,
+  entityFilter,
   kbEntriesKey,
   kbEntryLink,
   kbQueryKey,
@@ -37,7 +38,25 @@ import Page from './Page'
 
 /** The trash view, which is where Undo finds its entry again. Module-level so
  *  the query key is one object rather than a fresh one every render. */
-const DELETED_FILTERS: EntryFilters = { kind: null, topicId: null, since: null, deleted: true }
+const DELETED_FILTERS: EntryFilters = {
+  kind: null,
+  topicId: null,
+  entity: null,
+  since: null,
+  deleted: true,
+}
+
+/** What the list is showing, held above the entry view so opening one and coming
+ *  back does not empty the search box. */
+interface ListState {
+  q: string
+  kind: EntryKind | 'all'
+  sinceDays: number
+  topicId: number | null
+  entity: string
+}
+
+const NO_FILTERS: ListState = { q: '', kind: 'all', sinceDays: 0, topicId: null, entity: '' }
 
 /**
  * The Knowledge page: everything the app has captured, and one thing to do with
@@ -51,6 +70,10 @@ export default function KnowledgePage({ embedded = false }: EmbeddablePageProps)
   const params = useParams<{ id: string }>()
   const navigate = useNavigate()
   const [openId, setOpenId] = useState<number | null>(null)
+  // Above the entry view on purpose: scanning several hits for one search is the
+  // loop this page exists for, and unmounting the timeline would empty the box
+  // (and drop every page loaded into it) each time one is opened.
+  const [list, setList] = useState<ListState>(NO_FILTERS)
 
   // `:id` matches anything; only a positive integer is an id, and `Number('x')`
   // reaches the API as a 422 — a status the 404 path cannot act on.
@@ -75,13 +98,18 @@ export default function KnowledgePage({ embedded = false }: EmbeddablePageProps)
     [embedded, navigate],
   )
 
-  const back = useCallback(() => {
-    if (embedded) {
-      setOpenId(null)
-    } else {
-      navigate('/knowledge')
-    }
-  }, [embedded, navigate])
+  // `replace` when the entry left on its own — a purged id must not be a place
+  // Back returns to, or the 404 pushes forward again and pins the user here.
+  const back = useCallback(
+    (replace = false) => {
+      if (embedded) {
+        setOpenId(null)
+      } else {
+        navigate('/knowledge', { replace })
+      }
+    },
+    [embedded, navigate],
+  )
 
   if (entryId !== null) {
     return (
@@ -91,20 +119,24 @@ export default function KnowledgePage({ embedded = false }: EmbeddablePageProps)
     )
   }
 
-  return <KnowledgeTimeline embedded={embedded} onOpen={openEntry} />
+  return (
+    <KnowledgeTimeline embedded={embedded} onOpen={openEntry} list={list} onList={setList} />
+  )
 }
 
 interface TimelineProps {
   embedded: boolean
   onOpen: (id: number) => void
+  list: ListState
+  onList: (next: ListState) => void
 }
 
-function KnowledgeTimeline({ embedded, onOpen }: TimelineProps) {
-  const [q, setQ] = useState('')
-  const [kind, setKind] = useState<EntryKind | 'all'>('all')
-  const [sinceDays, setSinceDays] = useState(0)
-  const [topicId, setTopicId] = useState<number | null>(null)
+function KnowledgeTimeline({ embedded, onOpen, list, onList }: TimelineProps) {
+  const { q, kind, sinceDays, topicId, entity } = list
+  const edit = <K extends keyof ListState>(key: K, value: ListState[K]) =>
+    onList({ ...list, [key]: value })
   const debouncedQ = useDebouncedValue(q)
+  const debouncedEntity = useDebouncedValue(entity)
   const query = debouncedQ.trim()
   const searching = query.length >= KB_MIN_SEARCH_CHARS
 
@@ -112,8 +144,13 @@ function KnowledgeTimeline({ embedded, onOpen }: TimelineProps) {
   // render, and the list would refetch forever.
   const since = useMemo(() => (sinceDays > 0 ? sinceDaysAgo(sinceDays) : null), [sinceDays])
   const filters: EntryFilters = useMemo(
-    () => ({ kind: kind === 'all' ? null : kind, topicId, since }),
-    [kind, topicId, since],
+    () => ({
+      kind: kind === 'all' ? null : kind,
+      topicId,
+      entity: entityFilter(debouncedEntity),
+      since,
+    }),
+    [kind, topicId, debouncedEntity, since],
   )
 
   const timeline = useInfiniteQuery({
@@ -131,6 +168,7 @@ function KnowledgeTimeline({ embedded, onOpen }: TimelineProps) {
         q: query,
         kinds: filters.kind ? [filters.kind] : undefined,
         topic_ids: filters.topicId !== null ? [filters.topicId] : undefined,
+        entity: filters.entity ?? undefined,
         since: filters.since ?? undefined,
         limit: KB_SEARCH_LIMIT,
       }),
@@ -162,14 +200,16 @@ function KnowledgeTimeline({ embedded, onOpen }: TimelineProps) {
 
       <SearchBox
         q={q}
-        onQ={setQ}
+        onQ={(value) => edit('q', value)}
         kind={kind}
-        onKind={setKind}
+        onKind={(value) => edit('kind', value)}
         sinceDays={sinceDays}
-        onSinceDays={setSinceDays}
+        onSinceDays={(value) => edit('sinceDays', value)}
+        entity={entity}
+        onEntity={(value) => edit('entity', value)}
         topics={topics.data ?? []}
         topicId={topicId}
-        onTopic={setTopicId}
+        onTopic={(value) => edit('topicId', value)}
       />
 
       {searching && mode === 'keyword' ? (
