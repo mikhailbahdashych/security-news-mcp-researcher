@@ -205,3 +205,14 @@ async def test_a_turn_reads_the_same_coerced_values_as_the_settings_page(db_sess
 
     assert resolved["effort"] == "high"
     assert resolved["thinking_display"] == "summarized"
+
+
+def test_the_minimum_snapshot_default_matches_the_capture_constant():
+    """The settings module cannot import the constant — it is imported *by* the
+    capture path — so the two are pinned here instead, the same way
+    ``ALLOWED_VALUES`` is pinned against the API's ``Literal``s."""
+    from app.kb.capture import DEFAULT_MIN_SNAPSHOT_CHARS
+
+    assert settings_service.DEFAULT_SETTINGS["kb_min_snapshot_chars"] == str(
+        DEFAULT_MIN_SNAPSHOT_CHARS
+    )

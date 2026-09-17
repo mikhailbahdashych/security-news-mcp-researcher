@@ -127,6 +127,10 @@ class KbService:
 
     session_factory: async_sessionmaker[AsyncSession]
     embedder: Embedder = field(default_factory=NullEmbedder)
+    #: The HTTP transport every outbound fetch this service makes goes through.
+    #: ``None`` is the real one; the tests hand in an ``httpx2.MockTransport``,
+    #: which is why there is exactly one fetching seam rather than one per route.
+    transport: httpx2.AsyncBaseTransport | None = None
 
     @property
     def store(self) -> SqliteKnowledgeStore:
@@ -202,7 +206,7 @@ class KbService:
         if needs_extraction:
             async with self.session_factory() as session:
                 result = await extract_service.extract_item(
-                    session, item_id, timeout_s=timeout_s, transport=transport
+                    session, item_id, timeout_s=timeout_s, transport=transport or self.transport
                 )
                 await session.commit()
                 item = result.item
@@ -248,7 +252,7 @@ class KbService:
             min_chars=await self.min_snapshot_chars(),
             timeout_s=timeout_s,
             trigger=trigger,
-            transport=transport,
+            transport=transport or self.transport,
         )
 
     async def capture_note(self, note_id: int, *, trigger: str = "note") -> CaptureResult:
@@ -271,7 +275,7 @@ class KbService:
             self.embedder,
             entry_id,
             timeout_s=timeout_s,
-            transport=transport,
+            transport=transport or self.transport,
         )
 
     async def soft_delete(self, entry_id: int) -> None:

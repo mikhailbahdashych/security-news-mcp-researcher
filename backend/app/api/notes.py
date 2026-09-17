@@ -27,7 +27,7 @@ from app.agent import runner as agent_runner
 from app.agent.providers import build_tool_providers, turn_settings
 from app.agent.registry import ToolRegistry
 from app.api import tasks as task_registry
-from app.api.deps import AppSettings, ChatClientFactory, DbSession, SessionFactory
+from app.api.deps import AppSettings, ChatClientFactory, DbSession, KbServiceDep, SessionFactory
 from app.api.streaming import (
     SSE_HEADERS,
     SSE_PING_S,
@@ -38,6 +38,7 @@ from app.api.streaming import (
 )
 from app.db.models import Note, NoteSource, utcnow
 from app.db.util import matches
+from app.kb.service import capture_note_if_enabled, searchable
 from app.schemas.common import CancelResponse
 from app.schemas.notes import (
     EXCERPT_CHARS,
@@ -232,6 +233,9 @@ async def _stream_generation(
         return
 
     logger.info("Saved note %s from generation %s", note_id, generation_id)
+    # The note is committed; the knowledge base is a consequence of that, and its
+    # failure is an activity row rather than a stream that ends without ``done``.
+    await capture_note_if_enabled(searchable(session_factory), note_id, trigger="generate")
     yield sse_data("done", {"note_id": note_id})
 
 
@@ -350,9 +354,15 @@ async def get_note(note_id: int, session: DbSession) -> NoteRead:
 
 
 @router.patch("/notes/{note_id}", response_model=NoteRead)
-async def update_note(note_id: int, payload: NoteUpdate, session: DbSession) -> NoteRead:
+async def update_note(
+    note_id: int, payload: NoteUpdate, session: DbSession, kb: KbServiceDep
+) -> NoteRead:
     """Apply a hand edit. Sources and the template used are never touched — they
-    describe how the note was produced, which editing it does not change."""
+    describe how the note was produced, which editing it does not change.
+
+    The knowledge base follows the edit: its entry for a note is a snapshot of the
+    note, so an edit is a new version rather than a duplicate. It runs after the
+    commit and cannot fail the save."""
     note = await _load_note(session, note_id)
     # Already stripped by the schema, which validates the stored shape rather
     # than the typed one.
@@ -366,7 +376,9 @@ async def update_note(note_id: int, payload: NoteUpdate, session: DbSession) -> 
     note.updated_at = utcnow()
     await session.commit()
     await session.refresh(note)
-    return await _read(session, note)
+    read = await _read(session, note)
+    await capture_note_if_enabled(kb, note_id)
+    return read
 
 
 @router.delete("/notes/{note_id}", status_code=status.HTTP_204_NO_CONTENT)

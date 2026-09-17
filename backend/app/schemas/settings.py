@@ -11,6 +11,20 @@ ThinkingDisplay = Literal["summarized", "omitted"]
 KeySource = Literal["env", "stored", "none"]
 
 
+class KbSchemaVersionRead(BaseModel):
+    """What the knowledge base's two virtual tables were actually built with.
+
+    Read-only, and not a preference: the Settings panel compares it with the
+    constants in this build and offers a rebuild when they disagree.
+    """
+
+    version: int
+    vec_ddl_version: int
+    vec_dimensions: int
+    fts_ddl_version: int
+    tokenizer: str
+
+
 class SettingsRead(BaseModel):
     """The settings as the UI sees them — note there is no raw API key field.
 
@@ -38,6 +52,11 @@ class SettingsRead(BaseModel):
     note_template: str
     system_prompt_extra: str
     feed_timeout_s: int
+    #: The knowledge base's capture policy. Manual saves are always allowed.
+    kb_capture_starred: bool
+    kb_capture_notes: bool
+    kb_min_snapshot_chars: int
+    kb_schema_version: KbSchemaVersionRead
 
 
 class SettingsUpdate(BaseModel):
@@ -60,6 +79,9 @@ class SettingsUpdate(BaseModel):
     note_template: str | None = Field(default=None, max_length=20_000)
     system_prompt_extra: str | None = Field(default=None, max_length=20_000)
     feed_timeout_s: int | None = Field(default=None, ge=1, le=300)
+    kb_capture_starred: bool | None = None
+    kb_capture_notes: bool | None = None
+    kb_min_snapshot_chars: int | None = Field(default=None, ge=0, le=100_000)
 
 
 class TestKeyResult(BaseModel):
@@ -78,6 +100,7 @@ class ModelOption(BaseModel):
 
 __all__ = [
     "Effort",
+    "KbSchemaVersionRead",
     "KeySource",
     "ModelOption",
     "SettingsRead",

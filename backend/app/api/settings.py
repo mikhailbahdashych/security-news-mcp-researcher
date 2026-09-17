@@ -11,8 +11,14 @@ from typing import Any, cast
 from fastapi import APIRouter
 
 from app.api.deps import AnthropicClient, AppSettings, DbSession
+from app.kb.schema import (
+    KB_SCHEMA_VERSION_KEY,
+    current_schema_version,
+    parse_schema_version,
+)
 from app.schemas.settings import (
     Effort,
+    KbSchemaVersionRead,
     SettingsRead,
     SettingsUpdate,
     TestKeyResult,
@@ -56,7 +62,22 @@ async def _read(session: DbSession, settings: AppSettings) -> SettingsRead:
         note_template=await settings_service.get_str(session, "note_template"),
         system_prompt_extra=await settings_service.get_str(session, "system_prompt_extra"),
         feed_timeout_s=await settings_service.get_int(session, "feed_timeout_s"),
+        kb_capture_starred=await settings_service.get_bool(session, "kb_capture_starred"),
+        kb_capture_notes=await settings_service.get_bool(session, "kb_capture_notes"),
+        kb_min_snapshot_chars=await settings_service.get_int(session, "kb_min_snapshot_chars"),
+        kb_schema_version=await _schema_version(session),
     )
+
+
+async def _schema_version(session: DbSession) -> KbSchemaVersionRead:
+    """What the file records, falling back to what this build would create.
+
+    An unreadable or absent row is not an error to surface here: ``index_status``
+    already reports "no index format recorded" as an outdated index, and the
+    panel still needs something to show.
+    """
+    stored = parse_schema_version(await settings_service.get(session, KB_SCHEMA_VERSION_KEY))
+    return KbSchemaVersionRead.model_validate(current_schema_version() | stored)
 
 
 @router.get("/settings", response_model=SettingsRead)

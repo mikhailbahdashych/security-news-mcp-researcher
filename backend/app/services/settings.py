@@ -23,7 +23,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
 from app.db.models import Setting, utcnow
-from app.kb.capture import DEFAULT_MIN_SNAPSHOT_CHARS
 from app.kb.schema import KB_SCHEMA_VERSION_KEY, default_schema_version
 
 logger = logging.getLogger(__name__)
@@ -60,8 +59,12 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "kb_capture_starred": "true",
     "kb_capture_notes": "true",
     # Below this many characters a snapshot is a teaser or a consent wall, and
-    # capture skips it with an activity row rather than storing noise.
-    "kb_min_snapshot_chars": str(DEFAULT_MIN_SNAPSHOT_CHARS),
+    # capture skips it with an activity row rather than storing noise. The literal
+    # rather than ``app.kb.capture.DEFAULT_MIN_SNAPSHOT_CHARS``: this module is
+    # imported *by* the capture path (through ``services.extract``), so importing
+    # it back would be a cycle. ``tests/test_settings_service.py`` pins the two
+    # together, exactly as it does for ``ALLOWED_VALUES``.
+    "kb_min_snapshot_chars": "400",
     # When on, only reviewed entries are returned to the chat tools and the notes
     # generator. **Independently of it**, a model-authored entry is never returned
     # until it has been reviewed — that gate is not a setting (spec S5).
