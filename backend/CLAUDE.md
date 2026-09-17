@@ -302,9 +302,11 @@ after the commit, so a provider outage leaves the chunks pending and writes an a
 row rather than 500-ing a save that succeeded (spec §5). `embedded_at IS NULL` is the one
 definition of "pending" and what Re-index resumes from.
 
-Capture order is fixed (spec §4.5): canonicalise the URL → dedup (canonical URL, else feed
-item id, else content hash — the hash is the *fallback*, not an extra check, because two
-URLs carrying the same syndicated text are two articles) → the minimum-length check, which
+Capture order is fixed (spec §4.5): canonicalise the URL → dedup (feed item id / note id,
+else canonical URL, else content hash — the hash is the *fallback* for text with **no key
+at all**, not an extra check, because two URLs carrying the same syndicated text are two
+articles, and a capture that named a source id and missed is a new entry rather than the
+article that happens to share its body) → the minimum-length check, which
 skips with an activity row → entry + snapshot v1 + chunks + regex entities in one
 transaction → embed **outside** it. `published_at` is the feed item's date, else the
 extractor's, else NULL — **never** the capture time. No function here holds a transaction

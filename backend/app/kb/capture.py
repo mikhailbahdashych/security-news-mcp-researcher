@@ -919,6 +919,11 @@ async def _find_duplicate(
     that id even if this function wanted one. The URL and content-hash lookups do
     skip soft-deleted entries, because their index *is* scoped that way and
     re-capturing something the user deleted is allowed.
+
+    A capture that *named* a source and found nothing is a **new** entry, not a
+    hash lookup: the hash would hand a note the entry of an article with the same
+    body, and that entry has no ``note_id``, so the next save of the note would
+    fall through again and the note could never acquire an entry of its own.
     """
     if feed_item_id is not None:
         found = await session.scalar(select(KbEntry).where(KbEntry.feed_item_id == feed_item_id))
@@ -932,6 +937,8 @@ async def _find_duplicate(
         return await session.scalar(
             select(KbEntry).where(KbEntry.url == url, KbEntry.deleted_at.is_(None))
         )
+    if feed_item_id is not None or note_id is not None:
+        return None
     return await session.scalar(
         select(KbEntry)
         .where(KbEntry.content_hash == digest, KbEntry.deleted_at.is_(None))

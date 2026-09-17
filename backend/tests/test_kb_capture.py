@@ -308,6 +308,48 @@ async def test_capture_dedups_on_the_content_hash_when_there_is_no_url(session_f
     assert await db_session.scalar(select(func.count()).select_from(KbEntry)) == 1
 
 
+async def test_a_note_whose_body_matches_an_article_still_gets_its_own_entry(
+    session_factory, db_session
+):
+    """Spec §4.5: a note's one dedup key is its note id, never the content hash.
+
+    The hash is the fallback for text with no key at all. Falling through to it
+    handed the note the article's entry, and because that entry has no
+    ``note_id`` the next save fell through again — the note could never acquire
+    an entry of its own.
+    """
+    article = await _capture(session_factory)
+    note = Note(title="Week 12", body_md=ARTICLE, template_used="t")
+    db_session.add(note)
+    await db_session.commit()
+
+    captured = await capture_note(session_factory, NullEmbedder(), note.id)
+
+    assert captured.created is True
+    assert captured.entry_id != article.entry_id
+    entry = await db_session.get(KbEntry, captured.entry_id)
+    assert entry.note_id == note.id
+    assert entry.kind == "note"
+    assert await db_session.scalar(select(func.count()).select_from(KbEntry)) == 2
+
+
+async def test_two_notes_with_the_same_body_are_two_entries(session_factory, db_session):
+    first = Note(title="Week 12", body_md=ARTICLE, template_used="t")
+    second = Note(title="Week 13", body_md=ARTICLE, template_used="t")
+    db_session.add_all([first, second])
+    await db_session.commit()
+
+    one = await capture_note(session_factory, NullEmbedder(), first.id)
+    two = await capture_note(session_factory, NullEmbedder(), second.id)
+
+    assert two.created is True
+    assert two.entry_id != one.entry_id
+    note_ids = (
+        (await db_session.execute(select(KbEntry.note_id).order_by(KbEntry.id))).scalars().all()
+    )
+    assert note_ids == [first.id, second.id]
+
+
 async def test_a_short_snapshot_is_skipped_with_an_activity_row(session_factory, db_session):
     result = await _capture(session_factory, text="Too short to be an article.")
 
@@ -756,8 +798,8 @@ async def test_a_capture_reads_nothing_off_a_closed_session(db_engine, db_sessio
         content_text=ARTICLE,
         published_at=datetime(2024, 3, 29, 12, 0, 0),
     )
-    # A body of its own: the same text with no URL would dedup on the content
-    # hash and the note path would never run.
+    # A body of its own, so the two captures are visibly two entries rather than
+    # one read twice.
     note = Note(title="Week 12", body_md=ARTICLE.replace("xz", "polkit"), template_used="t")
     db_session.add_all([item, note])
     await db_session.commit()
