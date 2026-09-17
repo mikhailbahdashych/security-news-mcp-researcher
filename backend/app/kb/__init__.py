@@ -10,4 +10,7 @@ The layout mirrors the responsibilities rather than the tables:
 ``embeddings`` the ``Embedder`` protocol and the no-op embedder
 ``store``      ``KnowledgeStore`` and its SQLite implementation
 ``retrieval``  fusion, collapse and ``hybrid_search``
+``urls``       canonicalising a URL so the same article is the same entry
+``capture``    writing: capture, snapshots, refresh, soft delete, merge
+``service``    ``KbService``, the one door the API and the chat tools use
 """

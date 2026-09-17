@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
 from app.db.models import Setting, utcnow
+from app.kb.capture import DEFAULT_MIN_SNAPSHOT_CHARS
 from app.kb.schema import KB_SCHEMA_VERSION_KEY, default_schema_version
 
 logger = logging.getLogger(__name__)
@@ -54,6 +55,17 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "note_template": DEFAULT_NOTE_TEMPLATE,
     "system_prompt_extra": "",
     "feed_timeout_s": "15",
+    # The knowledge base's capture policy. Manual saves are always allowed; these
+    # two govern only the automatic triggers.
+    "kb_capture_starred": "true",
+    "kb_capture_notes": "true",
+    # Below this many characters a snapshot is a teaser or a consent wall, and
+    # capture skips it with an activity row rather than storing noise.
+    "kb_min_snapshot_chars": str(DEFAULT_MIN_SNAPSHOT_CHARS),
+    # When on, only reviewed entries are returned to the chat tools and the notes
+    # generator. **Independently of it**, a model-authored entry is never returned
+    # until it has been reviewed — that gate is not a setting (spec S5).
+    "kb_reviewed_only": "false",
     # What the knowledge base's two virtual tables were actually built with. Not a
     # preference: the app compares it with the constants in ``app.kb.schema`` and
     # reports "index format outdated" when they disagree.
