@@ -7,10 +7,10 @@ Two shapes here are worth knowing before reading the routes.
 key is *dropped from the JSON* rather than sent as ``null``, so a client cannot
 read an empty list as "the search found nothing" when no search ran.
 
-**``matched_by`` is the wire name, not the internal one.** Retrieval calls a hit
-that both legs found ``hybrid``; the API calls it ``both``. The mapping lives in
-one place, :func:`HitRead.from_hit`, because the frontend contract was written
-first and the retrieval vocabulary is older than it.
+**``matched_by`` passes straight through.** ``retrieval.MATCHED_BY`` and the
+``MatchedBy`` literal below are the same four words, so there is no translation
+layer to drift — a value retrieval invents that the literal does not know is a
+validation error here rather than a silently mislabelled hit.
 """
 
 from __future__ import annotations
@@ -29,9 +29,6 @@ Authorship = Literal["source", "human", "model"]
 ReviewStatus = Literal["unreviewed", "reviewed"]
 CapturedBy = Literal["auto", "user"]
 MatchedBy = Literal["keyword", "vector", "both", "entity"]
-
-#: ``hybrid_search``'s vocabulary, in the contract's spelling.
-_MATCHED_BY = {"keyword": "keyword", "vector": "vector", "hybrid": "both", "entity": "entity"}
 
 
 class EntityRead(BaseModel):
@@ -196,7 +193,7 @@ class HitRead(BaseModel):
             entry=EntryRead.build(hit.entry, facts),
             snippet=hit.snippet,
             score=hit.score,
-            matched_by=_MATCHED_BY.get(hit.matched_by, "keyword"),
+            matched_by=hit.matched_by,
         )
 
 

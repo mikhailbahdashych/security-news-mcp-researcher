@@ -19,7 +19,9 @@ from app.api.deps import get_kb_service
 from app.db.models import Feed, FeedItem, Note, utcnow
 from app.kb.capture import capture_article
 from app.kb.models import KbActivity, KbEntry, KbEntryTopic, Topic
-from app.kb.service import KbService
+from app.kb.retrieval import Hit
+from app.kb.service import EntryFacts, KbService
+from app.schemas.kb import HitRead
 
 ARTICLE_URL = "https://example.test/article"
 
@@ -347,6 +349,37 @@ async def test_the_activity_endpoint_lists_the_trail_newest_first(client, kb, it
 
     assert [row["action"] for row in body["items"]] == ["delete", "capture"]
     assert body["items"][0]["entry_id"] == created["id"]
+
+
+def test_matched_by_passes_through_without_translation(db_session):
+    """``retrieval`` and the wire share one vocabulary — no mapping layer.
+
+    A both-leg hit cannot arise in Phase 1 (``NullEmbedder`` means no vector leg),
+    so it is asserted directly: a mapping that silently fell back to ``keyword``
+    would otherwise go unnoticed until Phase 2.
+    """
+    entry = KbEntry(
+        id=1,
+        kind="article",
+        title="Both legs",
+        authorship="source",
+        review_status="unreviewed",
+        captured_by="user",
+        notes_md="",
+        captured_at=utcnow(),
+        updated_at=utcnow(),
+    )
+    hit = Hit(
+        entry=entry,
+        chunk=None,
+        snippet="s",
+        distance=0.1,
+        bm25=-1.0,
+        score=0.5,
+        matched_by="both",
+    )
+
+    assert HitRead.from_hit(hit, EntryFacts()).model_dump()["matched_by"] == "both"
 
 
 # -------------------------------------------------------- topics and tags
