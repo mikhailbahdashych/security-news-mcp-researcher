@@ -170,8 +170,13 @@ handler and was dropped.
 - `feed_items.published_at` is **nullable** → order by
   `COALESCE(published_at, fetched_at)` (`app/services/items.py::sort_key()`, public so
   search reuses the same expression).
-- Every substring search in the app is `LIKE '%q%'` through
-  `app/db/util.py::matches` / `escape_like` — the single escaping rule. No FTS5.
+- **Two escaping rules, and neither may be used for the other's job.** Every
+  substring search is `LIKE '%q%'` through `app/db/util.py::matches` / `escape_like`
+  (inbox, notes, global search). Every **FTS5** search — the knowledge base, and
+  nothing else — builds its `MATCH` string with `app/kb/fts.py::fts_query`, which
+  quotes each term as a phrase and falls back from `AND` to `OR`. `escape_like`
+  escapes `%`, `_` and `\` for a `LIKE` pattern and would inject backslashes
+  straight into the tokenizer; `fts_query` knows nothing about `LIKE` wildcards.
 - All `DATETIME` columns are **naive UTC** — write them with `app.db.models.utcnow()`.
   The frontend re-appends `Z` (`frontend/src/lib/dates.ts::parseUtc`).
 - SQLite runs in **WAL** with `busy_timeout=5000` and `foreign_keys=ON`. Docker uses a

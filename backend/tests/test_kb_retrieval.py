@@ -1,0 +1,396 @@
+"""Fusion, the per-leg collapse, and ``hybrid_search`` end to end.
+
+Phase 1 is keyword-only: with :class:`NullEmbedder` the vector leg is skipped
+entirely, so every hit here is ``matched_by='keyword'`` or ``'entity'``.
+"""
+
+from datetime import timedelta
+
+import pytest
+from fakes.embedder import FakeEmbedder
+
+from app.db.models import utcnow
+from app.kb.embeddings import NullEmbedder
+from app.kb.models import KbChunk, KbEntry, KbEntryEntity
+from app.kb.retrieval import collapse_best_per_entry, hybrid_search, rrf
+from app.kb.store import SearchFilters, SqliteKnowledgeStore, VectorRow, published_day
+
+# -- pure ----------------------------------------------------------------
+
+
+def test_collapse_keeps_one_chunk_per_entry():
+    """A 13-chunk advisory must occupy one slot in a top-50, not thirteen."""
+    rows = [(7, 101, -9.0), (7, 102, -8.0), (3, 201, -7.5), (7, 103, -9.5), (3, 202, -1.0)]
+
+    assert collapse_best_per_entry(rows) == [(7, 103, -9.5), (3, 201, -7.5)]
+
+
+def test_collapse_can_prefer_the_larger_score():
+    rows = [(1, 10, 0.2), (1, 11, 0.9), (2, 20, 0.5)]
+
+    assert collapse_best_per_entry(rows, lower_is_better=False) == [(1, 11, 0.9), (2, 20, 0.5)]
+
+
+def test_collapse_of_nothing():
+    assert collapse_best_per_entry([]) == []
+
+
+def test_collapse_keeps_the_first_of_two_equal_chunks():
+    rows = [(1, 10, -5.0), (1, 11, -5.0)]
+
+    assert collapse_best_per_entry(rows) == [(1, 10, -5.0)]
+
+
+def test_rrf_fuses_two_rankings():
+    fused = rrf([[1, 2, 3], [3, 1]])
+
+    assert [entry_id for entry_id, _ in fused] == [1, 3, 2]
+    assert fused[0][1] == pytest.approx(1 / 61 + 1 / 62)
+
+
+def test_rrf_with_one_empty_leg_is_the_other_leg():
+    fused = rrf([[5, 6, 7], []])
+
+    assert [entry_id for entry_id, _ in fused] == [5, 6, 7]
+
+
+def test_rrf_with_no_legs_at_all():
+    assert rrf([]) == []
+    assert rrf([[], []]) == []
+
+
+def test_rrf_breaks_a_tie_deterministically():
+    """Two entries with identical scores must come back in a stable order."""
+    fused = rrf([[9, 4], [4, 9]])
+
+    assert [entry_id for entry_id, _ in fused] == [4, 9]
+    assert fused[0][1] == pytest.approx(fused[1][1])
+
+
+def test_rrf_k_softens_the_weight_of_the_top_rank():
+    sharp = rrf([[1], [2]], k=1)
+    flat = rrf([[1], [2]], k=1000)
+
+    assert sharp[0][1] > flat[0][1]
+
+
+# -- hybrid_search -------------------------------------------------------
+
+
+async def _entry(db_session, title: str, body: str, **overrides) -> KbEntry:
+    values = {"kind": "article", "title": title, "authorship": "source"}
+    values.update(overrides)
+    entry = KbEntry(**values)
+    db_session.add(entry)
+    await db_session.flush()
+    db_session.add(KbChunk(entry_id=entry.id, ord=0, text=body, token_estimate=1))
+    await db_session.commit()
+    return entry
+
+
+async def _only_chunk(db_session, entry: KbEntry) -> KbChunk:
+    from sqlalchemy import select
+
+    return (
+        (await db_session.execute(select(KbChunk).where(KbChunk.entry_id == entry.id)))
+        .scalars()
+        .first()
+    )
+
+
+async def _embed(store, embedder, entry: KbEntry, chunk: KbChunk) -> None:
+    """Store a vector for *chunk* the way capture will in Phase 2."""
+    vector = (await embedder.embed_documents([chunk.text]))[0]
+    await store.upsert_vectors(
+        [
+            VectorRow(
+                chunk_id=chunk.id,
+                entry_id=entry.id,
+                entry_kind=entry.kind,
+                chunk_kind=chunk.kind,
+                reviewed=entry.review_status == "reviewed",
+                authorship=entry.authorship,
+                published_day=published_day(entry.captured_at),
+                embedding=vector,
+            )
+        ]
+    )
+
+
+async def test_a_keyword_hit_says_so(session_factory, db_session):
+    entry = await _entry(db_session, "xz", "The xz backdoor sits in liblzma.")
+    store = SqliteKnowledgeStore(session_factory)
+
+    hits = await hybrid_search(store, NullEmbedder(), "liblzma")
+
+    assert len(hits) == 1
+    assert hits[0].entry.id == entry.id
+    assert hits[0].matched_by == "keyword"
+    assert hits[0].distance is None
+    assert hits[0].bm25 is not None
+    assert "liblzma" in hits[0].snippet
+
+
+async def test_the_null_embedder_never_runs_a_vector_leg(session_factory, db_session):
+    await _entry(db_session, "xz", "The xz backdoor sits in liblzma.")
+    store = SqliteKnowledgeStore(session_factory)
+    called: list[str] = []
+
+    class Watcher(NullEmbedder):
+        async def embed_query(self, text: str) -> list[float]:
+            called.append(text)
+            return []
+
+    hits = await hybrid_search(store, Watcher(), "liblzma")
+
+    assert called == []
+    assert [hit.matched_by for hit in hits] == ["keyword"]
+
+
+async def test_the_exact_entity_leg_comes_first(session_factory, db_session):
+    """ "Have we covered CVE-2024-3094?" is an exact question."""
+    keyword_only = await _entry(
+        db_session, "Roundup", "A weekly roundup mentioning cve 2024 3094 in passing."
+    )
+    exact = await _entry(db_session, "Advisory", "A full write-up of the backdoor.")
+    db_session.add(
+        KbEntryEntity(entry_id=exact.id, kind="cve", value="CVE-2024-3094", source="regex")
+    )
+    await db_session.commit()
+    store = SqliteKnowledgeStore(session_factory)
+
+    hits = await hybrid_search(store, NullEmbedder(), "CVE-2024-3094")
+
+    assert [hit.entry.id for hit in hits] == [exact.id, keyword_only.id]
+    assert hits[0].matched_by == "entity"
+    assert hits[0].chunk is None
+    assert hits[1].matched_by == "keyword"
+
+
+async def test_an_explicit_entity_filter_is_the_whole_query(session_factory, db_session):
+    exact = await _entry(db_session, "Advisory", "Nothing about the typed words.")
+    db_session.add(
+        KbEntryEntity(entry_id=exact.id, kind="cve", value="CVE-2021-44228", source="regex")
+    )
+    await db_session.commit()
+    store = SqliteKnowledgeStore(session_factory)
+
+    hits = await hybrid_search(
+        store, NullEmbedder(), "unrelated words", entity=("cve", "CVE-2021-44228")
+    )
+
+    assert [hit.entry.id for hit in hits] == [exact.id]
+
+
+async def test_one_entry_occupies_one_slot_however_many_chunks_match(session_factory, db_session):
+    entry = KbEntry(kind="article", title="Long advisory", authorship="source")
+    db_session.add(entry)
+    await db_session.flush()
+    db_session.add_all(
+        [
+            KbChunk(
+                entry_id=entry.id,
+                ord=n,
+                text=f"section {n} of the liblzma advisory",
+                token_estimate=1,
+            )
+            for n in range(13)
+        ]
+    )
+    other = await _entry(db_session, "Short", "a single liblzma mention")
+    store = SqliteKnowledgeStore(session_factory)
+
+    hits = await hybrid_search(store, NullEmbedder(), "liblzma")
+
+    assert sorted(hit.entry.id for hit in hits) == sorted([entry.id, other.id])
+
+
+async def test_the_and_to_or_fallback_widens_an_empty_result(session_factory, db_session):
+    first = await _entry(db_session, "One", "Only about liblzma here.")
+    second = await _entry(db_session, "Two", "Only about openssh here.")
+    store = SqliteKnowledgeStore(session_factory)
+
+    hits = await hybrid_search(store, NullEmbedder(), "liblzma openssh")
+
+    assert sorted(hit.entry.id for hit in hits) == sorted([first.id, second.id])
+
+
+async def test_a_query_of_pure_punctuation_finds_nothing_and_does_not_raise(
+    session_factory, db_session
+):
+    await _entry(db_session, "One", "Something searchable.")
+    store = SqliteKnowledgeStore(session_factory)
+
+    assert await hybrid_search(store, NullEmbedder(), "*^():") == []
+
+
+async def test_filters_reach_the_keyword_leg(session_factory, db_session):
+    old = await _entry(
+        db_session, "Old", "liblzma everywhere", published_at=utcnow() - timedelta(days=400)
+    )
+    new = await _entry(db_session, "New", "liblzma everywhere", kind="note")
+    store = SqliteKnowledgeStore(session_factory)
+
+    assert len(await hybrid_search(store, NullEmbedder(), "liblzma")) == 2
+
+    notes = await hybrid_search(store, NullEmbedder(), "liblzma", kinds=("note",))
+    assert [hit.entry.id for hit in notes] == [new.id]
+
+    recent = await hybrid_search(
+        store, NullEmbedder(), "liblzma", since=utcnow() - timedelta(days=30)
+    )
+    assert [hit.entry.id for hit in recent] == [new.id]
+    assert old.id not in [hit.entry.id for hit in recent]
+
+
+async def test_a_model_authored_entry_is_absent_until_reviewed(session_factory, db_session):
+    finding = await _entry(
+        db_session, "Finding", "liblzma conclusions", kind="finding", authorship="model"
+    )
+    store = SqliteKnowledgeStore(session_factory)
+
+    assert await hybrid_search(store, NullEmbedder(), "liblzma") == []
+
+    page = await hybrid_search(store, NullEmbedder(), "liblzma", include_model_authored=True)
+    assert [hit.entry.id for hit in page] == [finding.id]
+
+    finding.review_status = "reviewed"
+    await db_session.commit()
+
+    assert [hit.entry.id for hit in await hybrid_search(store, NullEmbedder(), "liblzma")] == [
+        finding.id
+    ]
+
+
+async def test_the_entity_leg_respects_the_authorship_gate(session_factory, db_session):
+    finding = await _entry(db_session, "Finding", "conclusions", kind="finding", authorship="model")
+    db_session.add(
+        KbEntryEntity(entry_id=finding.id, kind="cve", value="CVE-2024-3094", source="regex")
+    )
+    await db_session.commit()
+    store = SqliteKnowledgeStore(session_factory)
+
+    assert await hybrid_search(store, NullEmbedder(), "CVE-2024-3094") == []
+
+
+async def test_the_limit_is_honoured(session_factory, db_session):
+    for n in range(8):
+        await _entry(db_session, f"Entry {n}", "liblzma appears here")
+    store = SqliteKnowledgeStore(session_factory)
+
+    assert len(await hybrid_search(store, NullEmbedder(), "liblzma", limit=3)) == 3
+
+
+async def test_a_real_embedder_fuses_both_legs(session_factory, db_session):
+    """The vector leg is Phase 2's, but the fusion path is wired now."""
+    embedder = FakeEmbedder()
+    entry = await _entry(db_session, "xz", "The xz backdoor sits in liblzma.")
+    store = SqliteKnowledgeStore(session_factory)
+    await _embed(store, embedder, entry, await _only_chunk(db_session, entry))
+
+    hits = await hybrid_search(store, embedder, "The xz backdoor sits in liblzma.")
+
+    assert [hit.matched_by for hit in hits] == ["hybrid"]
+    assert hits[0].distance is not None
+    assert hits[0].bm25 is not None
+    assert embedder.queries == ["The xz backdoor sits in liblzma."]
+
+
+async def test_a_vector_only_hit_says_vector(session_factory, db_session):
+    embedder = FakeEmbedder()
+    entry = await _entry(db_session, "Unrelated", "completely different wording")
+    store = SqliteKnowledgeStore(session_factory)
+    chunk = await _only_chunk(db_session, entry)
+    # Deliberately a vector for text the chunk does not contain: the keyword leg
+    # cannot find it, so only the vector leg can.
+    vector = (await embedder.embed_documents(["liblzma backdoor"]))[0]
+    await store.upsert_vectors(
+        [
+            VectorRow(
+                chunk_id=chunk.id,
+                entry_id=entry.id,
+                entry_kind=entry.kind,
+                chunk_kind=chunk.kind,
+                reviewed=False,
+                authorship=entry.authorship,
+                published_day=published_day(entry.captured_at),
+                embedding=vector,
+            )
+        ]
+    )
+
+    found = await hybrid_search(store, embedder, "liblzma backdoor")
+
+    assert [hit.matched_by for hit in found] == ["vector"]
+    assert found[0].bm25 is None
+
+
+async def test_a_topic_filter_reaches_the_vector_leg(session_factory, db_session):
+    """The vector leg's topic filter is a real join, not an intersection with the
+    keyword leg — an untagged entry that only the vector leg can see must still
+    be excluded."""
+    from app.kb.models import KbEntryTopic, Topic
+
+    embedder = FakeEmbedder()
+    tagged = await _entry(db_session, "Tagged", "liblzma backdoor")
+    untagged = await _entry(db_session, "Untagged", "completely different wording")
+    topic = Topic(name="supply chain")
+    db_session.add(topic)
+    await db_session.flush()
+    db_session.add(KbEntryTopic(entry_id=tagged.id, topic_id=topic.id))
+    await db_session.commit()
+    store = SqliteKnowledgeStore(session_factory)
+
+    await _embed(store, embedder, tagged, await _only_chunk(db_session, tagged))
+    # The untagged entry is reachable by vector only.
+    untagged_chunk = await _only_chunk(db_session, untagged)
+    vector = (await embedder.embed_documents(["liblzma backdoor"]))[0]
+    await store.upsert_vectors(
+        [
+            VectorRow(
+                chunk_id=untagged_chunk.id,
+                entry_id=untagged.id,
+                entry_kind=untagged.kind,
+                chunk_kind=untagged_chunk.kind,
+                reviewed=False,
+                authorship=untagged.authorship,
+                published_day=published_day(untagged.captured_at),
+                embedding=vector,
+            )
+        ]
+    )
+
+    everything = await hybrid_search(store, embedder, "liblzma backdoor")
+    assert sorted(hit.entry.id for hit in everything) == sorted([tagged.id, untagged.id])
+
+    narrowed = await hybrid_search(store, embedder, "liblzma backdoor", topic_ids=(topic.id,))
+    assert [hit.entry.id for hit in narrowed] == [tagged.id]
+
+
+async def test_the_default_filters_match_the_spec(session_factory, db_session):
+    """Defaults matter: body chunks only, model-authored gated, nothing narrowed."""
+    entry = await _entry(db_session, "One", "liblzma body text")
+    db_session.add(
+        KbChunk(
+            entry_id=entry.id, ord=1, text="liblzma summary text", token_estimate=1, kind="summary"
+        )
+    )
+    await db_session.commit()
+    store = SqliteKnowledgeStore(session_factory)
+
+    hits = await hybrid_search(store, NullEmbedder(), "liblzma")
+
+    assert len(hits) == 1
+    assert hits[0].chunk is not None
+    assert hits[0].chunk.kind == "body"
+
+
+def test_search_filters_defaults():
+    assert SearchFilters() == SearchFilters(
+        kinds=None,
+        chunk_kinds=("body",),
+        topic_ids=None,
+        since=None,
+        reviewed_only=False,
+        include_model_authored=False,
+    )

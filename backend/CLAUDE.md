@@ -330,8 +330,13 @@ Three more ingest invariants worth not re-litigating (`app/services/feeds.py`):
 
 ## Tests (`backend/tests/`)
 
-`make test` → `uv run pytest` (**616 tests**, ~20 s) then the frontend's vitest. One
+`make test` → `uv run pytest` (**748 tests**, ~26 s) then the frontend's vitest. One
 `test_<area>.py` per area, `fakes/` for client stand-ins, `fixtures/` for XML/HTML.
+
+One test is **opt-in**: `tests/test_kb_benchmark.py` builds 20 000 chunks and times
+the keyword leg. Run it with `KB_BENCHMARK=1 uv run pytest tests/test_kb_benchmark.py -s`
+and copy the printed line into the PR body and spec §9 — the numbers are the record
+of what FTS5 actually costs at the sizes this knowledge base reaches.
 
 There is **no `tests/__init__.py`**, so pytest puts `tests/` on `sys.path`: helpers are
 imported either as `from fakes.anthropic import ...` or `from tests.feed_fixtures import ...`
@@ -357,6 +362,8 @@ Fakes:
   `turn_refusal`, `turn_pause`, `turn_code_execution`, `turn_text_editor`,
   `turn_text_with_usage`. Inject with
   `app.dependency_overrides[get_chat_client_factory] = lambda: lambda _key: scripted`.
+- `tests/fakes/embedder.py` — `FakeEmbedder`, deterministic unit vectors from a
+  digest of the text. The knowledge base's tests never reach Voyage.
 - `tests/fakes/mcp.py` — in-process `MCPServer` fixtures and target factories; see
   `app/mcp/CLAUDE.md`. `tests/feed_fixtures.py` —
   `routes_transport({url: Response|Exception|callable})` over `httpx2.MockTransport`,
