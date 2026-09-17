@@ -585,15 +585,24 @@ which leg answered.
   invalidate `kbQueryKey` as well as `['items']` — in the split view the Knowledge pane
   is often the one on screen beside them.
 - **The notes editor autosaves.** `components/kb/autosave.ts::autosaveDecision` is the
-  tested decision (typing / clean / in-flight / save) and `autosaveLabel` the line under
-  the box; a PATCH is never issued while one is in flight, because two writes over one
-  field can land out of order and the loser is the newer text. Unmounting cancels the
-  debounce, so the editor **flushes on the way out** (`pendingFlush`, through refs, with
-  a bare `patchEntry`) — otherwise "type a line, click back" inside the 1.2 s window
-  posts nothing. The title is seeded once per entry through a `key`, not through an
-  effect — a background refetch mid-edit would otherwise throw the half-typed title
-  away — and the rename is a mutation that **puts the field back and says so** when the
-  write loses, because the blur that would have retried it has already happened.
+  tested decision (typing / clean / in-flight / failed / save) and `autosaveLabel` the
+  line under the box; a PATCH is never issued while one is in flight, because two writes
+  over one field can land out of order and the loser is the newer text. **A failure is
+  retried by the next edit, never by the effect**: mutations do not inherit the app's
+  `retry: 1`, and the effect re-fires whenever the decision flips, so a permanent 422 (or
+  a backend that is not running) was PATCHed as fast as `fetch` could reject it for as
+  long as the page stayed open. The text that lost is `save.variables` while
+  `save.isError` — the mutation already remembers it, so it needs no state of its own.
+  Unmounting cancels the debounce, so the editor **flushes on the way out**
+  (`flushPlan`, through refs, with a bare `patchEntry`) — otherwise "type a line, click
+  back" inside the 1.2 s window posts nothing. That flush compares against the text a
+  PATCH is *carrying*, not against the last confirmed one, **waits for that PATCH** and
+  then invalidates `kbQueryKey`: `staleTime` is 30 s, so without the invalidation
+  reopening the entry re-seeds the editor from the copy the flush just replaced. The
+  title is seeded once per entry through a `key`, not through an effect — a background
+  refetch mid-edit would otherwise throw the half-typed title away — and the rename is a
+  mutation that **puts the field back and says so** when the write loses, because the
+  blur that would have retried it has already happened.
 - **Capture failures are only visible in the entry's activity list**, so the detail page
   draws the `activity` rows `GET /kb/entries/{id}` already carries.
 - **Leaving a dead entry `replace`s.** `EntryDetail`'s 404 effect calls `onBack(true)`:
@@ -647,7 +656,7 @@ here, which is the point: the caller measures, the function decides),
 `api/kb.test.ts` (`kbEntryLink`, `parseEntryId`, `entryTimestamp`, the day grouping,
 `matchMarker`, `hitSnippet`, `cveChips`, `sourceLabel`, `kindLabel`, `sinceDaysAgo`,
 `entityFilter`),
-`components/kb/autosave.test.ts` (`autosaveDecision`, `autosaveLabel`, `pendingFlush`),
+`components/kb/autosave.test.ts` (`autosaveDecision`, `autosaveLabel`, `flushPlan`),
 `components/notes/excerpt.test.ts` and `lib/ids.test.ts`.
 
 Component and E2E tests are deliberately out of scope — **do not add a jsdom

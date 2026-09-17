@@ -29,7 +29,7 @@ import PageHeader from '../ui/PageHeader'
 import SectionLabel from '../ui/SectionLabel'
 import Textarea from '../ui/Textarea'
 import { CARD, FIELD_LABEL, cx } from '../ui/classes'
-import { AUTOSAVE_QUIET_MS, autosaveDecision, autosaveLabel, pendingFlush } from './autosave'
+import { AUTOSAVE_QUIET_MS, autosaveDecision, autosaveLabel, flushPlan } from './autosave'
 
 export interface EntryDetailProps {
   entryId: number
@@ -328,12 +328,27 @@ function NotesEditor({ entryId, initial }: { entryId: number; initial: string })
   const [savedOnce, setSavedOnce] = useState(false)
   const pending = useDebouncedValue(draft, AUTOSAVE_QUIET_MS)
 
+  // The text a PATCH is carrying right now and the promise it is carried on.
+  // Refs: the unmount flush reads both during cleanup, when the render's values
+  // are gone.
+  const sending = useRef<string | null>(null)
+  const inFlight = useRef<Promise<unknown> | null>(null)
+
   const save = useMutation({
-    mutationFn: (notes_md: string) => patchEntry(entryId, { notes_md }),
+    mutationFn: (notes_md: string) => {
+      const request = patchEntry(entryId, { notes_md })
+      sending.current = notes_md
+      inFlight.current = request
+      return request
+    },
     onSuccess: async (entry) => {
       setSaved(entry.notes_md)
       setSavedOnce(true)
       await queryClient.invalidateQueries({ queryKey: kbEntryKey(entryId) })
+    },
+    onSettled: () => {
+      sending.current = null
+      inFlight.current = null
     },
   })
 
@@ -342,6 +357,10 @@ function NotesEditor({ entryId, initial }: { entryId: number; initial: string })
     saved,
     settled: pending === draft,
     saving: save.isPending,
+    // The mutation already remembers what it was last asked to send, so the
+    // text that lost needs no state of its own: `variables` is that text and
+    // `isError` says it lost. Both clear themselves on the next `mutate`.
+    failed: save.isError ? (save.variables ?? null) : null,
   })
   const { mutate } = save
 
@@ -353,8 +372,7 @@ function NotesEditor({ entryId, initial }: { entryId: number; initial: string })
 
   // Unmounting cancels the debounce, so "type a line, click back" inside the
   // quiet window would send nothing at all. Refs because this runs during
-  // cleanup, when the render's `draft` and the mutation object are both gone;
-  // the request goes out bare and the next mount re-reads the server's copy.
+  // cleanup, when the render's `draft` and the mutation object are both gone.
   const latest = useRef(draft)
   const confirmed = useRef(saved)
   // Updated in an effect rather than during the render: a ref written while
@@ -365,12 +383,30 @@ function NotesEditor({ entryId, initial }: { entryId: number; initial: string })
   })
   useEffect(
     () => () => {
-      const unsent = pendingFlush(latest.current, confirmed.current)
-      if (unsent !== null) {
-        void patchEntry(entryId, { notes_md: unsent }).catch(() => {})
+      const plan = flushPlan({
+        latest: latest.current,
+        confirmed: confirmed.current,
+        sending: sending.current,
+      })
+      if (plan.text === null) {
+        return
       }
+      const text = plan.text
+      // The cache is invalidated *after* the write lands: `staleTime` is 30 s,
+      // so reopening this entry inside that window would otherwise re-seed the
+      // editor from the copy this PATCH just replaced — and typing again would
+      // send that stale base back over the flushed text. `queryClient` outlives
+      // the component, so this is safe after unmount.
+      const send = () =>
+        patchEntry(entryId, { notes_md: text }).then(() =>
+          queryClient.invalidateQueries({ queryKey: kbQueryKey }),
+        )
+      const previous = plan.afterInFlight ? inFlight.current : null
+      // Either outcome of the previous PATCH is a reason to send this one: it
+      // carries different text. Only the *order* matters.
+      void (previous ? previous.then(send, send) : send()).catch(() => {})
     },
-    [entryId],
+    [entryId, queryClient],
   )
 
   const label = autosaveLabel(decision, savedOnce, save.isError)
