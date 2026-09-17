@@ -32,6 +32,7 @@ from typing import Any
 
 import httpx2
 from sqlalchemy import Select, case, delete, func, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db.engine import extension_status
@@ -39,6 +40,7 @@ from app.db.models import Feed, FeedItem, utcnow
 from app.kb import capture as capture_module
 from app.kb.capture import (
     CaptureResult,
+    KbConflict,
     RefreshResult,
     capture_article,
     log_activity,
@@ -690,10 +692,20 @@ class KbService:
     async def create_topic(
         self, name: str, *, description: str | None = None, color: str | None = None
     ) -> Topic:
+        """Add a topic. A name already in use is a conflict, not a crash.
+
+        ``topics.name`` is ``UNIQUE``, and typing a name that already exists is an
+        ordinary thing for a user to do — twice over, because the Knowledge page
+        offers "new topic" from more than one place.
+        """
         async with self.session_factory() as session:
             topic = Topic(name=name, description=description, color=color)
             session.add(topic)
-            await session.commit()
+            try:
+                await session.commit()
+            except IntegrityError as exc:
+                await session.rollback()
+                raise _duplicate_topic(name) from exc
             return topic
 
     async def update_topic(
@@ -714,7 +726,11 @@ class KbService:
                 topic.description = description
             if color is not None:
                 topic.color = color
-            await session.commit()
+            try:
+                await session.commit()
+            except IntegrityError as exc:
+                await session.rollback()
+                raise _duplicate_topic(name or topic.name) from exc
             return topic
 
     async def delete_topic(self, topic_id: int) -> bool:
@@ -788,6 +804,11 @@ async def capture_star_if_enabled(
     return await service.guarded(
         service.capture_feed_item(item_id, trigger=trigger), source=trigger
     )
+
+
+def _duplicate_topic(name: str) -> KbConflict:
+    """The 409 both topic writes raise when ``topics.name`` is already taken."""
+    return KbConflict(f"A topic named {name!r} already exists.")
 
 
 def parse_entity(raw: str | None) -> tuple[str, str] | None:

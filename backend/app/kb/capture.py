@@ -64,6 +64,11 @@ ACTIVITY_MAX_ROWS = 10_000
 #: What separates two entries' notes when they are merged.
 NOTE_SEPARATOR = "\n\n---\n\n"
 
+#: The three ways a capture writes nothing, as ``CaptureResult.skipped_code``.
+SKIP_NOT_A_URL = "not_a_url"
+SKIP_FETCH_FAILED = "fetch_failed"
+SKIP_TOO_SHORT = "too_short"
+
 
 class KbConflict(Exception):
     """An operation the current state of the knowledge base refuses.
@@ -80,12 +85,17 @@ class CaptureResult:
 
     ``created`` distinguishes the two successes — a new entry, or an existing one
     that got a back-link — which is exactly the 201/200 split the API makes.
-    ``skipped_reason`` is set only when nothing was written at all.
+    ``skipped_reason`` is set only when nothing was written at all, and
+    ``skipped_code`` names *which* refusal it was: the sentence is for the user,
+    the code is what the API turns into a status. "You typed it wrong", "the site
+    did not answer" and "the page was too short" are three different things, and
+    a client that gets one status code for all three can only guess.
     """
 
     entry_id: int | None
     created: bool
     skipped_reason: str | None = None
+    skipped_code: str | None = None
     possible_duplicate_of: int | None = None
 
 
@@ -203,6 +213,7 @@ async def capture_article(
     body = (text or "").strip()
     digest = content_hash(body)
 
+    held: tuple[int, bool, int | None] | None = None
     async with session_factory() as session:
         existing = await _find_duplicate(
             session,
@@ -219,25 +230,41 @@ async def capture_article(
                 note_id=note_id,
                 session_id=session_id,
             )
+            was_deleted = existing.deleted_at is not None
             await log_activity(
                 session,
                 "capture",
                 entry_id=existing.id,
                 source=trigger,
-                detail="already captured" + ("; back-link added" if added else ""),
+                detail=(
+                    "already captured"
+                    + ("; back-link added" if added else "")
+                    + ("; restored from the trash" if was_deleted else "")
+                ),
             )
             await session.commit()
-            return CaptureResult(
-                entry_id=existing.id,
-                created=False,
-                possible_duplicate_of=existing.possible_duplicate_of,
-            )
+            held = (existing.id, was_deleted, existing.possible_duplicate_of)
 
+    if held is not None:
+        entry_id, was_deleted, duplicate_of = held
+        # Save means "I want this", so saving something that is sitting in the
+        # trash brings it back rather than reporting a success that changed
+        # nothing. Only the `feed_item_id` / `note_id` legs of the dedup can
+        # return a deleted entry — their uniqueness indexes have no `deleted_at`
+        # scope — and this runs outside the session above because `undelete`
+        # opens its own and re-embeds after it.
+        if was_deleted:
+            await undelete(session_factory, embedder, entry_id, trigger=trigger)
+        return CaptureResult(entry_id=entry_id, created=False, possible_duplicate_of=duplicate_of)
+
+    async with session_factory() as session:
         if len(body) < min_chars:
             reason = f"only {len(body)} characters of text; the minimum is {min_chars}"
             await log_activity(session, "skip", source=trigger, detail=reason)
             await session.commit()
-            return CaptureResult(entry_id=None, created=False, skipped_reason=reason)
+            return CaptureResult(
+                entry_id=None, created=False, skipped_reason=reason, skipped_code=SKIP_TOO_SHORT
+            )
 
         entry = KbEntry(
             kind=kind,
@@ -355,7 +382,9 @@ async def capture_url(
     if canonical is None:
         reason = f"{url!r} is not an absolute http(s) URL"
         await _log_in_new_session(session_factory, "skip", source=trigger, detail=reason)
-        return CaptureResult(entry_id=None, created=False, skipped_reason=reason)
+        return CaptureResult(
+            entry_id=None, created=False, skipped_reason=reason, skipped_code=SKIP_NOT_A_URL
+        )
 
     result = await extract_service.extract_article(
         canonical, timeout_s=timeout_s, transport=transport
@@ -365,7 +394,9 @@ async def capture_url(
         await _log_in_new_session(
             session_factory, "skip", source=trigger, detail=f"{canonical}: {reason}"
         )
-        return CaptureResult(entry_id=None, created=False, skipped_reason=reason)
+        return CaptureResult(
+            entry_id=None, created=False, skipped_reason=reason, skipped_code=SKIP_FETCH_FAILED
+        )
 
     return await capture_article(
         session_factory,

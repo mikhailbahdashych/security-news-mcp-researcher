@@ -518,3 +518,110 @@ async def test_the_settings_endpoint_exposes_the_capture_policy(client):
     )
     assert updated.json()["kb_capture_notes"] is False
     assert updated.json()["kb_min_snapshot_chars"] == 200
+
+
+# ------------------------------------------------- regressions, fix round 1
+
+
+async def test_the_search_branch_applies_the_review_filter(client, kb, db_session):
+    """``review`` is a contract filter; under ``q`` it used to do nothing.
+
+    ``reviewed_only=review == "reviewed"`` turned ``review=unreviewed`` into "no
+    filter at all" — the user set a narrowing and got everything back.
+    """
+    reviewed = await _seed(kb, title="Reviewed", url="https://example.test/reviewed")
+    unreviewed = await _seed(kb, title="Unreviewed", url="https://example.test/unreviewed")
+    entry = await db_session.get(KbEntry, reviewed.entry_id)
+    entry.review_status = "reviewed"
+    await db_session.commit()
+
+    async def ids(**params) -> list[int]:
+        response = await client.get("/api/kb/entries", params={"q": "liblzma", **params})
+        assert response.status_code == 200, response.text
+        return sorted(hit["entry"]["id"] for hit in response.json()["hits"])
+
+    assert await ids(review="reviewed") == [reviewed.entry_id]
+    assert await ids(review="unreviewed") == [unreviewed.entry_id]
+    assert await ids() == sorted([reviewed.entry_id, unreviewed.entry_id])
+
+
+async def test_the_search_branch_honours_the_deleted_view(client, kb, item):
+    live = await _entry_from_item(client, kb, item)
+
+    hits = await client.get("/api/kb/entries", params={"q": "liblzma"})
+    trash = await client.get("/api/kb/entries", params={"q": "liblzma", "deleted": "true"})
+
+    assert [hit["entry"]["id"] for hit in hits.json()["hits"]] == [live["id"]]
+    # A soft delete drops the chunks, so a deleted entry is not searchable at
+    # all: the trash is a list, never a search, and saying so beats quietly
+    # answering with the live matches.
+    assert trash.json()["hits"] == []
+    assert "next_cursor" not in trash.json()
+    assert "next_cursor" not in hits.json()
+
+
+async def test_a_duplicate_topic_name_is_a_409_not_a_500(client, kb):
+    assert (await client.post("/api/kb/topics", json={"name": "Ransomware"})).status_code == 201
+
+    clash = await client.post("/api/kb/topics", json={"name": "Ransomware"})
+
+    assert clash.status_code == 409
+    assert "Ransomware" in clash.json()["detail"]
+
+
+async def test_renaming_a_topic_onto_an_existing_name_is_a_409(client, kb):
+    first = (await client.post("/api/kb/topics", json={"name": "one"})).json()
+    await client.post("/api/kb/topics", json={"name": "two"})
+
+    clash = await client.patch(f"/api/kb/topics/{first['id']}", json={"name": "two"})
+
+    assert clash.status_code == 409
+    assert "two" in clash.json()["detail"]
+
+
+async def test_saving_a_deleted_entry_again_brings_it_back(client, kb, item):
+    """Save means "I want this", so a re-save of something deleted revives it.
+
+    It used to answer 200 with a soft-deleted entry: the client said "Saved",
+    the timeline did not list it, and only the trash view could find it again.
+    """
+    created = await _entry_from_item(client, kb, item)
+    await client.post(f"/api/kb/entries/{created['id']}/delete")
+
+    again = await client.post("/api/kb/entries", json={"feed_item_id": item.id})
+
+    assert again.status_code == 200
+    assert again.json()["id"] == created["id"]
+    assert again.json()["deleted_at"] is None
+    assert again.json()["chunks"] >= 1
+    listed = (await client.get("/api/kb/entries")).json()["entries"]
+    assert [entry["id"] for entry in listed] == [created["id"]]
+
+
+async def test_restarring_a_deleted_item_brings_its_entry_back(client, kb, item):
+    created = await _entry_from_item(client, kb, item)
+    await client.post(f"/api/kb/entries/{created['id']}/delete")
+
+    await client.patch(f"/api/items/{item.id}", json={"status": "starred"})
+
+    listed = (await client.get("/api/kb/entries")).json()["entries"]
+    assert [entry["id"] for entry in listed] == [created["id"]]
+
+
+async def test_a_url_that_is_not_http_is_a_422(client, kb):
+    response = await client.post("/api/kb/entries", json={"url": "javascript:alert(1)"})
+
+    assert response.status_code == 422
+    assert "http" in response.json()["detail"]
+
+
+async def test_a_fetch_failure_is_a_502(client, kb):
+    """Three different failures used to share one status code.
+
+    "You typed it wrong", "the site was down" and "the page was too short" are
+    different things to a client, and 409 could only say the last of them.
+    """
+    response = await client.post("/api/kb/entries", json={"url": "https://example.test/missing"})
+
+    assert response.status_code == 502
+    assert response.json()["detail"]

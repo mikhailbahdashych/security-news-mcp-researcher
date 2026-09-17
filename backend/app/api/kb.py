@@ -13,7 +13,12 @@ Three status codes carry meaning beyond "it worked":
   to the same place; only the toast differs.
 * **409** — the text was too short to be worth storing, or the operation collides
   with something the user has to resolve (an Undo whose URL was re-captured, a
-  purge naming a live entry). Never a 500: none of these is a bug.
+  purge naming a live entry, a topic name already in use). Never a 500: none of
+  these is a bug.
+* **422 / 502 on ``POST /entries {url}``** — the three ways a save of a pasted URL
+  fails are three different things to the client: "you typed it wrong" (422), "the
+  site did not answer" (502) and "the page was too short to keep" (409). One status
+  code for all three leaves a client with nothing useful to say.
 * **404** — no such entry. A *deleted* entry is not a 404; it is readable, which is
   what makes Undo and the trash view possible.
 """
@@ -26,6 +31,7 @@ from typing import Annotated
 from fastapi import APIRouter, HTTPException, Query, Response, status
 
 from app.api.deps import KbServiceDep
+from app.kb import capture as capture_module
 from app.kb.capture import KbConflict
 from app.kb.models import KbEntry
 from app.kb.service import (
@@ -80,9 +86,22 @@ async def _load(kb: KbService, entry_id: int) -> KbEntry:
 # ----------------------------------------------------------------- entries
 
 
+#: Which status each way of capturing nothing comes back as. Anything unlisted is
+#: a 409, which is what "the content was refused" has always meant here.
+SKIP_STATUS = {
+    capture_module.SKIP_NOT_A_URL: status.HTTP_422_UNPROCESSABLE_CONTENT,
+    capture_module.SKIP_FETCH_FAILED: status.HTTP_502_BAD_GATEWAY,
+}
+
+
 @router.post("/entries", response_model=EntryRead, status_code=status.HTTP_201_CREATED)
 async def create_entry(payload: EntryCreate, response: Response, kb: KbServiceDep) -> EntryRead:
-    """Save a feed item or a pasted URL. 200 when it was already captured."""
+    """Save a feed item or a pasted URL. 200 when it was already captured.
+
+    A save of something that is in the trash revives it, so the 200 always
+    describes an entry the user can now see — reporting "Saved" for a row that
+    stays hidden is the one answer that is not true.
+    """
     try:
         if payload.feed_item_id is not None:
             result = await kb.capture_feed_item(payload.feed_item_id, captured_by="user")
@@ -90,10 +109,15 @@ async def create_entry(payload: EntryCreate, response: Response, kb: KbServiceDe
             result = await kb.capture_url(payload.url or "", title=payload.title)
     except LookupError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except KbConflict as exc:
+        # The revive collided: this entry's URL was captured again while it sat
+        # in the trash, and which of the two survives is the user's call.
+        raise HTTPException(status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
     if result.entry_id is None:
         raise HTTPException(
-            status.HTTP_409_CONFLICT, detail=result.skipped_reason or "nothing was captured"
+            SKIP_STATUS.get(result.skipped_code or "", status.HTTP_409_CONFLICT),
+            detail=result.skipped_reason or "nothing was captured",
         )
     if not result.created:
         response.status_code = status.HTTP_200_OK
@@ -328,9 +352,12 @@ async def list_topics(kb: KbServiceDep) -> list[TopicRead]:
 
 @router.post("/topics", response_model=TopicRead, status_code=status.HTTP_201_CREATED)
 async def create_topic(payload: TopicCreate, kb: KbServiceDep) -> TopicRead:
-    topic = await kb.create_topic(
-        payload.name.strip(), description=payload.description, color=payload.color
-    )
+    try:
+        topic = await kb.create_topic(
+            payload.name.strip(), description=payload.description, color=payload.color
+        )
+    except KbConflict as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     return TopicRead(
         id=topic.id,
         name=topic.name,
@@ -343,12 +370,15 @@ async def create_topic(payload: TopicCreate, kb: KbServiceDep) -> TopicRead:
 
 @router.patch("/topics/{topic_id}", response_model=TopicRead)
 async def update_topic(topic_id: int, payload: TopicUpdate, kb: KbServiceDep) -> TopicRead:
-    topic = await kb.update_topic(
-        topic_id,
-        name=payload.name.strip() if payload.name else None,
-        description=payload.description,
-        color=payload.color,
-    )
+    try:
+        topic = await kb.update_topic(
+            topic_id,
+            name=payload.name.strip() if payload.name else None,
+            description=payload.description,
+            color=payload.color,
+        )
+    except KbConflict as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     if topic is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Topic not found")
     counts = {row.id: count for row, count in await kb.list_topics()}
