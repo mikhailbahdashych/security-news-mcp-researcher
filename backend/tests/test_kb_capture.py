@@ -384,7 +384,6 @@ async def test_capture_url_fetches_through_the_extractor(session_factory, db_ses
     assert result.created is True
     entry = await db_session.get(KbEntry, result.entry_id)
     assert entry.url == "https://example.test/article"
-    assert entry.kind == "article"
     assert entry.captured_by == "user"
 
 
@@ -805,3 +804,82 @@ async def test_an_embedder_failure_after_the_commit_is_an_activity_row(session_f
     rows = (await db_session.execute(select(KbActivity))).scalars().all()
     assert [row.action for row in rows] == ["capture", "skip"]
     assert "Voyage is down" in rows[1].detail
+
+
+# ------------------------------------------------- a pasted URL, round 1
+
+
+PLAIN_PAGE = (
+    "<!doctype html><html><body><article>"
+    + "".join(
+        f"<p>Paragraph {n} about the liblzma backdoor and the mitigation it needs, "
+        "repeated at length so the extractor has something to work with.</p>"
+        for n in range(12)
+    )
+    + "</article></body></html>"
+)
+
+
+async def test_capture_url_takes_its_title_from_the_page(session_factory, db_session):
+    """A hand-saved URL showed its own URL as the title, in every list that has one."""
+    transport = routes_transport(
+        {"https://example.test/article": httpx2.Response(200, text=fixture_text("article.html"))}
+    )
+
+    result = await capture_url(
+        session_factory, NullEmbedder(), "https://example.test/article", transport=transport
+    )
+
+    entry = await db_session.get(KbEntry, result.entry_id)
+    assert entry.title == "Critical RCE patched in ExampleOS"
+
+
+async def test_capture_url_keeps_a_title_the_user_typed(session_factory, db_session):
+    transport = routes_transport(
+        {"https://example.test/article": httpx2.Response(200, text=fixture_text("article.html"))}
+    )
+
+    result = await capture_url(
+        session_factory,
+        NullEmbedder(),
+        "https://example.test/article",
+        title="What I want to call it",
+        transport=transport,
+    )
+
+    entry = await db_session.get(KbEntry, result.entry_id)
+    assert entry.title == "What I want to call it"
+
+
+async def test_capture_url_falls_back_to_the_url_when_the_page_names_itself_nothing(
+    session_factory, db_session
+):
+    """The URL is the last resort, not the first: it is a label nobody can scan."""
+    transport = routes_transport(
+        {"https://example.test/untitled": httpx2.Response(200, text=PLAIN_PAGE)}
+    )
+
+    result = await capture_url(
+        session_factory, NullEmbedder(), "https://example.test/untitled", transport=transport
+    )
+
+    entry = await db_session.get(KbEntry, result.entry_id)
+    assert entry.title == "https://example.test/untitled"
+
+
+async def test_a_pasted_url_is_a_manual_entry(session_factory, db_session):
+    """`manual` is the spec's kind for an explicit save; `article` is what a feed gives.
+
+    The Knowledge page filters on it, so conflating the two made "saved by hand"
+    match nothing.
+    """
+    transport = routes_transport(
+        {"https://example.test/article": httpx2.Response(200, text=fixture_text("article.html"))}
+    )
+
+    result = await capture_url(
+        session_factory, NullEmbedder(), "https://example.test/article", transport=transport
+    )
+
+    entry = await db_session.get(KbEntry, result.entry_id)
+    assert entry.kind == "manual"

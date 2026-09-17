@@ -651,3 +651,14 @@ async def test_a_fetch_failure_is_a_502(client, kb):
 
     assert response.status_code == 502
     assert response.json()["detail"]
+
+
+async def test_a_pasted_url_is_manual_and_a_starred_item_stays_an_article(client, kb, item):
+    """Two saves, two kinds. The Knowledge page's "saved by hand" filter reads this."""
+    pasted = await client.post("/api/kb/entries", json={"url": ARTICLE_URL})
+    starred = await client.post("/api/kb/entries", json={"feed_item_id": item.id})
+
+    assert pasted.status_code == 201, pasted.text
+    assert pasted.json()["kind"] == "manual"
+    assert pasted.json()["title"] == "Critical RCE patched in ExampleOS"
+    assert starred.json()["kind"] == "article"

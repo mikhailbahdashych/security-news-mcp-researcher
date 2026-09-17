@@ -372,6 +372,7 @@ async def capture_url(
     *,
     title: str | None = None,
     captured_by: str = "user",
+    kind: str = "manual",
     min_chars: int = DEFAULT_MIN_SNAPSHOT_CHARS,
     timeout_s: int = 15,
     trigger: str = "url",
@@ -382,6 +383,13 @@ async def capture_url(
     The fetch is ``extract_service.extract_article``, which goes through
     ``url_guard.fetch_guarded`` with every hop validated and the body ceiling
     applied. There must never be a second HTTP path around the guard.
+
+    The kind is ``manual``, not ``article``: this is the user deciding to keep
+    something, and the Knowledge page separates what they saved by hand from what
+    arrived in a feed. The title comes off the page — the extractor's metadata,
+    which falls back to ``<title>``, then the first Markdown heading, then the URL
+    — because a list of URLs is a list nobody can scan. A title the user typed
+    always wins.
     """
     canonical = canonical_url(url)
     if canonical is None:
@@ -407,13 +415,14 @@ async def capture_url(
         session_factory,
         embedder,
         url=canonical,
-        title=title or _title_from(result.text, canonical),
+        title=title or result.title or _title_from(result.text, canonical),
         source_name=None,
         text=result.text,
-        # The extractor yields text only; it exposes no publication date, so
-        # there is nothing honest to put here.
+        # The extractor yields text and a title only; it exposes no publication
+        # date, so there is nothing honest to put here.
         published_at=None,
         captured_by=captured_by,
+        kind=kind,
         min_chars=min_chars,
         trigger=trigger,
     )
