@@ -213,23 +213,29 @@ class KbService:
                 await session.commit()
                 item = result.item
 
+        # Read inside the session and carried out as plain values. The ORM object
+        # survives ``close()`` today because it expunges without expiring, but
+        # that is a property of the session's settings, not a promise — one
+        # ``expire_on_commit=True`` away from a ``DetachedInstanceError``.
         async with self.session_factory() as session:
             item = await session.get(FeedItem, item_id)
             source_name = await session.scalar(select(Feed.title).where(Feed.id == item.feed_id))
+            url, title = item.url, item.title
+            published_at = item.published_at
+            body = (item.content_text or "").strip() or (item.summary or "").strip()
 
-        body = (item.content_text or "").strip() or (item.summary or "").strip()
         return await capture_article(
             self.session_factory,
             self.embedder,
-            url=item.url,
-            title=item.title,
+            url=url,
+            title=title,
             source_name=source_name,
             text=body,
             # The feed item's own date, never the capture time.
-            published_at=item.published_at,
-            feed_item_id=item.id,
+            published_at=published_at,
+            feed_item_id=item_id,
             captured_by=captured_by,
-            source_ref=f"feed item {item.id}: {item.title}",
+            source_ref=f"feed item {item_id}: {title}",
             min_chars=min_chars,
             trigger=trigger,
         )
@@ -788,22 +794,31 @@ async def capture_note_if_enabled(
     """The notes trigger, policy and error handling included.
 
     A module function rather than a method so the routes read as one line and
-    cannot forget either half of it.
+    cannot forget either half of it. The policy read is **inside** ``guarded``:
+    it is a database read like any other, and the write that triggered it has
+    already committed, so a failure there must not reach the user's request
+    either — which is the whole reason the wrapper exists.
     """
-    if not await service.capture_notes_enabled():
-        return None
-    return await service.guarded(service.capture_note(note_id, trigger=trigger), source=trigger)
+
+    async def capture() -> CaptureResult | None:
+        if not await service.capture_notes_enabled():
+            return None
+        return await service.capture_note(note_id, trigger=trigger)
+
+    return await service.guarded(capture(), source=trigger)
 
 
 async def capture_star_if_enabled(
     service: KbService, item_id: int, *, trigger: str = "star"
 ) -> CaptureResult | None:
     """The star trigger, policy and error handling included."""
-    if not await service.capture_starred_enabled():
-        return None
-    return await service.guarded(
-        service.capture_feed_item(item_id, trigger=trigger), source=trigger
-    )
+
+    async def capture() -> CaptureResult | None:
+        if not await service.capture_starred_enabled():
+            return None
+        return await service.capture_feed_item(item_id, trigger=trigger)
+
+    return await service.guarded(capture(), source=trigger)
 
 
 def _duplicate_topic(name: str) -> KbConflict:

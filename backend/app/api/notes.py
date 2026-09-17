@@ -38,7 +38,7 @@ from app.api.streaming import (
 )
 from app.db.models import Note, NoteSource, utcnow
 from app.db.util import matches
-from app.kb.service import capture_note_if_enabled, searchable
+from app.kb.service import KbService, capture_note_if_enabled
 from app.schemas.common import CancelResponse
 from app.schemas.notes import (
     EXCERPT_CHARS,
@@ -82,6 +82,7 @@ async def generate_note(
     session_factory: SessionFactory,
     client_factory: ChatClientFactory,
     app_settings: AppSettings,
+    kb: KbServiceDep,
 ) -> Response:
     """Generate a note from starred items and/or a research session, streamed."""
     generation_id = payload.generation_id or uuid4().hex
@@ -149,7 +150,7 @@ async def generate_note(
 
     return EventSourceResponse(
         _stream_generation(
-            request, generator, client, key, generation_id, context, session_factory
+            request, generator, client, key, generation_id, context, session_factory, kb
         ),
         ping=SSE_PING_S,
         headers=SSE_HEADERS,
@@ -164,6 +165,7 @@ async def _stream_generation(
     generation_id: str,
     context: notes_service.GenerationContext,
     session_factory: async_sessionmaker[AsyncSession],
+    kb: KbService,
 ) -> AsyncIterator[dict[str, str]]:
     """Forward the runner's events, then save the note and announce its id.
 
@@ -176,6 +178,13 @@ async def _stream_generation(
     safety net the run had — hence the ``try`` around it: this generator's
     exceptions reach sse-starlette, which closes the stream without a terminal
     frame of any kind.
+
+    ``kb`` is taken as a dependency rather than built here — the third capture
+    trigger has to be reachable by the same ``get_kb_service`` override the other
+    two are, or it is the one trigger no test can drive. It is safe to hold across
+    the stream because ``get_kb_service`` does not *yield*: it returns a service
+    over the session factory and holds no session, so there is nothing for the
+    dependency teardown to have closed before the body is sent.
     """
     collector = notes_service.SourceCollector()
     chunks: list[str] = []
@@ -235,7 +244,7 @@ async def _stream_generation(
     logger.info("Saved note %s from generation %s", note_id, generation_id)
     # The note is committed; the knowledge base is a consequence of that, and its
     # failure is an activity row rather than a stream that ends without ``done``.
-    await capture_note_if_enabled(searchable(session_factory), note_id, trigger="generate")
+    await capture_note_if_enabled(kb, note_id, trigger="generate")
     yield sse_data("done", {"note_id": note_id})
 
 

@@ -333,6 +333,9 @@ async def capture_note(
             raise LookupError(f"No note with id {note_id}")
         title = (note.title or "").strip() or f"Note {note.id}"
         body = (note.body_md or "").strip()
+        # Copied out here, not read after the block: the session closes below and
+        # a detached instance is one setting away from raising.
+        note_session_id = note.session_id
         existing = await session.scalar(select(KbEntry).where(KbEntry.note_id == note_id))
         existing_id = existing.id if existing is not None else None
 
@@ -352,7 +355,7 @@ async def capture_note(
         text=body,
         published_at=None,
         note_id=note_id,
-        session_id=note.session_id,
+        session_id=note_session_id,
         source_ref=f"note {note_id}: {title}",
         kind="note",
         authorship="human",

@@ -27,8 +27,10 @@ from test_api_sessions import finish_turn
 
 from app.agent import events as ev
 from app.api import tasks as task_registry
-from app.api.deps import get_chat_client_factory
+from app.api.deps import get_chat_client_factory, get_kb_service
 from app.db.models import Feed, FeedItem, Message, Note, NoteSource, ResearchSession, utcnow
+from app.kb.models import KbEntry
+from app.kb.service import KbService
 from app.services import extract as extract_service
 from app.services import notes as notes_service
 from app.services import settings as settings_service
@@ -1126,3 +1128,73 @@ async def test_one_failing_extraction_does_not_take_the_others_down(
     # The failure degrades to the RSS summary, with the reason shown to the model.
     assert items[1].text == "Summary for story 1."
     assert "the article could not be fetched" in (items[1].note or "")
+
+
+NOTE_BODY = (
+    "## Story 0\n"
+    "**What happened** — a malicious commit in liblzma introduced a backdoor tracked as "
+    "CVE-2024-3094, hooking RSA_public_decrypt through the IFUNC resolver.\n"
+    "**Why it matters** — the affected build reached the unstable channels of two "
+    "distributions, and the payload only activates inside an sshd process.\n"
+    "**Recommended actions for teams** — downgrade liblzma to 5.4.6 and rebuild from the "
+    "packages the distributions have republished.\n"
+)
+
+
+class RecordingKb(KbService):
+    """A knowledge base that remembers what it was asked to capture.
+
+    The point is the *seam*, not the recording: a service built inside the stream
+    would leave this list empty however well the capture worked.
+    """
+
+    def __init__(self, session_factory):
+        super().__init__(session_factory=session_factory)
+        self.captured: list[tuple[int, str]] = []
+
+    async def capture_note(self, note_id: int, *, trigger: str = "note"):
+        self.captured.append((note_id, trigger))
+        return await super().capture_note(note_id, trigger=trigger)
+
+
+async def test_a_generated_note_is_captured_into_the_knowledge_base(
+    app, client, with_key, session_factory
+):
+    """The third capture trigger, through the route that owns it.
+
+    Star and ``PATCH /notes/{id}`` were covered; generation was not, and it built
+    its own service rather than taking the dependency, so an override could not
+    reach it.
+    """
+    item_ids = await seed_items(session_factory, 1)
+    use_script(app, turn_text(NOTE_BODY))
+    service = RecordingKb(session_factory)
+    app.dependency_overrides[get_kb_service] = lambda: service
+
+    response = await generate(client, item_ids=item_ids, title="Weekly security notes")
+
+    assert event_names(response.text)[-1] == "done"
+    notes = await note_rows(session_factory)
+    assert service.captured == [(notes[0].id, "generate")]
+    async with session_factory() as session:
+        entries = list((await session.execute(select(KbEntry))).scalars().all())
+    assert [(entry.kind, entry.authorship, entry.note_id) for entry in entries] == [
+        ("note", "human", notes[0].id)
+    ]
+
+
+async def test_the_generation_trigger_respects_the_policy_setting(
+    app, client, with_key, session_factory, db_session
+):
+    item_ids = await seed_items(session_factory, 1)
+    use_script(app, turn_text(NOTE_BODY))
+    service = RecordingKb(session_factory)
+    app.dependency_overrides[get_kb_service] = lambda: service
+    await settings_service.set_value(db_session, "kb_capture_notes", "false")
+    await db_session.commit()
+
+    await generate(client, item_ids=item_ids, title="Weekly security notes")
+
+    assert service.captured == []
+    async with session_factory() as session:
+        assert (await session.execute(select(KbEntry))).scalars().all() == []
