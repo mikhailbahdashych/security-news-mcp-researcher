@@ -12,6 +12,7 @@ import { useTheme } from './components/ui/theme'
 import { useRunningTurns } from './lib/useRunningTurns'
 import ChatPage from './pages/ChatPage'
 import InboxPage from './pages/Inbox'
+import KnowledgePage from './pages/Knowledge'
 import NoteDetailPage from './pages/NoteDetail'
 import NotesPage from './pages/Notes'
 import SettingsPage from './pages/Settings'
@@ -89,6 +90,8 @@ export default function App() {
             <Route path="/chat/:id" element={<ChatPage />} />
             <Route path="/notes" element={<NotesPage />} />
             <Route path="/notes/:id" element={<NoteDetailPage />} />
+            <Route path="/knowledge" element={<KnowledgePage />} />
+            <Route path="/knowledge/:id" element={<KnowledgePage />} />
             <Route path="/settings" element={<SettingsPage />} />
           </Routes>
         </div>

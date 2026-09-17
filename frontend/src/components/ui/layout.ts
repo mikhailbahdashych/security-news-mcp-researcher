@@ -2,8 +2,8 @@ import { useCallback } from 'react'
 
 import { useStored } from './storage'
 
-/** The four pages, by the key the rail, the layout and the routes all use. */
-export const PAGE_KEYS = ['inbox', 'research', 'notes', 'settings'] as const
+/** The five pages, by the key the rail, the layout and the routes all use. */
+export const PAGE_KEYS = ['inbox', 'research', 'notes', 'knowledge', 'settings'] as const
 
 export type PageKey = (typeof PAGE_KEYS)[number]
 
@@ -11,6 +11,7 @@ export const PAGE_LABELS: Record<PageKey, string> = {
   inbox: 'Inbox',
   research: 'Research',
   notes: 'Notes',
+  knowledge: 'Knowledge',
   settings: 'Settings',
 }
 
@@ -18,6 +19,7 @@ const PAGE_ROUTES: Record<PageKey, string> = {
   inbox: '/',
   research: '/chat',
   notes: '/notes',
+  knowledge: '/knowledge',
   settings: '/settings',
 }
 
@@ -81,7 +83,7 @@ export function routeForPage(page: PageKey): string {
   return PAGE_ROUTES[page]
 }
 
-/** Which page a URL is showing. `/notes/7` is still Notes; `/chat/3` still Research. */
+/** Which page a URL is showing. `/notes/7` is still Notes; `/knowledge/7` still Knowledge. */
 export function pageFromPath(pathname: string): PageKey {
   if (pathname === '/' || pathname === '') {
     return 'inbox'
@@ -91,6 +93,9 @@ export function pageFromPath(pathname: string): PageKey {
   }
   if (pathname.startsWith('/notes')) {
     return 'notes'
+  }
+  if (pathname.startsWith('/knowledge')) {
+    return 'knowledge'
   }
   if (pathname.startsWith('/settings')) {
     return 'settings'
