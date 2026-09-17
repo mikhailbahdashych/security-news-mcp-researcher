@@ -660,3 +660,101 @@ async def test_a_long_article_is_findable_by_a_phrase_in_its_last_paragraph(sess
 
     hits = await _search(session_factory, "quarantined telemetry beacon")
     assert [hit.entry.id for hit in hits] == [captured.entry_id]
+
+
+# ------------------------------------------------- regressions, fix round 1
+
+
+def test_canonical_url_keeps_a_valueless_parameter_and_its_percent_encoding():
+    """The query is filtered, never re-encoded.
+
+    Round-tripping it through ``parse_qsl``/``urlencode`` turned ``?b`` into
+    ``?b=`` and ``%20`` into ``+`` — both are different requests to plenty of
+    servers, and the stored URL is what "Refresh snapshot" re-fetches.
+    """
+    assert canonical_url("https://example.test/a?b&x=a%20b") == "https://example.test/a?b&x=a%20b"
+
+
+def test_canonical_url_strips_one_trailing_slash_and_never_the_roots():
+    assert canonical_url("https://example.test/a/") == "https://example.test/a"
+    # Only one: `/a//` and `/a/` are different resources, and so are `/a/` and `/a`.
+    assert canonical_url("https://example.test/a//") == "https://example.test/a/"
+    assert canonical_url("https://example.test/") == "https://example.test/"
+    assert canonical_url("https://example.test") == "https://example.test/"
+
+
+def test_canonical_url_lowercases_the_host_and_drops_only_the_default_port():
+    assert canonical_url("https://EXAMPLE.test:443/A") == "https://example.test/A"
+    assert canonical_url("https://example.test:8443/a") == "https://example.test:8443/a"
+    assert canonical_url("http://example.test:80/a") == "http://example.test/a"
+
+
+def test_canonical_url_removes_tracking_parameters_and_keeps_the_rest_in_order():
+    assert (
+        canonical_url("https://example.test/a?utm_source=x&id=7&fbclid=y&page=2")
+        == "https://example.test/a?id=7&page=2"
+    )
+
+
+async def test_editing_a_note_whose_entry_is_deleted_leaves_it_deleted(session_factory, db_session):
+    """A deleted entry has no chunks, and an edit must not give it some.
+
+    It could not be embedded either — ``embed_pending`` skips deleted entries —
+    so the "N chunks not embedded" badge would have counted a chunk that nothing
+    could ever clear.
+    """
+    note = Note(title="Week 12", body_md=ARTICLE, template_used="t")
+    db_session.add(note)
+    await db_session.commit()
+    captured = await capture_note(session_factory, NullEmbedder(), note.id)
+    await soft_delete(session_factory, captured.entry_id)
+
+    note.body_md = ARTICLE + "\n\nAn addendum about CVE-2024-3094 mitigations everywhere.\n"
+    await db_session.commit()
+    await capture_note(session_factory, NullEmbedder(), note.id)
+
+    entry = await db_session.get(KbEntry, captured.entry_id)
+    await db_session.refresh(entry)
+    assert entry.deleted_at is not None
+    chunks = await db_session.scalar(
+        select(func.count()).select_from(KbChunk).where(KbChunk.entry_id == captured.entry_id)
+    )
+    assert chunks == 0
+
+    # The new text was still kept, and Undo is what brings it back.
+    await undelete(session_factory, NullEmbedder(), captured.entry_id)
+    hits = await _search(session_factory, "addendum")
+    assert [hit.entry.id for hit in hits] == [captured.entry_id]
+
+
+async def test_an_embedder_failure_after_the_commit_is_an_activity_row(session_factory, db_session):
+    """Spec §5: capture completes and the chunks stay pending.
+
+    The embed call happens after the commit, so letting it raise would 500 a
+    request whose entry is already in the database.
+    """
+
+    class BrokenEmbedder(FakeEmbedder):
+        async def embed_documents(self, texts):
+            raise RuntimeError("Voyage is down")
+
+    result = await capture_article(
+        session_factory,
+        BrokenEmbedder(),
+        url="https://example.test/xz",
+        title="The xz backdoor",
+        text=ARTICLE,
+        captured_by="user",
+    )
+
+    assert result.created is True
+    assert await db_session.get(KbEntry, result.entry_id) is not None
+    pending = await db_session.scalar(
+        select(func.count())
+        .select_from(KbChunk)
+        .where(KbChunk.entry_id == result.entry_id, KbChunk.embedded_at.is_(None))
+    )
+    assert pending > 0
+    rows = (await db_session.execute(select(KbActivity))).scalars().all()
+    assert [row.action for row in rows] == ["capture", "skip"]
+    assert "Voyage is down" in rows[1].detail

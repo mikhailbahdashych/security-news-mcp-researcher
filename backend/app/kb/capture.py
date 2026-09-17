@@ -14,7 +14,9 @@ happen in, because most of the rules that matter are ordering rules:
   trip would lock the rest of the application out for the duration.
 * **A snapshot is never destroyed.** A refresh that fails keeps the text it was
   going to replace; a soft delete drops the derived chunks and leaves the
-  snapshots, because Undo re-chunks from them.
+  snapshots, because Undo re-chunks from them. A deleted entry stays chunkless
+  even when its source is edited afterwards — "deleted" is the absence of chunks,
+  and re-creating one would be a chunk nothing could ever embed or reach.
 
 The caller owns nothing here: every function takes the session factory and opens
 its own short transactions.
@@ -307,7 +309,7 @@ async def capture_article(
         entry_id = entry.id
 
     # Outside every transaction, on purpose — see the module docstring.
-    await embed_pending(session_factory, embedder, entry_id=entry_id)
+    await _embed_pending_quietly(session_factory, embedder, entry_id, trigger=trigger)
     return CaptureResult(entry_id=entry_id, created=True)
 
 
@@ -338,7 +340,7 @@ async def capture_note(
         result = await _replace_snapshot(
             session_factory, existing_id, body, title=title, trigger=trigger
         )
-        await embed_pending(session_factory, embedder, entry_id=existing_id)
+        await _embed_pending_quietly(session_factory, embedder, existing_id, trigger=trigger)
         return CaptureResult(entry_id=existing_id, created=False, skipped_reason=result.reason)
 
     return await capture_article(
@@ -469,7 +471,7 @@ async def refresh_snapshot(
         session_factory, entry_id, result.text.strip(), trigger=trigger
     )
     if outcome.changed:
-        await embed_pending(session_factory, embedder, entry_id=entry_id)
+        await _embed_pending_quietly(session_factory, embedder, entry_id, trigger=trigger)
     return outcome
 
 
@@ -481,7 +483,15 @@ async def _replace_snapshot(
     title: str | None = None,
     trigger: str,
 ) -> RefreshResult:
-    """Store *body* as the next version, unless it is byte-identical to the current one."""
+    """Store *body* as the next version, unless it is byte-identical to the current one.
+
+    A **deleted** entry still gets its snapshot — the text is worth keeping, and
+    the note it came from is the authority on its own body — but it gets no
+    chunks. ``soft_delete`` drops them precisely so that "deleted" needs no filter
+    anywhere; a chunk created here would also be one ``embed_pending`` skips
+    forever, so the "N chunks not embedded" badge could never clear. ``undelete``
+    re-chunks from the current snapshot, which is this one.
+    """
     async with session_factory() as session:
         entry = await session.get(KbEntry, entry_id)
         if entry is None:
@@ -502,7 +512,8 @@ async def _replace_snapshot(
         entry.current_snapshot_id = snapshot.id
         entry.content_hash = content_hash(body)
         entry.updated_at = utcnow()
-        await _rechunk(session, entry, snapshot, body)
+        if entry.deleted_at is None:
+            await _rechunk(session, entry, snapshot, body)
         await _sync_regex_entities(session, entry.id, f"{entry.title}\n{body}")
         await log_activity(
             session,
@@ -525,7 +536,8 @@ async def soft_delete(
 
     Dropping the chunks is what removes the entry from both search legs — the FTS
     rows and the vectors go with them, by trigger — so there is no filter anywhere
-    that can be forgotten.
+    that can be forgotten. The other half of that rule lives in
+    :func:`_replace_snapshot`, which does not give them back.
     """
     async with session_factory() as session:
         entry = await session.get(KbEntry, entry_id)
@@ -580,7 +592,7 @@ async def undelete(
                 "Merge the two, or delete the newer one first."
             ) from exc
 
-    await embed_pending(session_factory, embedder, entry_id=entry_id)
+    await _embed_pending_quietly(session_factory, embedder, entry_id, trigger=trigger)
 
 
 async def purge(session_factory: async_sessionmaker[AsyncSession], ids: Sequence[int]) -> int:
@@ -841,6 +853,35 @@ async def embed_pending(
                 chunk.embedding_model = embedder.model
         await session.commit()
     return len(rows)
+
+
+async def _embed_pending_quietly(
+    session_factory: async_sessionmaker[AsyncSession],
+    embedder: Embedder,
+    entry_id: int,
+    *,
+    trigger: str,
+) -> int:
+    """Embed what is pending, and turn a failure into a row in the trail.
+
+    Every caller runs this **after** its own commit, so the entry is already in
+    the database and there is nothing left to roll back. Spec §5 is explicit that
+    a capture completes and the chunks that could not be reached stay pending —
+    an embedding provider being down is not a reason to answer a successful save
+    with a 500, and ``embedded_at IS NULL`` is exactly what Re-index resumes from.
+    """
+    try:
+        return await embed_pending(session_factory, embedder, entry_id=entry_id)
+    except Exception as exc:  # noqa: BLE001 - the capture already committed
+        logger.exception("Embedding entry %s failed", entry_id)
+        await _log_in_new_session(
+            session_factory,
+            "skip",
+            entry_id=entry_id,
+            source=trigger,
+            detail=f"embedding failed, chunks stay pending: {type(exc).__name__}: {exc}",
+        )
+        return 0
 
 
 # ----------------------------------------------------------------- internals

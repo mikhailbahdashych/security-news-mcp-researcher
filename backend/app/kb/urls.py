@@ -8,15 +8,24 @@ each spelling is a new entry, and "have we covered this?" answers "three times".
 The rules are deliberately conservative — everything here either cannot change
 which document is served (case in the scheme and host, the default port, the
 fragment) or is a known click-tracking parameter. ``www.`` is **not** stripped and
-query parameters are **not** reordered or sorted: plenty of sites serve different
-documents for ``?page=2&sort=new`` than for ``?sort=new&page=2``, and an
-over-eager canonicaliser silently merges two different articles into one entry,
-which is not recoverable by anything short of a re-capture.
+query parameters are **not** reordered, sorted or re-encoded: plenty of sites
+serve different documents for ``?page=2&sort=new`` than for ``?sort=new&page=2``,
+``?b`` is not ``?b=`` to a CGI script and ``%20`` is not ``+`` to a path-like
+parameter. An over-eager canonicaliser silently merges two different articles into
+one entry, which is not recoverable by anything short of a re-capture — and the
+canonical form is also what "Refresh snapshot" re-fetches, so a URL this function
+rewrote is a URL that may no longer resolve.
+
+The **one** rule here that can change which document is served is the trailing
+slash: ``/a/`` and ``/a`` are different resources per RFC 3986, and they are
+folded together anyway because in practice every publisher serves both. Exactly
+one slash goes, so ``/a//`` becomes ``/a/`` rather than ``/a``, and the root's
+slash never goes at all — ``https://example.test/`` has no shorter form.
 """
 
 from __future__ import annotations
 
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import urlsplit, urlunsplit
 
 #: Click-tracking parameters, dropped wherever they appear. Matched case-insensitively.
 TRACKING_PARAMS = frozenset(
@@ -77,17 +86,15 @@ def canonical_url(url: str | None) -> str | None:
     if parts.port is not None and str(parts.port) != _DEFAULT_PORTS[scheme]:
         netloc = f"{host}:{parts.port}"
 
-    query = urlencode(
-        [
-            (name, value)
-            for name, value in parse_qsl(parts.query, keep_blank_values=True)
-            if not _is_tracking(name)
-        ]
+    # Filtered, never parsed and re-emitted: ``parse_qsl`` + ``urlencode`` is a
+    # round trip that rewrites what it did not drop.
+    query = "&".join(
+        part for part in parts.query.split("&") if part and not _is_tracking(part.split("=", 1)[0])
     )
 
     path = parts.path or "/"
     if len(path) > 1 and path.endswith("/"):
-        path = path.rstrip("/") or "/"
+        path = path[:-1]
 
     # The fragment is dropped: it never reaches the server, so two URLs that
     # differ only there are the same document by definition.
