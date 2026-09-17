@@ -1,5 +1,5 @@
 import { apiDelete, apiGet, apiPatch, apiPost } from './client'
-import { parseUtc } from '../lib/dates'
+import { dayLabel, groupByDay } from '../lib/dates'
 
 /**
  * Where the session's own turn stands, server-side.
@@ -1197,40 +1197,12 @@ export function parseSessionId(raw: string | undefined): number | null {
   return Number.isSafeInteger(id) && id > 0 ? id : null
 }
 
-const MONTHS = [
-  'Jan',
-  'Feb',
-  'Mar',
-  'Apr',
-  'May',
-  'Jun',
-  'Jul',
-  'Aug',
-  'Sep',
-  'Oct',
-  'Nov',
-  'Dec',
-] as const
-
 /**
- * How the app dates a chat: `16 Sep 2026`, always.
- *
- * Every row carries its exact date. "today" / "yesterday" / a weekday name read
- * well for the top of the list and told you nothing for the rest of it — and a
- * week's worth of rows all saying "Monday" is a list you cannot scan.
- *
- * Built from the parts rather than through `toLocaleDateString`, because that
- * reorders the fields and translates the month to whatever the browser is set
- * to: the same chat would be dated `16 Sept 2026`, `Sep 16, 2026` or
- * `16 сен 2026` depending on the machine. Naive-UTC in, the viewer's own day
- * out, as everywhere else in the app.
+ * How the app dates a chat: `16 Sep 2026`, always. See `lib/dates.ts::dayLabel`,
+ * which the Knowledge timeline groups on too — one rendered day, one function.
  */
 export function whenLabel(timestamp: string): string {
-  const when = parseUtc(timestamp)
-  if (Number.isNaN(when.getTime())) {
-    return ''
-  }
-  return `${when.getDate()} ${MONTHS[when.getMonth()]} ${when.getFullYear()}`
+  return dayLabel(timestamp)
 }
 
 /** A day's worth of chats, under the date they were last touched. */
@@ -1254,15 +1226,12 @@ export interface SessionDay {
  * same label, which is the honest rendering of a list that arrived that way.
  */
 export function groupSessionsByDay(sessions: ResearchSession[]): SessionDay[] {
-  const days: SessionDay[] = []
-  for (const session of sessions) {
-    const label = whenLabel(session.updated_at)
-    const current = days[days.length - 1]
-    if (current && current.label === label) {
-      current.sessions.push(session)
-    } else {
-      days.push({ label, sessions: [session] })
-    }
-  }
-  return days
+  // The *timestamp*, not `whenLabel` of it: `groupByDay` labels the rows itself,
+  // and handing it a rendered date has it parse `16 Sep 2026` back into a Date —
+  // which V8 accepts, at midnight UTC, so every header slipped a day west of
+  // Greenwich.
+  return groupByDay(sessions, (session) => session.updated_at).map((day) => ({
+    label: day.label,
+    sessions: day.rows,
+  }))
 }

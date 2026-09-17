@@ -9,6 +9,7 @@ import {
   type SearchHit,
   type SearchResults,
 } from '../../api/search'
+import { splitOnQuery } from '../../lib/highlight'
 import useDebouncedValue from '../../lib/useDebouncedValue'
 import { excerptFromMarkdown } from '../notes/excerpt'
 import { formatNoteDate } from '../notes/noteDate'
@@ -345,30 +346,21 @@ function HitRow({ hit, query, index, active, onPick, onHighlight }: HitRowProps)
  * Done by splitting the plain-text snippet in React rather than by having the
  * server return markup: a feed title is attacker-influenced text, and
  * `dangerouslySetInnerHTML` on it would be a stored-XSS hole for the sake of a
- * yellow background.
+ * yellow background. `lib/highlight.ts` holds the splitting itself, because the
+ * Knowledge timeline marks its snippets by the same rule.
  */
 function highlight(text: string, query: string): ReactNode {
-  const needle = query.toLowerCase()
-  if (!needle) {
+  const parts = splitOnQuery(text, query)
+  if (parts.length === 1 && !parts[0].match) {
     return text
   }
-  const haystack = text.toLowerCase()
-  const parts: ReactNode[] = []
-  let cursor = 0
-  for (let index = haystack.indexOf(needle); index >= 0; index = haystack.indexOf(needle, cursor)) {
-    if (index > cursor) {
-      parts.push(text.slice(cursor, index))
-    }
-    parts.push(
+  return parts.map((part, index) =>
+    part.match ? (
       <mark key={index} className="rounded-[3px] bg-accent-soft text-accent">
-        {text.slice(index, index + needle.length)}
-      </mark>,
-    )
-    cursor = index + needle.length
-  }
-  if (parts.length === 0) {
-    return text
-  }
-  parts.push(text.slice(cursor))
-  return parts
+        {part.text}
+      </mark>
+    ) : (
+      part.text
+    ),
+  )
 }
