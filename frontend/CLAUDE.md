@@ -177,7 +177,16 @@ V8 accepts and which slips every header a day west of Greenwich.
 string, returned as parts for the caller to render as `<mark>`. Parts rather than
 markup because a captured headline is text somebody else wrote: `GlobalSearch` and the
 Knowledge timeline both mark their snippets this way, and neither may reach for
-`dangerouslySetInnerHTML`.
+`dangerouslySetInnerHTML`. **Which of the two you want depends on the backend that
+found the row**: `GlobalSearch` is `LIKE '%q%'`, so the whole query really is in the
+text and `splitOnQuery` is right; the KB is FTS5, handed `"a" AND "b"`, so a hit can
+match two words a paragraph apart and the timeline uses `splitOnTerms`, which marks each
+whitespace-separated term and never re-splits a run another term already claimed.
+
+`lib/urls.ts::hostOf(url)` — the host without `www.`, `null` when it is not a URL. It
+lived in `api/chat.ts` while the transcript's source cards were its only caller; the
+knowledge base names its sources the same way, and a helper with two callers belongs to
+neither module.
 
 `lib/useDebouncedValue.ts` — every search box drives a query key, so without it each
 keystroke is its own request and its own cache entry. Used by `GlobalSearch`, `Inbox`,
@@ -555,7 +564,17 @@ which leg answered.
   `keyword` / `vector` / `both` / `exact` marker (`matchMarker`, which shows an unknown
   leg from a newer backend verbatim rather than hiding a real hit). Hits are **not** cut
   into days: they are ordered by score, and a date header over them would lie about the
-  ordering.
+  ordering. The filters (kind, date, topic chips, entity) narrow both legs, and the
+  **list state lives in `KnowledgePage`, above the entry view** — scanning several hits
+  for one search is what the page is for, and unmounting the timeline to show an entry
+  would empty the box every time.
+- **The entity box is the exact-identifier leg.** It sends `entity=cve:CVE-…`, and
+  `entityFilter` is what turns what was typed into that: the API reads a value with no
+  `kind:` as *no filter at all*, so an unqualified word is refused rather than silently
+  widening the search, and a bare CVE id is qualified for you because that is the form
+  people paste.
+- **`next_cursor` belongs to the list branch alone** — the backend drops it with the
+  absent leg when the answer is a search, so `listEntries` normalises it back to `null`.
 - **The timeline dates rows on `published_at ?? captured_at`** (`entryTimestamp`),
   because that is the `COALESCE` the backend orders by — group on anything else and a
   row lands under a header it did not sort into.
@@ -568,9 +587,17 @@ which leg answered.
 - **The notes editor autosaves.** `components/kb/autosave.ts::autosaveDecision` is the
   tested decision (typing / clean / in-flight / save) and `autosaveLabel` the line under
   the box; a PATCH is never issued while one is in flight, because two writes over one
-  field can land out of order and the loser is the newer text. The title is seeded once
-  per entry through a `key`, not through an effect — a background refetch mid-edit would
-  otherwise throw the half-typed title away.
+  field can land out of order and the loser is the newer text. Unmounting cancels the
+  debounce, so the editor **flushes on the way out** (`pendingFlush`, through refs, with
+  a bare `patchEntry`) — otherwise "type a line, click back" inside the 1.2 s window
+  posts nothing. The title is seeded once per entry through a `key`, not through an
+  effect — a background refetch mid-edit would otherwise throw the half-typed title
+  away — and the rename is a mutation that **puts the field back and says so** when the
+  write loses, because the blur that would have retried it has already happened.
+- **Capture failures are only visible in the entry's activity list**, so the detail page
+  draws the `activity` rows `GET /kb/entries/{id}` already carries.
+- **Leaving a dead entry `replace`s.** `EntryDetail`'s 404 effect calls `onBack(true)`:
+  a purged id is not a place Back should return to, or the 404 pushes forward again.
 - **A soft delete is readable.** The entry page stays open with a banner, and the
   timeline's "Needs attention" strip lists what is in the bin with an Undo. The strip is
   drawn only when it has something. A 409 on Undo means the URL was captured again while
@@ -594,7 +621,7 @@ hand-rolled `.prose-chat` block in `src/index.css`, deliberately instead of
 
 ## Tests
 
-`npx vitest run` — **15 files, 226 tests**, `environment: 'node'` with
+`npx vitest run` — **15 files, 238 tests**, `environment: 'node'` with
 **`TZ` pinned to `UTC`** (`test.env` in `vite.config.ts`: the backend sends naive UTC and
 the app renders the viewer's *local* day of it, so a test that asserts an instant would
 otherwise assert the machine's offset, and UTC+13/+14 roll a midday stamp over to the next
@@ -616,10 +643,11 @@ the `activity` transitions, turn scoping, `activityLabel`, `showsProgress`,
 here, which is the point: the caller measures, the function decides),
 `api/client.test.ts` (`isNotFound`),
 `lib/dates.test.ts` (`parseUtc`, `dayLabel`, `groupByDay`),
-`lib/highlight.test.ts` (`splitOnQuery`),
+`lib/highlight.test.ts` (`splitOnQuery`, `splitOnTerms`),
 `api/kb.test.ts` (`kbEntryLink`, `parseEntryId`, `entryTimestamp`, the day grouping,
-`matchMarker`, `hitSnippet`, `cveChips`, `sourceLabel`, `kindLabel`, `sinceDaysAgo`),
-`components/kb/autosave.test.ts` (`autosaveDecision`, `autosaveLabel`),
+`matchMarker`, `hitSnippet`, `cveChips`, `sourceLabel`, `kindLabel`, `sinceDaysAgo`,
+`entityFilter`),
+`components/kb/autosave.test.ts` (`autosaveDecision`, `autosaveLabel`, `pendingFlush`),
 `components/notes/excerpt.test.ts` and `lib/ids.test.ts`.
 
 Component and E2E tests are deliberately out of scope — **do not add a jsdom

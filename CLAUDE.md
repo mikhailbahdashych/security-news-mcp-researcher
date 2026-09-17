@@ -72,7 +72,9 @@ by the image's `CMD` and by `docker compose` (which publishes `${PORT:-8000}`), 
 both go through `python -m app` (`backend/app/__main__.py`), which reads `Settings.port`.
 `CORS_ORIGINS` accepts a comma-separated list as well as a JSON array; `*` is refused
 (a `ValidationError` at startup) and the middleware never allows credentials, because
-this API has no auth to protect.
+this API has no auth to protect. `.env.example` carries one more, commented out:
+`VOYAGE_API_KEY`, for the knowledge base's embeddings — it is **Phase 2** and no field
+reads it yet, so uncommenting it does nothing (`Settings` is `extra="ignore"`).
 
 **API-key precedence: process environment → `.env` (i.e. `Settings.anthropic_api_key`)
 → the key stored in the DB.** `app/services/settings.py::external_api_key` reads

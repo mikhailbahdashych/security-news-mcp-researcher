@@ -344,9 +344,15 @@ Implementation notes for the SPA half (the backend half is `backend/CLAUDE.md`):
   `exact` marker. Phase 1 answers `mode: "keyword"` and the page says so out loud rather
   than letting a keyword miss look like a semantic one.
 - **Capture stays user-triggered.** Starring an item and generating a note capture
-  server-side inside the request that did it; the only capture the page drives itself is
-  "Save a URL". A 409 (too little text — a paywall or a cookie wall) is shown with the
-  reason the API gave, not swallowed.
+  server-side inside the request that did it, so the pages that trigger them (Inbox
+  triage, the generate dialog, a note save or delete) invalidate the `['kb']` keys as
+  well as their own — in the split view the Knowledge pane is usually the one beside
+  them. The only capture the page drives itself is "Save a URL". A 409 (too little text —
+  a paywall or a cookie wall) is shown with the reason the API gave, not swallowed.
+- **Filters:** kind, date, topic chips and the exact-identifier entity box
+  (`entity=cve:CVE-…`, with a bare CVE id qualified for the user). The entry page also
+  draws the activity rows the API already sends — in Phase 1 they are the only place a
+  capture or refresh failure is visible.
 - **Delete is soft and reversible**: the entry stays readable, its page keeps a banner,
   and the timeline's "Needs attention" strip offers Undo. The strip is drawn only when it
   has something — in Phase 1 that is deleted entries alone, because auto-accepted
