@@ -58,3 +58,18 @@ export function autosaveLabel(
   }
   return savedOnce ? 'Saved' : null
 }
+
+/**
+ * What is left to send when the editor goes away.
+ *
+ * Unmounting cancels the debounce — `useDebouncedValue` clears its timer in
+ * cleanup — so "type a line, click back" inside the quiet window would never
+ * reach the server. The editor flushes this on the way out.
+ *
+ * `null` means there is nothing to send; `''` means the note was emptied, which
+ * is an edit like any other. That is the whole reason this returns a nullable
+ * string rather than the text and a truthiness check at the call site.
+ */
+export function pendingFlush(latest: string, confirmed: string): string | null {
+  return latest === confirmed ? null : latest
+}

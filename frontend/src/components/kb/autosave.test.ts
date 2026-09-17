@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { autosaveDecision, autosaveLabel } from './autosave'
+import { autosaveDecision, autosaveLabel, pendingFlush } from './autosave'
 
 const state = {
   pending: 'Patch window: Thursday.',
@@ -48,5 +48,24 @@ describe('autosaveLabel', () => {
   it('keeps the failure on screen over any of them', () => {
     expect(autosaveLabel('clean', true, true)).toBe('Could not save')
     expect(autosaveLabel('in-flight', true, true)).toBe('Saving…')
+  })
+})
+
+describe('pendingFlush', () => {
+  it('hands back the text the server has not seen', () => {
+    // Unmounting cancels the debounce, so the last 1.2 s of typing is only ever
+    // sent because of this.
+    expect(pendingFlush('Patch window: Thursday.', '')).toBe('Patch window: Thursday.')
+  })
+
+  it('has nothing to send when the server already has it', () => {
+    expect(pendingFlush('same', 'same')).toBeNull()
+    expect(pendingFlush('', '')).toBeNull()
+  })
+
+  it('treats an emptied note as an edit, not as nothing to do', () => {
+    // Deleting the whole note is a save; `''` is falsy, which is exactly the
+    // trap this returns `null` rather than `''` to avoid.
+    expect(pendingFlush('', 'Patch window: Thursday.')).toBe('')
   })
 })

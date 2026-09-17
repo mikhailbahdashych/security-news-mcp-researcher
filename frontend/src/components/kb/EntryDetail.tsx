@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 
 import { isNotFound } from '../../api/client'
@@ -13,6 +13,7 @@ import {
   refreshEntry,
   sourceLabel,
   undeleteEntry,
+  type KbActivity,
   type KbEntryDetail,
   type KbSnapshotVersion,
 } from '../../api/kb'
@@ -28,13 +29,15 @@ import PageHeader from '../ui/PageHeader'
 import SectionLabel from '../ui/SectionLabel'
 import Textarea from '../ui/Textarea'
 import { CARD, FIELD_LABEL, cx } from '../ui/classes'
-import { AUTOSAVE_QUIET_MS, autosaveDecision, autosaveLabel } from './autosave'
+import { AUTOSAVE_QUIET_MS, autosaveDecision, autosaveLabel, pendingFlush } from './autosave'
 
 export interface EntryDetailProps {
   entryId: number
   /** No router: back is a callback, and the back-links are plain text. */
   embedded: boolean
-  onBack: () => void
+  /** `replace` when the entry left on its own — a dead id is not a place to
+   *  return to, and Back onto it would only 404 forward again. */
+  onBack: (replace?: boolean) => void
 }
 
 /** One entry in full: what it says, what it was captured from, what to do with it. */
@@ -49,17 +52,27 @@ export default function EntryDetail({ entryId, embedded, onBack }: EntryDetailPr
     retry: (failureCount, error) => !isNotFound(error) && failureCount < 1,
   })
 
+  const invalidate = () => queryClient.invalidateQueries({ queryKey: kbQueryKey })
+
+  // A hook, so it is declared above the early returns. `mutateAsync` because
+  // `TitleField` has to know the write lost: it moved the field optimistically
+  // and has to put it back.
+  const rename = useMutation({
+    mutationFn: (title: string) => patchEntry(entryId, { title }),
+    onSuccess: invalidate,
+  })
+
   const missing = entry.isError && isNotFound(entry.error)
   useEffect(() => {
     if (missing) {
-      onBack()
+      onBack(true)
     }
   }, [missing, onBack])
 
   const backLink = (
     <button
       type="button"
-      onClick={onBack}
+      onClick={() => onBack()}
       className="self-start text-[12px] text-muted transition-colors duration-150 hover:text-ink"
     >
       ← All knowledge
@@ -90,7 +103,6 @@ export default function EntryDetail({ entryId, embedded, onBack }: EntryDetailPr
 
   const data = entry.data
   const source = sourceLabel(data)
-  const invalidate = () => queryClient.invalidateQueries({ queryKey: kbQueryKey })
 
   return (
     <>
@@ -100,10 +112,8 @@ export default function EntryDetail({ entryId, embedded, onBack }: EntryDetailPr
           <TitleField
             key={data.id}
             initial={data.title}
-            onSave={async (title) => {
-              await patchEntry(data.id, { title })
-              await invalidate()
-            }}
+            failed={rename.isError}
+            onSave={rename.mutateAsync}
           />
         }
         subtitle={
@@ -254,10 +264,14 @@ function DeletedBanner({
  */
 function TitleField({
   initial,
+  failed,
   onSave,
 }: {
   initial: string
-  onSave: (title: string) => Promise<void>
+  /** The last rename lost. Shown under the field, because the blur that would
+   *  have retried it has already happened. */
+  failed: boolean
+  onSave: (title: string) => Promise<unknown>
 }) {
   const [draft, setDraft] = useState(initial)
   const [saved, setSaved] = useState(initial)
@@ -268,26 +282,35 @@ function TitleField({
       setDraft(saved)
       return
     }
+    // Optimistic, then put back if the write loses: a field left showing a name
+    // the database does not have is the one outcome worse than a failed rename.
+    const previous = saved
     setSaved(title)
-    void onSave(title)
+    onSave(title).catch(() => {
+      setSaved(previous)
+      setDraft(previous)
+    })
   }
 
   return (
-    <Input
-      aria-label="Entry title"
-      value={draft}
-      onChange={(event) => setDraft(event.target.value)}
-      onBlur={commit}
-      onKeyDown={(event) => {
-        if (event.key === 'Enter') {
-          event.currentTarget.blur()
-        }
-        if (event.key === 'Escape') {
-          setDraft(saved)
-        }
-      }}
-      className="border-transparent bg-transparent px-0 font-display text-[22px] font-semibold tracking-[-0.01em] focus:border-line"
-    />
+    <>
+      <Input
+        aria-label="Entry title"
+        value={draft}
+        onChange={(event) => setDraft(event.target.value)}
+        onBlur={commit}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter') {
+            event.currentTarget.blur()
+          }
+          if (event.key === 'Escape') {
+            setDraft(saved)
+          }
+        }}
+        className="border-transparent bg-transparent px-0 font-display text-[22px] font-semibold tracking-[-0.01em] focus:border-line"
+      />
+      {failed ? <span className="text-[11.5px] text-red">Could not rename it.</span> : null}
+    </>
   )
 }
 
@@ -327,6 +350,28 @@ function NotesEditor({ entryId, initial }: { entryId: number; initial: string })
       mutate(pending)
     }
   }, [decision, pending, mutate])
+
+  // Unmounting cancels the debounce, so "type a line, click back" inside the
+  // quiet window would send nothing at all. Refs because this runs during
+  // cleanup, when the render's `draft` and the mutation object are both gone;
+  // the request goes out bare and the next mount re-reads the server's copy.
+  const latest = useRef(draft)
+  const confirmed = useRef(saved)
+  // Updated in an effect rather than during the render: a ref written while
+  // rendering is a lint error and, under a re-render React throws away, a lie.
+  useEffect(() => {
+    latest.current = draft
+    confirmed.current = saved
+  })
+  useEffect(
+    () => () => {
+      const unsent = pendingFlush(latest.current, confirmed.current)
+      if (unsent !== null) {
+        void patchEntry(entryId, { notes_md: unsent }).catch(() => {})
+      }
+    },
+    [entryId],
+  )
 
   const label = autosaveLabel(decision, savedOnce, save.isError)
 
@@ -438,8 +483,40 @@ function Facts({ entry, embedded }: { entry: KbEntryDetail; embedded: boolean })
         <Chips label="Topics" values={topics} empty="None — topics arrive with the compile step." />
         <Chips label="Tags" values={tags} empty="None." />
         <BackLinks entry={entry} embedded={embedded} />
+        <Activity rows={entry.activity} />
       </div>
     </Card>
+  )
+}
+
+/**
+ * What has happened to this entry.
+ *
+ * `GET /kb/entries/{id}` carries these rows whether or not anything draws them,
+ * and in Phase 1 this is the only place a capture or a refresh *failure* is
+ * visible at all — the entry itself just looks short.
+ */
+function Activity({ rows }: { rows: KbActivity[] }) {
+  if (rows.length === 0) {
+    return null
+  }
+  return (
+    <div>
+      <p className="text-[11px] font-medium text-faint">Activity</p>
+      <ul className="mt-1 space-y-[3px]">
+        {rows.map((row) => (
+          <li key={row.id} className="text-[11.5px] text-muted">
+            <span className="font-mono">{row.action}</span>
+            <span className="text-faint" title={formatNoteDate(row.at)}>
+              {' · '}
+              {formatNoteDay(row.at)}
+              {row.source ? ` · ${row.source}` : ''}
+            </span>
+            {row.detail ? <span className="text-faint"> — {row.detail}</span> : null}
+          </li>
+        ))}
+      </ul>
+    </div>
   )
 }
 
