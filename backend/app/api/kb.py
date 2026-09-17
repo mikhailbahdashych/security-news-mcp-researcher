@@ -34,6 +34,7 @@ from app.kb.service import (
     DEFAULT_SEARCH_LIMIT,
     MAX_ACTIVITY_LIMIT,
     MAX_LIMIT,
+    MAX_SEARCH_LIMIT,
     EntryFacts,
     KbService,
     parse_entity,
@@ -117,8 +118,23 @@ async def list_entries(
     Searching and listing are the same endpoint because they are the same view:
     the page shows a list until the user types, and a cursor is meaningless once
     results are ordered by score rather than by date.
+
+    Every filter applies to **both** branches, which is the only way a filter the
+    user can see set is a filter that is actually on. Two of them cannot reach the
+    search legs as SQL and are applied to the hits instead, so a page of hits can
+    come back shorter than ``limit`` — the same trade the topic narrowing makes.
+    ``limit`` itself is clamped to ``MAX_SEARCH_LIMIT`` here, the ceiling
+    ``POST /search`` already enforces: a score-ordered list has no second page, so
+    asking for two hundred hits is asking for a slower query, not for more answers.
     """
     if q and q.strip():
+        if deleted:
+            # A soft delete drops the chunks, and with them the FTS and vector
+            # rows, so nothing deleted is searchable at all: the trash is a list,
+            # never a search. An empty result says that; ignoring the flag and
+            # answering with the *live* matches said the opposite.
+            return EntryListResponse(hits=[])
+
         hits = await kb.search_for_user(
             q.strip(),
             topic_ids=(topic_id,) if topic_id is not None else None,
@@ -126,8 +142,13 @@ async def list_entries(
             entity=parse_entity(entity),
             since=since,
             reviewed_only=review == "reviewed",
-            limit=min(limit, DEFAULT_SEARCH_LIMIT * 2),
+            limit=min(limit, MAX_SEARCH_LIMIT),
         )
+        # ``reviewed_only`` narrows to *reviewed* and has no other half, so
+        # ``review=unreviewed`` used to mean "no filter at all". Narrowing here
+        # covers both values with one rule.
+        if review:
+            hits = [hit for hit in hits if hit.entry.review_status == review]
         facts = await kb.facts([hit.entry for hit in hits])
         return EntryListResponse(
             hits=[HitRead.from_hit(hit, facts.get(hit.entry.id, EntryFacts())) for hit in hits]

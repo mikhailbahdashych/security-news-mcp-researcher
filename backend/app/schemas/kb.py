@@ -210,6 +210,12 @@ class EntryListResponse(BaseModel):
         for key in ("entries", "hits"):
             if data.get(key) is None:
                 data.pop(key, None)
+        if "entries" not in data:
+            # A keyset cursor belongs to the list branch and to nothing else:
+            # hits are ordered by score, so there is nothing to resume from.
+            # ``next_cursor: null`` claims "this was the last page", which is a
+            # different statement from "paging does not apply here".
+            data.pop("next_cursor", None)
         return data
 
 
