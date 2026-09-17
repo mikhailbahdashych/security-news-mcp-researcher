@@ -15,6 +15,7 @@ import pytest
 from fakes.embedder import FakeEmbedder
 from feed_fixtures import fixture_text, routes_transport
 from sqlalchemy import func, select, text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db.models import Feed, FeedItem, Note, utcnow
 from app.kb import capture as capture_module
@@ -44,6 +45,7 @@ from app.kb.models import (
     Topic,
 )
 from app.kb.retrieval import hybrid_search
+from app.kb.service import KbService
 from app.kb.store import SqliteKnowledgeStore
 from app.kb.urls import canonical_url
 
@@ -725,6 +727,51 @@ async def test_editing_a_note_whose_entry_is_deleted_leaves_it_deleted(session_f
     await undelete(session_factory, NullEmbedder(), captured.entry_id)
     hits = await _search(session_factory, "addendum")
     assert [hit.entry.id for hit in hits] == [captured.entry_id]
+
+
+class _ExpiringSession(AsyncSession):
+    """A session that expires everything on the way out.
+
+    Exactly what one added ``commit()`` inside a read block, or one
+    ``expire_on_commit=True`` on the factory, would do to an instance the caller
+    kept a reference to. ``close()`` expunging without expiring is a property of
+    today's settings, not a promise.
+    """
+
+    async def close(self) -> None:
+        self.expire_all()
+        await super().close()
+
+
+async def test_a_capture_reads_nothing_off_a_closed_session(db_engine, db_session):
+    """Every value a capture needs is copied out before its session closes."""
+    expiring = async_sessionmaker(db_engine, class_=_ExpiringSession, expire_on_commit=False)
+    feed = Feed(url="https://example.test/feed.xml", title="Example Feed")
+    db_session.add(feed)
+    await db_session.flush()
+    item = FeedItem(
+        feed_id=feed.id,
+        guid="xz-1",
+        title="The xz backdoor",
+        url="https://example.test/xz",
+        content_text=ARTICLE,
+        published_at=datetime(2024, 3, 29, 12, 0, 0),
+    )
+    # A body of its own: the same text with no URL would dedup on the content
+    # hash and the note path would never run.
+    note = Note(title="Week 12", body_md=ARTICLE.replace("xz", "polkit"), template_used="t")
+    db_session.add_all([item, note])
+    await db_session.commit()
+    service = KbService(session_factory=expiring, embedder=NullEmbedder())
+
+    from_item = await service.capture_feed_item(item.id, captured_by="user")
+    from_note = await capture_note(expiring, NullEmbedder(), note.id)
+
+    assert from_item.created is True
+    assert from_note.created is True
+    entry = await db_session.get(KbEntry, from_item.entry_id)
+    assert entry.url == "https://example.test/xz"
+    assert entry.published_at == datetime(2024, 3, 29, 12, 0, 0)
 
 
 async def test_an_embedder_failure_after_the_commit_is_an_activity_row(session_factory, db_session):

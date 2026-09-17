@@ -615,6 +615,32 @@ async def test_a_url_that_is_not_http_is_a_422(client, kb):
     assert "http" in response.json()["detail"]
 
 
+async def test_a_failure_reading_the_capture_policy_never_fails_the_star(
+    client, app, session_factory, item, db_session
+):
+    """The policy read is a database read, and it happens after the user's write.
+
+    Reading ``kb_capture_starred`` outside ``guarded`` meant a locked database or
+    a missing row escaped into the request that had already committed — the one
+    thing the wrapper exists to prevent.
+    """
+
+    class BrokenPolicy(KbService):
+        async def capture_starred_enabled(self) -> bool:
+            raise RuntimeError("the settings table is locked")
+
+    app.dependency_overrides[get_kb_service] = lambda: BrokenPolicy(session_factory=session_factory)
+
+    response = await client.patch(f"/api/items/{item.id}", json={"status": "starred"})
+
+    assert response.status_code == 200
+    await db_session.refresh(item)
+    assert item.status == "starred"
+    rows = (await db_session.execute(select(KbActivity))).scalars().all()
+    assert [row.action for row in rows] == ["skip"]
+    assert "the settings table is locked" in rows[0].detail
+
+
 async def test_a_fetch_failure_is_a_502(client, kb):
     """Three different failures used to share one status code.
 
