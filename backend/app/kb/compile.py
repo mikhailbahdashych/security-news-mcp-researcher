@@ -288,7 +288,11 @@ async def _count_tokens(client: AsyncAnthropic | None, plan: _Plan) -> int:
                 messages=[{"role": "user", "content": plan.user}],
             )
             return int(getattr(counted, "input_tokens", 0))
-        except (anthropic.APIStatusError, anthropic.APIConnectionError) as exc:
+        # Anything at all: this route is documented to have no error path but
+        # 404, and the local ceil(chars / 3.6) estimate is a perfectly good
+        # answer. A 500 from "what would this cost" is the one reply that helps
+        # nobody.
+        except Exception as exc:  # noqa: BLE001 - an estimate always answers
             logger.warning("Counting tokens for entry %s failed: %s", plan.entry_id, exc)
     return estimate_tokens(plan.system + plan.user)
 

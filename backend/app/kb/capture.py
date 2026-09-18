@@ -202,11 +202,13 @@ async def log_activity(
     output_tokens: int = 0,
     detail: str | None = None,
 ) -> KbActivity:
-    """Append one row to the trail and prune it back to its ceiling.
+    """Append one row to the trail and prune it back towards its ceiling.
 
     The prune runs on write rather than on a timer because there is no timer in
     this application; a ``count(*)`` over at most ten thousand rows is cheaper
-    than the alternative of an unbounded table nobody ever looks at.
+    than the alternative of an unbounded table nobody ever looks at. *Towards*
+    its ceiling, because the rows the compile budget is metered by are exempt
+    while the budget can still read them — see :data:`METERED_ACTIONS`.
     """
     row = KbActivity(
         action=action,
@@ -1076,6 +1078,17 @@ def trigrams(value: str) -> set[str]:
     return {padded[index : index + 3] for index in range(len(padded) - 2)}
 
 
+def dice(left: set[str], right: set[str]) -> float:
+    """The Dice coefficient of two trigram sets; ``0.0`` if either is empty.
+
+    Taken over the *sets* rather than the strings so a scan can build one side
+    once — :func:`_nearest_by_title` compares one title against two thousand.
+    """
+    if not left or not right:
+        return 0.0
+    return 2 * len(left & right) / (len(left) + len(right))
+
+
 def title_similarity(a: str, b: str) -> float:
     """Dice coefficient over character trigrams: ``1.0`` identical, ``0.0`` unrelated.
 
@@ -1083,10 +1096,7 @@ def title_similarity(a: str, b: str) -> float:
     or lost a few words ("The xz backdoor" / "The xz backdoor, explained"), and
     Jaccard punishes that twice over.
     """
-    left, right = trigrams(a), trigrams(b)
-    if not left or not right:
-        return 0.0
-    return 2 * len(left & right) / (len(left) + len(right))
+    return dice(trigrams(a), trigrams(b))
 
 
 def cosine_from_distance(distance: float) -> float:
@@ -1236,9 +1246,12 @@ async def _nearest_by_title(
             )
         ).all()
 
+    # Built once, not once per candidate: this leg is the default whenever no
+    # Voyage key is configured, and it walks up to NEAR_DUPLICATE_TITLE_SCAN rows.
+    wanted = trigrams(title)
     best: DuplicateMatch | None = None
     for candidate_id, other in candidates:
-        score = title_similarity(title, other)
+        score = dice(wanted, trigrams(other))
         if not is_near_duplicate(None, score, threshold=threshold):
             continue
         if best is None or score >= best.title_score:

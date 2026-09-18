@@ -182,24 +182,31 @@ class KbService:
 
     # -- capture ---------------------------------------------------------
 
-    async def guarded(self, operation: Awaitable[Any], *, source: str) -> CaptureResult | None:
+    async def guarded(
+        self, operation: Awaitable[Any], *, source: str, what: str = "capture"
+    ) -> CaptureResult | None:
         """Run a capture whose failure must not reach the user.
 
         Every trigger runs **after** the write that caused it has committed, so
         there is nothing left to roll back and nothing the user can do about a
         Voyage outage or a 403. The failure becomes a row in the trail, where the
         Knowledge page's "Needs attention" strip can show it.
+
+        *what* names the operation in that row. It is not decoration: an
+        auto-compile that raised used to be filed as ``skip / auto-compile /
+        "capture failed: …"`` on a page whose whole job is telling the user what
+        did not get captured, and the capture had in fact succeeded.
         """
         try:
             return await operation
         except Exception as exc:  # noqa: BLE001 - a capture must not fail the request
-            logger.exception("Knowledge-base capture from %s failed", source)
+            logger.exception("Knowledge-base %s from %s failed", what, source)
             async with self.session_factory() as session:
                 await log_activity(
                     session,
                     "skip",
                     source=source,
-                    detail=f"capture failed: {type(exc).__name__}: {exc}",
+                    detail=f"{what} failed: {type(exc).__name__}: {exc}",
                 )
                 await session.commit()
             return None
@@ -241,6 +248,7 @@ class KbService:
                 source="auto",
             ),
             source="auto-compile",
+            what="compile",
         )
 
     async def capture_feed_item(
@@ -936,10 +944,13 @@ class KbService:
     async def duplicate_threshold(self) -> float:
         """``kb_duplicate_threshold`` — the cosine a near-duplicate needs.
 
-        Read once per capture here, and once per bulk run by the route before the
-        stream opens: ``capture_article`` takes it as an argument the way it takes
-        ``min_chars``, so a two-hundred-item run reads the row once rather than
-        two hundred times.
+        ``capture_article`` takes it as an argument the way it takes
+        ``min_chars`` rather than reading it itself, so the value a capture used
+        is visible at the call site. A bulk run reads the row **once**, in the
+        route before the stream opens, and hands the same number to every item;
+        the three single-capture paths read it per capture, which is one extra
+        settings row read on a click that is about to make an HTTP request
+        anyway.
         """
         async with self.session_factory() as session:
             return await settings_service.get_float(session, "kb_duplicate_threshold")

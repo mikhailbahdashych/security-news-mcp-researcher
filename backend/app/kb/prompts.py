@@ -125,7 +125,10 @@ def render_compile_user(
     ``chunking.estimate_tokens``, the one estimate in the application.
     """
     body = text.strip()
-    truncated = len(body) > max_chars > 0
+    # Spelled out rather than chained: ``len(body) > max_chars > 0`` reads as
+    # "truncate to nothing at zero" and does the opposite. The setting is
+    # validated 1 000–200 000, so zero is unreachable either way.
+    truncated = max_chars > 0 and len(body) > max_chars
     if truncated:
         body = body[:max_chars] + TRUNCATION_NOTE
 

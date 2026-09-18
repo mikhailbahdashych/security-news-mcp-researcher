@@ -181,8 +181,12 @@ async def run_bulk_capture(
             outcome.entry_ids.append(result.entry_id)
             if result.created:
                 created.append(result.entry_id)
-            if result.possible_duplicate_of is not None:
-                outcome.duplicates += 1
+            # Nothing is counted as a duplicate here: every capture in this job
+            # runs with defer_embedding=True, so it has no vector yet and
+            # possible_duplicate_of is always None. The flags are counted in the
+            # run's tail, by _embed_and_flag, which is the only thing that sets
+            # them — and why the progress frames carry a null the client must not
+            # read as "not a duplicate".
         return _ItemResult(
             item_id=item_id,
             entry_id=result.entry_id,
