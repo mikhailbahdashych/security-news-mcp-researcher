@@ -18,6 +18,12 @@ Three ordering rules make it a job rather than a fan-out:
 * **The near-duplicate pass comes after that embed**, because it reads the vector
   the embed wrote. Its cost is one KNN per new entry and no outbound call at all.
 
+**A bulk run never auto-compiles.** ``kb_compile_mode: auto`` compiles one entry
+per single capture — a star, a pasted URL, a note — because that is one click the
+user made and one Anthropic call they can see coming. Two hundred of them from one
+"Save all" is not, so every capture here asks for none and compiling a selection
+stays the explicit ``POST /api/kb/compile``, which prices itself first.
+
 **A cancelled run leaves its chunks pending.** Neither the embed nor the
 duplicate pass runs, because both are the last thing the job does and Stop has to
 be instant — a Stop that first waited out a Voyage round trip for two hundred
@@ -156,6 +162,9 @@ async def run_bulk_capture(
                     trigger=BULK_SOURCE,
                     transport=transport,
                     defer_embedding=True,
+                    # One click, not two hundred Anthropic calls: see the module
+                    # docstring. Compiling a selection is POST /api/kb/compile.
+                    auto_compile=False,
                 ),
                 source=BULK_SOURCE,
             )

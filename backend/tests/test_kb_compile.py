@@ -13,10 +13,13 @@ from __future__ import annotations
 import hashlib
 import json
 
+import httpx2
 import pytest
+from feed_fixtures import fixture_text, routes_transport
 from sqlalchemy import select
 
 from app.api.deps import get_chat_client_factory, get_kb_service
+from app.db.models import Feed, FeedItem, Note
 from app.kb import compile as compile_module
 from app.kb.capture import capture_article, log_activity
 from app.kb.models import KbActivity, KbChunk, KbEntry, KbEntryTag, KbEntryTopic, Topic
@@ -597,3 +600,188 @@ async def test_the_budget_route_keeps_the_voyage_counter_out_of_the_anthropic_to
     assert body["voyage"] == 50_000
     # It is our own ceil(chars / 3.6) estimate, not a number Voyage billed.
     assert body["voyage_estimated"] is True
+
+
+# ------------------------------------------------- auto-compile at capture time
+
+
+async def seed_feed_item(session_factory, *, guid: str = "xz-1") -> int:
+    """One feed item whose text is already stored, so nothing is fetched."""
+    async with session_factory() as session:
+        feed = Feed(url=f"https://example.test/{guid}.xml", title="Example Feed")
+        session.add(feed)
+        await session.flush()
+        item = FeedItem(
+            feed_id=feed.id,
+            guid=guid,
+            title="The xz backdoor",
+            url=f"https://example.test/{guid}",
+            content_text=BODY,
+        )
+        session.add(item)
+        await session.commit()
+        return item.id
+
+
+def auto_kb(session_factory, client, **kwargs) -> KbService:
+    """The service as ``get_kb_service`` builds it: with a chat client factory."""
+    return KbService(session_factory=session_factory, client_factory=factory(client), **kwargs)
+
+
+async def test_a_star_capture_auto_compiles_the_newly_created_entry(session_factory):
+    """``kb_compile_mode: auto`` is what turns one star into one Anthropic call."""
+    await with_key(session_factory, kb_compile_mode="auto", kb_min_snapshot_chars="1")
+    scripted_client = ScriptedAnthropic([turn_text(answer())])
+    item_id = await seed_feed_item(session_factory)
+
+    result = await auto_kb(session_factory, scripted_client).capture_feed_item(item_id)
+
+    assert len(scripted_client.calls) == 1
+    stored = (await rows(session_factory, KbEntry, KbEntry.id == result.entry_id))[0]
+    assert stored.summary_md == ANSWER["summary_md"]
+    assert stored.compiled_at is not None
+
+
+async def test_a_saved_url_and_a_saved_note_auto_compile_too(session_factory):
+    """The other two single-capture doors, the ones a test is most likely to miss."""
+    await with_key(session_factory, kb_compile_mode="auto", kb_min_snapshot_chars="1")
+    scripted_client = ScriptedAnthropic([turn_text(answer()), turn_text(answer())])
+    transport = routes_transport(
+        {"https://example.test/article": httpx2.Response(200, text=fixture_text("article.html"))}
+    )
+    async with session_factory() as session:
+        note = Note(title="Week 12", body_md=BODY, template_used="t")
+        session.add(note)
+        await session.commit()
+        note_id = note.id
+
+    kb = auto_kb(session_factory, scripted_client, transport=transport)
+    from_url = await kb.capture_url("https://example.test/article")
+    from_note = await kb.capture_note(note_id)
+
+    assert len(scripted_client.calls) == 2
+    compiled = await rows(
+        session_factory, KbEntry, KbEntry.id.in_([from_url.entry_id, from_note.entry_id])
+    )
+    assert [entry.compiled_at is not None for entry in compiled] == [True, True]
+
+
+async def test_manual_mode_compiles_nothing_at_capture(session_factory):
+    """The default. Compiling is then the Compile button, one entry at a time."""
+    await with_key(session_factory, kb_compile_mode="manual", kb_min_snapshot_chars="1")
+    scripted_client = ScriptedAnthropic([turn_text(answer())])
+    item_id = await seed_feed_item(session_factory)
+
+    result = await auto_kb(session_factory, scripted_client).capture_feed_item(item_id)
+
+    assert scripted_client.calls == []
+    stored = (await rows(session_factory, KbEntry, KbEntry.id == result.entry_id))[0]
+    assert stored.summary_md is None
+
+
+async def test_a_service_without_a_client_factory_never_compiles(session_factory):
+    """``searchable()`` and every test build one. Auto mode must still be a no-op
+    rather than an attribute error on a capture nobody could have paid for."""
+    await with_key(session_factory, kb_compile_mode="auto", kb_min_snapshot_chars="1")
+    item_id = await seed_feed_item(session_factory)
+
+    result = await KbService(session_factory=session_factory).capture_feed_item(item_id)
+
+    assert result.created is True
+    assert await activity(session_factory, "compile") == []
+
+
+async def test_only_a_newly_created_entry_is_auto_compiled(session_factory):
+    """A re-save that dedups to an entry already held is not a new entry, and
+    paying for the same summary twice because a user clicked twice is not on."""
+    await with_key(session_factory, kb_compile_mode="auto", kb_min_snapshot_chars="1")
+    scripted_client = ScriptedAnthropic([turn_text(answer())])
+    item_id = await seed_feed_item(session_factory)
+    kb = auto_kb(session_factory, scripted_client)
+
+    await kb.capture_feed_item(item_id)
+    again = await kb.capture_feed_item(item_id)
+
+    assert again.created is False
+    assert len(scripted_client.calls) == 1
+
+
+async def test_a_capture_that_was_skipped_is_not_compiled(session_factory):
+    """Nothing was written, so there is nothing to summarise — and a page too
+    short to keep is not worth a token."""
+    await with_key(session_factory, kb_compile_mode="auto", kb_min_snapshot_chars="100000")
+    scripted_client = ScriptedAnthropic([turn_text(answer())])
+    item_id = await seed_feed_item(session_factory)
+
+    result = await auto_kb(session_factory, scripted_client).capture_feed_item(item_id)
+
+    assert result.entry_id is None
+    assert scripted_client.calls == []
+
+
+async def test_auto_compile_with_no_key_leaves_the_capture_standing(session_factory):
+    """Auto mode with the key removed: an activity row saying so, no exception,
+    and the entry is captured exactly as it would have been."""
+    async with session_factory() as session:
+        await settings_service.set_many(
+            session, {"kb_compile_mode": "auto", "kb_min_snapshot_chars": "1"}
+        )
+        await session.commit()
+    scripted_client = ScriptedAnthropic([turn_text(answer())])
+    item_id = await seed_feed_item(session_factory)
+
+    result = await auto_kb(session_factory, scripted_client).capture_feed_item(item_id)
+
+    assert result.created is True
+    assert scripted_client.calls == []
+    trail = await activity(session_factory, "compile")
+    assert [row.detail for row in trail] == ["No Anthropic API key is configured."]
+
+
+async def test_auto_compile_checks_the_budget_before_it_calls(session_factory):
+    """A spent budget stops compiling and never stops capturing."""
+    await with_key(
+        session_factory,
+        kb_compile_mode="auto",
+        kb_min_snapshot_chars="1",
+        kb_compile_monthly_token_budget="0",
+    )
+    scripted_client = ScriptedAnthropic([turn_text(answer())])
+    item_id = await seed_feed_item(session_factory)
+
+    result = await auto_kb(session_factory, scripted_client).capture_feed_item(item_id)
+
+    assert result.created is True
+    assert scripted_client.calls == []
+    assert len(await activity(session_factory, "budget_hit")) == 1
+
+
+async def test_a_compile_that_blows_up_never_takes_the_capture_with_it(session_factory):
+    """The whole reason it runs inside ``guarded``: the entry is already
+    committed, and the user's star must not fail because a summary did."""
+    await with_key(session_factory, kb_compile_mode="auto", kb_min_snapshot_chars="1")
+
+    def exploding(_key):
+        raise RuntimeError("no client for you")
+
+    item_id = await seed_feed_item(session_factory)
+    kb = KbService(session_factory=session_factory, client_factory=exploding)
+
+    result = await kb.capture_feed_item(item_id)
+
+    assert result.created is True
+    skips = await activity(session_factory, "skip")
+    assert any("no client for you" in (row.detail or "") for row in skips)
+
+
+async def test_saving_an_entry_through_the_api_auto_compiles_it(app, client, session_factory):
+    """End to end over the real ``get_kb_service``, which is what has to hand the
+    service its client factory — the seam a service-level test cannot see."""
+    await with_key(session_factory, kb_compile_mode="auto", kb_min_snapshot_chars="1")
+    scripted(app, ScriptedAnthropic([turn_text(answer())]))
+    item_id = await seed_feed_item(session_factory)
+
+    response = await client.post("/api/kb/entries", json={"feed_item_id": item_id})
+
+    assert response.status_code == 201, response.text
+    assert response.json()["summary_md"] == ANSWER["summary_md"]

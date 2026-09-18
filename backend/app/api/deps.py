@@ -94,7 +94,10 @@ AppSettings = Annotated[Settings, Depends(get_app_settings)]
 
 
 async def get_kb_service(
-    session: DbSession, session_factory: SessionFactory, settings: AppSettings
+    session: DbSession,
+    session_factory: SessionFactory,
+    settings: AppSettings,
+    client_factory: ChatClientFactory,
 ) -> KbService:
     """The knowledge base, over this app's database.
 
@@ -113,8 +116,13 @@ async def get_kb_service(
     call — would otherwise be broken by every ``/api/kb`` route, and worst by
     ``POST /kb/embed-pending``, the largest embed there is. Nothing is pending at
     this point (dependencies run before the route), so the commit writes nothing.
+
+    The chat client **factory** rather than a client: auto-compile (``compile_if_auto``)
+    is a consequence of a capture, one of which runs in the tail of an open SSE
+    stream, and a yield-dependency's client is already closed by then. The factory
+    is a plain function, holds nothing, and compile closes what it builds.
     """
-    service = await for_request(session_factory, session, settings)
+    service = await for_request(session_factory, session, settings, client_factory)
     await session.commit()
     return service
 

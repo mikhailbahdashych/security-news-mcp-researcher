@@ -25,12 +25,13 @@ held open for the whole request.
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
 import httpx2
+from anthropic import AsyncAnthropic
 from sqlalchemy import Select, case, delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -46,6 +47,7 @@ from app.kb.capture import (
     capture_article,
     log_activity,
 )
+from app.kb.compile import compile_if_auto
 from app.kb.embeddings import Embedder, NullEmbedder, build_embedder
 from app.kb.models import (
     KbActivity,
@@ -142,6 +144,15 @@ class KbService:
     #: ``None`` is the real one; the tests hand in an ``httpx2.MockTransport``,
     #: which is why there is exactly one fetching seam rather than one per route.
     transport: httpx2.AsyncBaseTransport | None = None
+    #: How auto-compile builds its Anthropic client — the streaming routes'
+    #: factory, never ``get_anthropic_client`` (a yield-dependency is finalised
+    #: before a streamed body is sent, and one capture trigger lives in the tail
+    #: of an SSE stream). ``None`` means "no compile from this service": the agent's
+    #: ``searchable()`` fallback and every test that builds one by hand.
+    client_factory: Callable[[str], AsyncAnthropic] | None = None
+    #: This app's :class:`Settings`, for the documented key precedence
+    #: (process environment → ``.env`` → the key stored in the database).
+    settings: Settings | None = None
 
     @property
     def store(self) -> SqliteKnowledgeStore:
@@ -193,6 +204,35 @@ class KbService:
                 await session.commit()
             return None
 
+    async def _auto_compile(self, result: CaptureResult) -> None:
+        """Compile what was just captured, when ``kb_compile_mode`` is ``auto``.
+
+        Only a **newly created** entry: a save that recognised an entry already
+        held is not new text, and paying for the same summary twice because the
+        user clicked twice is exactly the surprise the budget exists to prevent.
+        A skipped capture has nothing to compile.
+
+        Inside ``guarded``, and after the capture's own commit, because a compile
+        is a *consequence* of the capture and not part of it — a refusal, a spent
+        budget, a 429 or a missing key must never turn a saved entry into a failed
+        request. Everything else compile enforces (the budget check before the
+        call, the activity row for each outcome) is compile's own and is not
+        repeated here.
+        """
+        if self.client_factory is None or not result.created or result.entry_id is None:
+            return
+        await self.guarded(
+            compile_if_auto(
+                self.session_factory,
+                self.client_factory,
+                result.entry_id,
+                settings=self.settings,
+                embedder=self.embedder,
+                source="auto",
+            ),
+            source="auto-compile",
+        )
+
     async def capture_feed_item(
         self,
         item_id: int,
@@ -201,6 +241,7 @@ class KbService:
         trigger: str = "star",
         transport: httpx2.AsyncBaseTransport | None = None,
         defer_embedding: bool = False,
+        auto_compile: bool = True,
     ) -> CaptureResult:
         """Capture the article behind a feed item.
 
@@ -212,7 +253,9 @@ class KbService:
 
         *defer_embedding* is passed straight through to ``capture_article``: the
         bulk job (:mod:`app.kb.bulk`) embeds and flags duplicates once for a whole
-        run instead of once per article.
+        run instead of once per article. *auto_compile* is the same job's other
+        opt-out: ``kb_compile_mode: auto`` is one call for one click, and a
+        two-hundred-item run is still one click.
         """
         min_chars = await self.min_snapshot_chars()
 
@@ -242,7 +285,7 @@ class KbService:
             published_at = item.published_at
             body = (item.content_text or "").strip() or (item.summary or "").strip()
 
-        return await capture_article(
+        result = await capture_article(
             self.session_factory,
             self.embedder,
             url=url,
@@ -259,6 +302,9 @@ class KbService:
             defer_embedding=defer_embedding,
             duplicate_threshold=await self.duplicate_threshold(),
         )
+        if auto_compile:
+            await self._auto_compile(result)
+        return result
 
     async def capture_url(
         self,
@@ -271,7 +317,7 @@ class KbService:
         """Capture a pasted URL, fetched through the guard."""
         async with self.session_factory() as session:
             timeout_s = await settings_service.get_int(session, "feed_timeout_s")
-        return await capture_module.capture_url(
+        result = await capture_module.capture_url(
             self.session_factory,
             self.embedder,
             url,
@@ -283,10 +329,12 @@ class KbService:
             transport=transport or self.transport,
             duplicate_threshold=await self.duplicate_threshold(),
         )
+        await self._auto_compile(result)
+        return result
 
     async def capture_note(self, note_id: int, *, trigger: str = "note") -> CaptureResult:
         """Capture (or bring up to date) the entry for one note."""
-        return await capture_module.capture_note(
+        result = await capture_module.capture_note(
             self.session_factory,
             self.embedder,
             note_id,
@@ -294,6 +342,8 @@ class KbService:
             trigger=trigger,
             duplicate_threshold=await self.duplicate_threshold(),
         )
+        await self._auto_compile(result)
+        return result
 
     async def refresh(
         self, entry_id: int, *, transport: httpx2.AsyncBaseTransport | None = None
@@ -938,16 +988,22 @@ async def for_request(
     session_factory: async_sessionmaker[AsyncSession],
     session: AsyncSession,
     settings: Settings | None = None,
+    client_factory: Callable[[str], AsyncAnthropic] | None = None,
 ) -> KbService:
     """The service for one request: keyword-only, or hybrid if a key is configured.
 
     The embedder is read per request rather than cached on the app, so entering a
     Voyage key in Settings takes effect on the next call instead of on the next
     restart.
+
+    *client_factory* is what makes ``kb_compile_mode: auto`` real. It is optional
+    because one caller — the chat turn's tool providers — captures nothing.
     """
     return KbService(
         session_factory=session_factory,
         embedder=await build_embedder(session, settings),
+        client_factory=client_factory,
+        settings=settings,
     )
 
 

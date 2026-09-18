@@ -26,6 +26,8 @@ from app.db.models import Feed, FeedItem
 from app.kb.bulk import MAX_KB_EXTRACTIONS, bulk_key
 from app.kb.models import KbActivity, KbChunk, KbEntry
 from app.kb.service import KbService
+from app.services import settings as settings_service
+from tests.fakes.anthropic import ScriptedAnthropic
 
 BODY = (
     "# The xz backdoor\n\n"
@@ -425,3 +427,36 @@ async def test_an_empty_or_oversized_selection_is_refused(client, kb):
     assert (await client.post("/api/kb/bulk", json={"item_ids": []})).status_code == 422
     too_many = {"item_ids": list(range(1, 202))}
     assert (await client.post("/api/kb/bulk", json=too_many)).status_code == 422
+
+
+async def test_a_bulk_run_never_auto_compiles(app, client, session_factory, db_session, feed):
+    """``kb_compile_mode: auto`` compiles one capture, not two hundred.
+
+    Auto-compile is what one click on one article buys. "Save all" is one click
+    too, and answering it with an Anthropic call per item is the surprise the
+    monthly budget exists to prevent — compiling a selection stays the explicit
+    ``POST /api/kb/compile``, which prices itself first.
+    """
+    async with session_factory() as session:
+        await settings_service.set_many(
+            session, {"anthropic_api_key": "sk-ant-test", "kb_compile_mode": "auto"}
+        )
+        await session.commit()
+    # An empty script: a compile would not merely be counted, it would raise.
+    anthropic = ScriptedAnthropic([])
+    service = KbService(
+        session_factory=session_factory,
+        transport=article_transport(64),
+        client_factory=lambda _key: anthropic,
+    )
+    app.dependency_overrides[get_kb_service] = lambda: service
+    ids = await seed_items(db_session, feed, 3)
+
+    response = await client.post("/api/kb/bulk", json={"item_ids": ids, "job_id": "j-auto"})
+
+    assert payloads_for(response.text, "done")[0]["saved"] == 3
+    assert anthropic.calls == []
+    compiled = await db_session.scalar(
+        select(func.count()).select_from(KbEntry).where(KbEntry.compiled_at.isnot(None))
+    )
+    assert compiled == 0
