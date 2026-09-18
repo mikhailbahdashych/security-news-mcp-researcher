@@ -11,7 +11,9 @@ Three legs, in this order:
 
 Each leg collapses to its **best chunk per entry before fusion**, so a 13-chunk
 advisory occupies one slot in each top-50 rather than thirteen, and reciprocal
-rank fusion then runs over entry ids rather than chunk ids.
+rank fusion then runs over entry ids rather than chunk ids. A recency prior is
+the last thing applied to the fused score, because for a security-news knowledge
+base recency is most of the relevance signal rather than a tie-break.
 
 ``Hit.score`` is **opaque**. It orders the hits of one call and means nothing
 across calls — which is exactly what makes a reranker addable later without a

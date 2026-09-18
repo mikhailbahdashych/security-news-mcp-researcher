@@ -203,8 +203,9 @@ class SqliteKnowledgeStore:
           which is the default.
 
         ``topic_ids`` is **not** applied here: topics are many-to-many and would
-        over-shard vec0's partitioning. ``hybrid_search`` filters the returned
-        rows instead (an adaptive ``k`` arrives with the vector leg in Phase 2).
+        over-shard vec0's partitioning. ``retrieval._vector_leg`` widens *k* until
+        enough rows survive the topic join instead, which is the one thing that
+        makes narrowing after the KNN safe.
         """
         if not query_vec:
             return []
