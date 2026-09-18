@@ -14,10 +14,12 @@ from httpx2 import ASGITransport
 from sqlalchemy import inspect, select, text
 from sqlalchemy.dialects import sqlite
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.schema import CreateColumn
 
 from app.config import Settings
-from app.db.engine import create_db_engine, create_session_factory
+from app.db import engine as engine_module
+from app.db.engine import create_db_engine, create_session_factory, extension_status
 from app.db.init import ADDED_COLUMNS, init_db
 from app.db.models import Base, Feed, FeedItem, Message, ResearchSession, Setting, utcnow
 from app.main import create_app
@@ -345,3 +347,87 @@ async def test_create_app_uses_the_injected_db_path(tmp_path: Path):
     assert stored == ("claude-sonnet-5",)
     # Shutdown released the engine.
     assert application.state.session_factory is None
+
+
+async def test_sqlite_vec_is_loaded_on_every_connection(db_engine):
+    """Every connection the engine hands out can create and query a vec0 table.
+
+    The KB's ``kb_chunk_vec`` is a ``vec0`` virtual table, so a connection without
+    the extension cannot read the schema at all — ``VACUUM`` and ``.dump`` fail on
+    the unknown module. The load therefore belongs to the engine's ``connect``
+    hook, beside the pragmas, and not to whichever code happens to want a vector.
+    """
+    async with db_engine.begin() as conn:
+        assert (await conn.execute(text("SELECT vec_version()"))).scalar_one().startswith("v0.1.")
+        await conn.execute(
+            text(
+                "CREATE VIRTUAL TABLE probe USING vec0(id INTEGER PRIMARY KEY, embedding float[4])"
+            )
+        )
+        await conn.execute(
+            text("INSERT INTO probe(id, embedding) VALUES (1, '[1,2,3,4]'), (2, '[9,9,9,9]')")
+        )
+        rows = (
+            await conn.execute(
+                text(
+                    "SELECT id FROM probe WHERE embedding MATCH '[1,2,3,4]' AND k = 2 "
+                    "ORDER BY distance"
+                )
+            )
+        ).all()
+
+    assert [row[0] for row in rows] == [1, 2]
+
+
+async def test_fts5_is_compiled_in(db_engine):
+    async with db_engine.connect() as conn:
+        options = {row[0] for row in (await conn.execute(text("PRAGMA compile_options"))).all()}
+
+    assert "ENABLE_FTS5" in options
+
+
+async def test_extension_status_reports_vec_and_fts5(db_session):
+    """The helper behind the Settings "index stats" panel."""
+    status = await extension_status(db_session)
+
+    assert status.vec_version.startswith("v0.1.")
+    assert status.fts5 is True
+    assert status.sqlite_version.count(".") == 2
+
+
+def test_a_missing_wheel_names_the_fix(monkeypatch):
+    """The app cannot open this file without sqlite-vec, so it must say so.
+
+    A bare ``ModuleNotFoundError`` at import, or an ``AttributeError`` on the first
+    connect, tells the user nothing they can act on — and ``extension_status``, the
+    one place that would have explained it, is never reached.
+    """
+    monkeypatch.setattr(engine_module, "sqlite_vec", None)
+
+    with pytest.raises(RuntimeError, match="uv sync"):
+        engine_module._load_sqlite_vec(object())
+
+
+def test_a_python_without_loadable_extensions_names_the_build(monkeypatch):
+    class Bare:
+        """An aiosqlite connection from a CPython built without extension support."""
+
+    class Adapter:
+        driver_connection = Bare()
+
+    with pytest.raises(RuntimeError, match="loadable SQLite extensions"):
+        engine_module._load_sqlite_vec(Adapter())
+
+
+async def test_extension_status_still_answers_without_the_extension(tmp_path: Path):
+    """Reachable even on the build that cannot load it — that is the whole point."""
+    plain = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'plain.db'}")
+    try:
+        async with plain.connect() as conn:
+            status = await extension_status(conn)
+    finally:
+        await plain.dispose()
+
+    assert status.vec_version == ""
+    assert status.fts5 is True
+    assert status.sqlite_version.count(".") == 2

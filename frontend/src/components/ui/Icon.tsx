@@ -133,6 +133,21 @@ const GLYPHS = {
   },
 
   // --- drawn to match ------------------------------------------------------
+  // The Knowledge rail entry. Drawn to sit beside `notes`, which is a sheet of
+  // paper with a folded corner: this is a bound volume — one closed outline for
+  // the covers, the spine down the middle, and two short rules on the right leaf
+  // at the same 3-unit rhythm as the `notes` glyph's text lines. Nothing is
+  // drawn on the left leaf: at 18px a second pair of rules closes the gap
+  // between them and the spine, and the book reads as a filled box.
+  book: {
+    body: (
+      <>
+        <path d="M3.5 4.2h4.6A1.9 1.9 0 0 1 10 6.1v9.8a1.6 1.6 0 0 0-1.6-1.3H3.5z" />
+        <path d="M16.5 4.2h-4.6A1.9 1.9 0 0 0 10 6.1v9.8a1.6 1.6 0 0 1 1.6-1.3h4.9z" />
+        <path d="M12.3 8h2.4M12.3 11h2.4" />
+      </>
+    ),
+  },
   star: {
     body: (
       <path d="M10 3l2.1 4.3 4.7.7-3.4 3.3.8 4.7L10 13.8 5.8 16l.8-4.7L3.2 8l4.7-.7L10 3z" />

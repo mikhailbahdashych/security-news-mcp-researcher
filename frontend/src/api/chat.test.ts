@@ -657,6 +657,24 @@ describe('groupSessionsByDay', () => {
     expect(groups.map((group) => group.label)).toEqual(['16 Sep 2026', '15 Sep 2026'])
     expect(groups.map((group) => group.sessions.map((row) => row.id))).toEqual([[3], [2, 1]])
   })
+
+  it('groups on the timestamp rather than on the date it already rendered', () => {
+    // Labelling a label is not a no-op: V8 reads `16 Sep 2026` back as midnight
+    // UTC, so west of Greenwich every header slipped a day. The suite runs in
+    // UTC, where that is invisible — hence the zone here. (Reached through
+    // `globalThis` because there are no node types in this build.)
+    const env = (globalThis as unknown as { process: { env: Record<string, string | undefined> } })
+      .process.env
+    const zone = env.TZ
+    env.TZ = 'America/New_York'
+    try {
+      const groups = groupSessionsByDay([session({ id: 1, updated_at: '2026-09-16T12:00:00' })])
+      expect(groups[0].label).toBe(whenLabel('2026-09-16T12:00:00'))
+      expect(groups[0].label).toBe('16 Sep 2026')
+    } finally {
+      env.TZ = zone
+    }
+  })
 })
 
 describe('the sandbox card', () => {

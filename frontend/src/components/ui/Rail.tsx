@@ -16,11 +16,12 @@ const NAV_ICONS: Record<PageKey, IconName> = {
   inbox: 'inbox',
   research: 'research',
   notes: 'notes',
+  knowledge: 'book',
   settings: 'settings',
 }
 
 /**
- * The top nav: the three destinations, in `PAGE_KEYS` order.
+ * The top nav: the four destinations, in `PAGE_KEYS` order.
  *
  * Settings is not one of them — it sits in the bottom group with the theme and
  * the collapse toggles, because it is the app's own knobs rather than a fourth

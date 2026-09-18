@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
 from app.db.models import Setting, utcnow
+from app.kb.schema import KB_SCHEMA_VERSION_KEY, default_schema_version
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,25 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "note_template": DEFAULT_NOTE_TEMPLATE,
     "system_prompt_extra": "",
     "feed_timeout_s": "15",
+    # The knowledge base's capture policy. Manual saves are always allowed; these
+    # two govern only the automatic triggers.
+    "kb_capture_starred": "true",
+    "kb_capture_notes": "true",
+    # Below this many characters a snapshot is a teaser or a consent wall, and
+    # capture skips it with an activity row rather than storing noise. The literal
+    # rather than ``app.kb.capture.DEFAULT_MIN_SNAPSHOT_CHARS``: this module is
+    # imported *by* the capture path (through ``services.extract``), so importing
+    # it back would be a cycle. ``tests/test_settings_service.py`` pins the two
+    # together, exactly as it does for ``ALLOWED_VALUES``.
+    "kb_min_snapshot_chars": "400",
+    # When on, only reviewed entries are returned to the chat tools and the notes
+    # generator. **Independently of it**, a model-authored entry is never returned
+    # until it has been reviewed — that gate is not a setting (spec S5).
+    "kb_reviewed_only": "false",
+    # What the knowledge base's two virtual tables were actually built with. Not a
+    # preference: the app compares it with the constants in ``app.kb.schema`` and
+    # reports "index format outdated" when they disagree.
+    KB_SCHEMA_VERSION_KEY: default_schema_version(),
 }
 
 #: Settings whose value is one of a closed set, and what that set is.
@@ -193,9 +213,7 @@ def external_api_key(settings: Settings | None = None) -> str:
     return (settings.anthropic_api_key or "").strip() if settings is not None else ""
 
 
-async def get_effective_api_key(
-    session: AsyncSession, settings: Settings | None = None
-) -> str:
+async def get_effective_api_key(session: AsyncSession, settings: Settings | None = None) -> str:
     """The API key actually used for Anthropic calls.
 
     Precedence: process environment, then the app ``Settings`` (i.e. ``.env``),
@@ -208,9 +226,7 @@ async def get_effective_api_key(
     return (await get(session, "anthropic_api_key") or "").strip()
 
 
-async def get_key_source(
-    session: AsyncSession, settings: Settings | None = None
-) -> KeySource:
+async def get_key_source(session: AsyncSession, settings: Settings | None = None) -> KeySource:
     """Which of the three sources :func:`get_effective_api_key` would use.
 
     Purely informational: ``has_api_key`` still means "a key is stored in this

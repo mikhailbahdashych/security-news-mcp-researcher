@@ -14,6 +14,19 @@ export type ThinkingDisplay = (typeof THINKING_DISPLAYS)[number]
  */
 export type KeySource = 'env' | 'stored' | 'none'
 
+/**
+ * What the two virtual tables behind the knowledge base were actually built
+ * with. Read-only, and not a preference: the Settings panel compares it with
+ * this build and offers a rebuild when they disagree.
+ */
+export interface KbSchemaVersion {
+  version: number
+  vec_ddl_version: number
+  vec_dimensions: number
+  fts_ddl_version: number
+  tokenizer: string
+}
+
 /** Shape of `GET /api/settings` — the raw API key is never part of it. */
 export interface AppSettings {
   model: string
@@ -30,11 +43,19 @@ export interface AppSettings {
   note_template: string
   system_prompt_extra: string
   feed_timeout_s: number
+  /** The knowledge base's capture policy. Manual saves are always allowed. */
+  kb_capture_starred: boolean
+  kb_capture_notes: boolean
+  kb_min_snapshot_chars: number
+  kb_schema_version: KbSchemaVersion
 }
+
+/** The fields `PUT /api/settings` will not take: read-only, or write-only. */
+type NotWritable = 'has_api_key' | 'api_key_masked' | 'key_source' | 'kb_schema_version'
 
 /** Everything a `PUT` may change. All fields optional: unsent fields are left alone. */
 export type SettingsUpdate = Partial<
-  Omit<AppSettings, 'has_api_key' | 'api_key_masked' | 'key_source'> & {
+  Omit<AppSettings, NotWritable> & {
     anthropic_api_key: string
   }
 >

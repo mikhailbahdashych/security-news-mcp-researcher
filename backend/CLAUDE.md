@@ -60,15 +60,23 @@ uvicorn's own loggers alone. Without it every `app.*` record had no handler at a
 | `app/config.py` | `Settings` (pydantic-settings): `db_path`, `port`, `static_dir`, `cors_origins`, `anthropic_api_key`, `log_level`. Reads `../.env` then `.env`. `cors_origins` is `Annotated[list[str], NoDecode]` with a validator, so a comma-separated `CORS_ORIGINS` no longer raises at import; `*` and non-http(s) entries are refused (`ValidationError`). `effort`/`thinking_display` are coerced to their allowed literals in `services/settings.py`, the one place both the API and the agent loop read them. |
 | `app/logging_config.py` | `configure_logging` / `installed_handler`, `LOG_FORMAT`, `HANDLER_NAME`. |
 | `app/static.py` | `mount_spa` — serves `frontend/dist` in Docker; a no-op when the dir is absent (dev). Path-traversal safe. |
-| `app/db/engine.py` | `create_db_engine` (WAL / `synchronous=NORMAL` / `busy_timeout=5000` / `foreign_keys=ON` pragmas on every connect), `create_session_factory`. No module-level engine. |
+| `app/db/engine.py` | `create_db_engine` (WAL / `synchronous=NORMAL` / `busy_timeout=5000` / `foreign_keys=ON` pragmas on every connect **and `sqlite-vec` loaded on every connect**), `create_session_factory`, `extension_status`. No module-level engine. |
 | `app/db/models.py` | The **complete, frozen** schema + `utcnow()`. No Alembic. |
-| `app/db/init.py` | `init_db(engine, session_factory=None)` — `create_all` + `ADDED_COLUMNS` top-up + `seed_defaults`. Idempotent. |
+| `app/db/init.py` | `init_db(engine, session_factory=None)` — `create_all` + `ADDED_COLUMNS` top-up + the KB's virtual tables and triggers + `ADDED_INDEXES` top-up + `seed_defaults`, then one WARNING if the stored index format is outdated. Idempotent. |
 | `app/db/util.py` | `matches(column, value)` / `escape_like` / `like_pattern` / `LIKE_ESCAPE_CHAR` — **the** substring-match rule for the whole app. |
 | `app/schemas/` | Pydantic request/response models, one module per domain, plus `common.py` for what genuinely crosses domains (`CancelResponse`). |
-| `app/api/` | Routers (`health`, `settings`, `models`, `feeds`, `items`, `sessions`, `notes`, `search`, `mcp`) wired in `app/api/__init__.py`; `deps.py`; `streaming.py` (shared SSE plumbing, **not** a router); `tasks.py` (**not** a router — the cancel registry, notes only). |
+| `app/api/` | Routers (`health`, `settings`, `models`, `feeds`, `items`, `sessions`, `notes`, `search`, `kb`, `mcp`) wired in `app/api/__init__.py`; `deps.py`; `streaming.py` (shared SSE plumbing, **not** a router); `tasks.py` (**not** a router — the cancel registry, notes only). |
 | `app/services/` | Domain logic, no FastAPI imports: `settings` (kv store + key precedence), `feeds` (ingest), `extract` (trafilatura), `items` (inbox queries + keyset cursor + the public `sort_key()`), `notes` (context, sources, save), `search` (cross-entity queries), `http` (UA/timeout policy + the browser-TLS transport), `url_guard` (SSRF + body/time caps), `anthropic_models` (model list + key check, 1 h in-process cache keyed on a digest of the key). |
 | `app/agent/` | The agent loop, the tool registry and the **turn registry** (`turns.py`, `turnlog.py`) — see `app/agent/CLAUDE.md`. |
 | `app/mcp/` | The MCP client — see `app/mcp/CLAUDE.md`. |
+| `app/kb/` | The knowledge base: `models` (its tables), `schema` (the two **frozen** virtual tables, their versions and the rebuilds), `chunking`, `fts`, `entities`, `embeddings`, `store`, `retrieval`, `urls` (canonicalisation), `capture` (the writes), `service` (`KbService`, the one door). |
+
+A failed extension load is **fatal by design** and says so: `RuntimeError` naming
+`uv sync` when the wheel is absent, or the Python build when its `sqlite3` has no
+`enable_load_extension`. Without the extension `kb_chunk_vec` is an unknown module and
+the schema cannot be read at all, so there is nothing to degrade to — but
+`extension_status` still answers (`vec_version=""`), because it is the one place that
+explains why vector search is unavailable.
 
 `research_sessions` carries the turn state: `turn_status` (`idle` | `running` |
 `interrupted`) and `turn_started_at`, written only by the registry — and written with
@@ -111,7 +119,22 @@ Everything configurable is a TEXT row in `settings`; typed accessors do the pars
 Keys: `anthropic_api_key` (""), `model` (`claude-opus-5`), `effort` (`high`),
 `thinking_display` (`summarized`), `web_search_enabled` (true), `web_search_max_uses` (8),
 `web_fetch_enabled` (true), `max_tool_turns` (12), `note_template`
-(`DEFAULT_NOTE_TEMPLATE`), `system_prompt_extra` (""), `feed_timeout_s` (15).
+(`DEFAULT_NOTE_TEMPLATE`), `system_prompt_extra` (""), `feed_timeout_s` (15),
+`kb_capture_starred` (true), `kb_capture_notes` (true), `kb_min_snapshot_chars` (400),
+`kb_reviewed_only` (false).
+
+`kb_reviewed_only` is deliberately **not** on `SettingsRead`: it is read by
+`KbService.search_for_model` and nothing else, and the API contract the frontend was
+built against names only the three capture keys. `kb_min_snapshot_chars`'s default is
+the literal `"400"` rather than `app.kb.capture.DEFAULT_MIN_SNAPSHOT_CHARS`, because
+this module is imported *by* the capture path (through `services/extract.py`) and the
+import back would be a cycle; `tests/test_settings_service.py` pins the two together.
+
+`kb_schema_version` is the one row that is **not** a preference: it records what the
+knowledge base's two virtual tables were actually built with
+(`{version, vec_ddl_version, vec_dimensions, fts_ddl_version, tokenizer}`) so
+`app/kb/schema.py::index_status` can compare the file with the constants in this
+build. Nothing rewrites it except a rebuild.
 
 **Key precedence: process environment → `Settings.anthropic_api_key` (i.e. `.env`) →
 the stored row.** `external_api_key(settings)` covers the first two; `get_effective_api_key`
@@ -134,7 +157,12 @@ tail, **204** only when nothing is running *and* nothing finished in the last
 `RECENT_TURN_S = 30` s) ·
 `GET /api/notes`, `GET|PATCH|DELETE /api/notes/{id}`, `GET /api/notes/{id}/export.md`,
 `POST /api/notes/generate` (**SSE**), `POST /api/notes/generate/cancel` ·
-`GET /api/search` · `GET|PUT /api/mcp/servers`,
+`GET /api/search` ·
+`POST /api/kb/entries`, `GET /api/kb/entries`, `GET|PATCH /api/kb/entries/{id}`,
+`POST /api/kb/entries/{id}/delete|undelete|refresh|merge|topics|tags`,
+`POST /api/kb/purge`, `POST /api/kb/search`, `GET /api/kb/stats`,
+`GET /api/kb/activity`, `GET|POST /api/kb/topics`, `PATCH|DELETE /api/kb/topics/{id}` ·
+`GET|PUT /api/mcp/servers`,
 `POST /api/mcp/servers/{name}/reconnect`, `GET /api/mcp/tools`,
 `PATCH /api/mcp/tools/{namespaced}`.
 
@@ -239,6 +267,95 @@ cited in the finished note. `save_note` writes note + sources in one transaction
 item or the session meanwhile, so the insert is retried once with the vanished
 references dropped — each orphaned source keeps its URL and title.
 
+## The knowledge base (`app/api/kb.py`, `app/kb/`)
+
+`KbService` (`app/kb/service.py`, reached through `deps.py::KbServiceDep`) is the **one
+door**: the routes, the two capture triggers and the two chat tools all go through it and
+none of them touches `capture`/`retrieval`/`store` directly. Three things live in it
+because they are policy, and policy in a route is policy the next route forgets:
+
+- the capture policy (`kb_capture_starred` / `kb_capture_notes`);
+- the **authorship gate**, as two named methods rather than one argument —
+  `search_for_model` never passes `include_model_authored` and `search_for_user` always
+  does, so the chat tools cannot see a model-authored entry until a human has reviewed it
+  (spec S5) while the Knowledge page shows the user everything they captured;
+- `transport`, the single HTTP seam every outbound fetch it makes goes through, which is
+  what lets the tests hand it an `httpx2.MockTransport` instead of stubbing the code under
+  test.
+
+**A capture trigger runs after the user's write has committed, and cannot fail it.**
+`PATCH /api/items/{id}` with `status=starred` and `PATCH /api/notes/{id}` call
+`capture_star_if_enabled` / `capture_note_if_enabled` *after* their own `commit()`;
+generation calls the latter after `save_note`. Each wraps the capture in
+`KbService.guarded`, which turns any exception into a `kb_activity` row with
+`action='skip'` — a paywall, a 403 or a Voyage outage must never cost someone the star
+they pressed. **The policy read is inside `guarded` too**, because reading
+`kb_capture_notes` is a database read like any other and the user's write has already
+gone in. All three triggers take the service through `KbServiceDep`, including the one
+inside the generation stream — `get_kb_service` does not *yield*, so there is nothing for
+the dependency teardown to close before the body is sent, and a trigger no override can
+reach is a trigger no test can drive. **Bulk starring does not capture**: 50 items is 50
+extractions, which is the Phase 2 SSE job (`kb:bulk:{id}`), not a request.
+
+The embedding call is likewise wrapped (`capture.py::_embed_pending_quietly`): it runs
+after the commit, so a provider outage leaves the chunks pending and writes an activity
+row rather than 500-ing a save that succeeded (spec §5). `embedded_at IS NULL` is the one
+definition of "pending" and what Re-index resumes from.
+
+Capture order is fixed (spec §4.5): canonicalise the URL → dedup (feed item id / note id,
+else canonical URL, else content hash — the hash is the *fallback* for text with **no key
+at all**, not an extra check, because two URLs carrying the same syndicated text are two
+articles, and a capture that named a source id and missed is a new entry rather than the
+article that happens to share its body) → the minimum-length check, which
+skips with an activity row → entry + snapshot v1 + chunks + regex entities in one
+transaction → embed **outside** it. `published_at` is the feed item's date, else the
+extractor's, else NULL — **never** the capture time. No function here holds a transaction
+across the embedder call, because SQLite has exactly one writer.
+
+`POST /entries` answers **201** for a new entry and **200** for one that was already held
+and has just gained a back-link. Saving something that is in the trash **revives it**, so
+the 200 always describes an entry the user can now see — `created=False` with
+`deleted_at` still set was a client saying "Saved" over a row the timeline did not list.
+The three ways a save writes nothing are three different status codes, off
+`CaptureResult.skipped_code`: **422** not an absolute http(s) URL, **502** the fetch
+failed, **409** the text was below `kb_min_snapshot_chars`. 409 is also the collision only
+the user can resolve (an Undo — or a revive — whose URL was re-captured, a purge naming a
+live entry, a topic name already in use — `app/kb/capture.py::KbConflict`).
+
+`POST /entries/{id}/refresh` has **three** outcomes and answers **200** to all of them,
+because a re-read that could not fetch is not an error — the entry keeps the text it
+already had. `RefreshResult.status` names which one it was (`updated` / `unchanged` /
+`failed`) and `reason` carries the detail; `changed` alone cannot separate the last two,
+and a client that had only that flag told the user a Cloudflare 403 was "unchanged".
+
+A **deleted entry is readable**, not a 404: that is what Undo and the trash view
+(`?deleted=true`) need. It is also **chunkless, and stays that way**: `soft_delete` drops
+the chunks so that "deleted" needs no filter anywhere, and `_replace_snapshot` therefore
+does not give them back when the source note is edited — it still stores the new version,
+and `undelete` re-chunks from it.
+
+`GET /entries` answers with `entries` when it lists and with `hits` when `q` is present,
+and the absent key is dropped from the JSON rather than sent as `null`, so an empty list
+can never be read as "the search found nothing". `next_cursor` goes with it on the hits
+branch: hits are ordered by score and there is no keyset to resume from. **Every filter
+applies to both branches** — `kind`, `topic_id`, `entity`, `since`, `review` and
+`deleted`. `review` and `deleted` cannot reach the search legs as SQL (`reviewed_only`
+narrows to *reviewed* and has no other half; nothing deleted is searchable at all, so the
+trash is a list and a search of it is empty by definition), so they narrow the hits
+afterwards and a page of hits can come back shorter than `limit`.
+
+`entity` is parsed **before** that branch, by `api/kb.py::_entity`, and text it cannot
+read is a **422** on both branches and on `POST /search` — never a silently wider answer.
+`parse_entity` returns `None` for anything without a `kind:value`, and `None` is how the
+store spells *no filter*, so `entity=openssl` used to answer 200 with the whole list while
+the box still showed the word meant to narrow it. An **empty** `entity` is still no
+filter: clearing the box is not a mistake.
+
+`app/kb/urls.py::canonical_url` **filters** the query string, it never re-encodes it:
+`?b` is not `?b=` and `%20` is not `+`, and the canonical form is what "Refresh snapshot"
+re-fetches. Exactly one trailing slash is stripped (`/a//` → `/a/`) and the root keeps
+its own.
+
 ## Cancellation (`app/agent/turns.py`, `app/api/tasks.py`)
 
 **An SSE disconnect does not stop billing** — and, for a chat turn, it does not stop the
@@ -323,8 +440,14 @@ Three more ingest invariants worth not re-litigating (`app/services/feeds.py`):
 
 ## Tests (`backend/tests/`)
 
-`make test` → `uv run pytest` (**616 tests**, ~20 s) then the frontend's vitest. One
-`test_<area>.py` per area, `fakes/` for client stand-ins, `fixtures/` for XML/HTML.
+`make test` → `uv run pytest` (**898 passed, 3 skipped**, ~40 s) then the frontend's
+vitest. One `test_<area>.py` per area, `fakes/` for client stand-ins, `fixtures/` for
+XML/HTML.
+
+One test is **opt-in**: `tests/test_kb_benchmark.py` builds 20 000 chunks and times
+the keyword leg. Run it with `KB_BENCHMARK=1 uv run pytest tests/test_kb_benchmark.py -s`
+and copy the printed line into the PR body and spec §9 — the numbers are the record
+of what FTS5 actually costs at the sizes this knowledge base reaches.
 
 There is **no `tests/__init__.py`**, so pytest puts `tests/` on `sys.path`: helpers are
 imported either as `from fakes.anthropic import ...` or `from tests.feed_fixtures import ...`
@@ -350,6 +473,8 @@ Fakes:
   `turn_refusal`, `turn_pause`, `turn_code_execution`, `turn_text_editor`,
   `turn_text_with_usage`. Inject with
   `app.dependency_overrides[get_chat_client_factory] = lambda: lambda _key: scripted`.
+- `tests/fakes/embedder.py` — `FakeEmbedder`, deterministic unit vectors from a
+  digest of the text. The knowledge base's tests never reach Voyage.
 - `tests/fakes/mcp.py` — in-process `MCPServer` fixtures and target factories; see
   `app/mcp/CLAUDE.md`. `tests/feed_fixtures.py` —
   `routes_transport({url: Response|Exception|callable})` over `httpx2.MockTransport`,
@@ -375,6 +500,43 @@ for that column (`CreateColumn(...).compile(dialect=sqlite.dialect())`), which f
 `NOT NULL` column means declaring a `server_default` on the model: SQLite refuses to add
 one without a default, and a fresh database and an upgraded one must end up with the
 same table. `tests/test_db.py` asserts both.
+
+**...a new index.** Declare it in the model's `__table_args__` *and* list it in
+`app/db/init.py::ADDED_INDEXES` with the DDL. `create_all` makes a missing *table*
+with its indexes, but it never adds an index to a table that already exists — so an
+index added after a release is simply absent from every database in the field. The
+literal is `CREATE INDEX IF NOT EXISTS ...`, exactly what `create_all` emits
+(`CreateIndex(...).compile(dialect=sqlite.dialect())`) plus the `IF NOT EXISTS`
+SQLite strips when it records the statement; `tests/test_kb_schema_evolution.py`
+compiles every listed index and compares.
+
+**...a change to a virtual table.** Don't, unless you mean it. `kb_chunk_vec` and
+`kb_chunks_fts` are created from frozen DDL in `app/kb/schema.py`: vec0 has **no
+`ALTER`** (and `ALTER TABLE ... RENAME` on a vec0 table leaves its shadow tables
+behind under the old name, so it is not a swap), and an FTS5 tokenizer is baked into
+the `CREATE`. A change is a **versioned rebuild**: edit the DDL, bump
+`VEC_DDL_VERSION` / `FTS_DDL_VERSION` (and `VEC_DIMENSIONS` if that moved), and the
+app reports "index format outdated" until the user presses rebuild.
+**`init_db` never rebuilds by itself** — a vector rebuild re-embeds every chunk,
+which costs money and minutes. `rebuild_vec(session_factory, dimensions)` builds the
+replacement under a second name, fills it, and only then drops and recreates the
+real one from it; it never drops first, and the whole swap runs inside
+`BEGIN IMMEDIATE`, because DDL alone does not open a transaction and a crash after
+the `DROP` would otherwise leave the file with no `kb_chunk_vec` at all.
+`rebuild_fts(session_factory)` reruns the FTS5 `'rebuild'` command (the content
+table is the source of truth, so there is nothing to lose), and `recreate=True`
+drops and recreates first, which is what a tokenizer change needs. **Each rebuild
+records only the half it rebuilt** (`record_schema_version` merges onto the
+*stored* row): writing all five keys would have a vector rebuild declare the
+keyword index current too, and the "outdated" warning would vanish with the old
+tokenizer still in place.
+
+**The four triggers have no version of their own.** They hold no state, so
+`app/kb/schema.py::ensure_triggers` compares each stored body with the constant and
+recreates the ones that differ, on every `init_db` — that is their upgrade path, and
+without it a release that fixed `kb_chunks_au` or `kb_chunks_ad_vec` would reach no
+database that already exists. It is conditional rather than a blanket
+drop-and-create so that a steady-state `init_db` still writes nothing.
 
 **...a new setting.** Add the key + default to `DEFAULT_SETTINGS` in
 `app/services/settings.py` (this is also what `seed_defaults` inserts on an existing DB),

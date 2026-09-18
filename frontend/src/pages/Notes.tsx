@@ -9,6 +9,7 @@ import {
   notesQueryKey,
   type NoteSummary,
 } from '../api/notes'
+import { kbQueryKey } from '../api/kb'
 import { excerptFromMarkdown } from '../components/notes/excerpt'
 import GenerateNotesDialog from '../components/notes/GenerateNotesDialog'
 import { formatNoteDate, formatNoteDay } from '../components/notes/noteDate'
@@ -46,6 +47,9 @@ export default function NotesPage({ embedded = false }: EmbeddablePageProps) {
     onSuccess: async () => {
       setPendingDelete(null)
       await queryClient.invalidateQueries({ queryKey: notesQueryKey })
+      // `note_id` is `ON DELETE SET NULL`: an entry captured from this note is
+      // still there, now with one back-link fewer.
+      await queryClient.invalidateQueries({ queryKey: kbQueryKey })
     },
   })
 

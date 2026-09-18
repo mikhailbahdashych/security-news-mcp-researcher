@@ -35,6 +35,7 @@ enrichment, ...). `docs/CLAUDE.md` is the doc map.
 | `backend/` | FastAPI app, uv-managed. See `backend/CLAUDE.md`. |
 | `backend/app/agent/` | The manual Anthropic agent loop + tool registry. See `backend/app/agent/CLAUDE.md`. |
 | `backend/app/mcp/` | MCP client: config, connection manager, tool provider. See `backend/app/mcp/CLAUDE.md`. |
+| `backend/app/kb/` | The knowledge base: the **frozen** virtual-table DDL and its versions (`schema.py`), capture, chunking, FTS, entities, store, retrieval, and `KbService` — the one door. No `CLAUDE.md` of its own: it is documented in `backend/CLAUDE.md`. |
 | `frontend/` | Vite + React 19 + TS + Tailwind v4 SPA. See `frontend/CLAUDE.md`. |
 | `docs/` | `DESIGN.md` (design record), `ROADMAP.md` (backlog). See `docs/CLAUDE.md`. |
 | `Dockerfile` | Two stages: node builds the SPA, python runs it. Node binary is copied into the runtime so stdio MCP servers can `npx`. Wheels are hash-verified. `docker/entrypoint.sh` starts as root, chowns `/data` to the non-root user `app` only when an older root-owned volume needs it, then drops privileges with `setpriv`; `CMD` is `python -m app --host 0.0.0.0`. `PORT` must be ≥ 1024. |
@@ -57,12 +58,35 @@ The SPA build has no Makefile target: `cd frontend && npm run build` (`tsc -b &&
 Prerequisites: [uv](https://docs.astral.sh/uv/) and Node 22+.
 
 **Database.** SQLite at `backend/data/app.db` in dev (`/data/app.db` in Docker),
-gitignored. It holds the Anthropic key, feeds, items, transcripts, notes and MCP
-config. There is **no Alembic**: the whole schema is `Base.metadata.create_all` at
-startup, and a **new column** is added to an existing database by
-`app/db/init.py::ADDED_COLUMNS` (an `ALTER TABLE ADD COLUMN` per missing column, run by
-`init_db`). List it there when you add one — never tell anyone to delete the database;
-it holds their key, their feeds and their history.
+gitignored. It holds the Anthropic key, feeds, items, transcripts, notes, MCP config
+and the whole knowledge base (entries, snapshots, chunks and both its indexes).
+There is **no Alembic**. `app/db/init.py::init_db` is the entire upgrade path, and it
+runs four things in this order:
+
+1. `Base.metadata.create_all` — every ordinary table, and its indexes **only when the
+   table itself is new**.
+2. `ADDED_COLUMNS` — one `ALTER TABLE ADD COLUMN` per missing column. List a **new
+   column** here, exactly as `create_all` emits it, or an upgraded database ends up
+   with a different table from a fresh one.
+3. The knowledge base's two **virtual** tables (`kb_chunk_vec`, `kb_chunks_fts`) and
+   their four triggers, from `app/kb/schema.py` — `create_all` knows nothing about
+   virtual tables. That DDL is **frozen and versioned** (spec §4.1); changing it means
+   bumping its version and writing a rebuild, never editing the statement in place.
+   `ensure_triggers` compares the stored bodies and recreates only what differs, so a
+   second run emits nothing.
+4. `ADDED_INDEXES` — `CREATE INDEX IF NOT EXISTS` per index. This is the **only** way
+   a **new index** reaches a database that already has its table, so list it here too;
+   `tests/test_kb_schema_evolution.py` fails if the models and this dict disagree
+   either way.
+
+`init_db` then seeds the default settings and logs one WARNING when the stored index
+format is outdated — it reports, it never rebuilds. **Every process that opens this
+database loads `sqlite-vec`** (`app/db/engine.py`'s `on_connect`): without the
+extension `kb_chunk_vec` is an unknown module and the schema cannot be read at all, so
+a failed load raises rather than degrading.
+
+Never tell anyone to delete the database — it holds their key, their feeds and their
+history.
 
 **`.env`.** Copy `.env.example` → `.env`. `app.config.Settings` reads it via
 pydantic-settings (`env_file=("../.env", ".env")`, so it works whether you run from
@@ -72,7 +96,9 @@ by the image's `CMD` and by `docker compose` (which publishes `${PORT:-8000}`), 
 both go through `python -m app` (`backend/app/__main__.py`), which reads `Settings.port`.
 `CORS_ORIGINS` accepts a comma-separated list as well as a JSON array; `*` is refused
 (a `ValidationError` at startup) and the middleware never allows credentials, because
-this API has no auth to protect.
+this API has no auth to protect. `.env.example` carries one more, commented out:
+`VOYAGE_API_KEY`, for the knowledge base's embeddings — it is **Phase 2** and no field
+reads it yet, so uncommenting it does nothing (`Settings` is `extra="ignore"`).
 
 **API-key precedence: process environment → `.env` (i.e. `Settings.anthropic_api_key`)
 → the key stored in the DB.** `app/services/settings.py::external_api_key` reads
@@ -170,8 +196,16 @@ handler and was dropped.
 - `feed_items.published_at` is **nullable** → order by
   `COALESCE(published_at, fetched_at)` (`app/services/items.py::sort_key()`, public so
   search reuses the same expression).
-- Every substring search in the app is `LIKE '%q%'` through
-  `app/db/util.py::matches` / `escape_like` — the single escaping rule. No FTS5.
+- **Two escaping rules, and neither may be used for the other's job.** Every
+  substring search is `LIKE '%q%'` through `app/db/util.py::matches` / `escape_like`
+  (inbox, notes, global search). Every **FTS5** search — the knowledge base, and
+  nothing else — builds its `MATCH` string with `app/kb/fts.py::fts_query`, which
+  quotes each term as a phrase and joins them with the `join=` it was given (`AND` by
+  default), raising on anything else. **The `AND`→`OR` retry is the caller's**
+  (`app/kb/retrieval.py`, on an empty keyword leg): only the caller knows whether an
+  empty result is worth widening. `escape_like`
+  escapes `%`, `_` and `\` for a `LIKE` pattern and would inject backslashes
+  straight into the tokenizer; `fts_query` knows nothing about `LIKE` wildcards.
 - All `DATETIME` columns are **naive UTC** — write them with `app.db.models.utcnow()`.
   The frontend re-appends `Z` (`frontend/src/lib/dates.ts::parseUtc`).
 - SQLite runs in **WAL** with `busy_timeout=5000` and `foreign_keys=ON`. Docker uses a

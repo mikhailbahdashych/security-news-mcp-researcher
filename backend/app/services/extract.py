@@ -24,6 +24,7 @@ import anyio
 import httpx2
 import trafilatura
 from sqlalchemy.ext.asyncio import AsyncSession
+from trafilatura.metadata import extract_metadata
 
 from app.db.models import FeedItem, utcnow
 from app.services import settings as settings_service
@@ -34,6 +35,10 @@ logger = logging.getLogger(__name__)
 
 #: Shorter than this and it is a wall, a stub or a cookie banner, not an article.
 MIN_CONTENT_CHARS = 300
+
+#: Ceiling on a title taken off a page. ``kb_entries.title`` is a short column and
+#: a <title> tag is whatever the publisher felt like putting in it.
+TITLE_MAX_CHARS = 300
 
 #: Default ceiling on stored article text. Generous enough for a long write-up,
 #: small enough that a runaway page cannot bloat the database or a prompt.
@@ -49,12 +54,18 @@ REASON_NO_URL = "the item has no link"
 
 @dataclass(slots=True)
 class ExtractResult:
-    """The outcome of fetching and extracting one URL."""
+    """The outcome of fetching and extracting one URL.
+
+    ``title`` is what the page calls itself — trafilatura's metadata, which falls
+    back to ``<title>`` — and is ``None`` when the page names itself nothing. It is
+    only ever a *suggestion*: a caller that already has a title keeps it.
+    """
 
     ok: bool
     text: str | None = None
     reason: str | None = None
     truncated: bool = False
+    title: str | None = None
 
 
 @dataclass(slots=True)
@@ -72,15 +83,28 @@ class ItemExtractResult:
     reason: str | None = None
 
 
-def _extract_sync(html: str) -> str | None:
-    """Blocking trafilatura call — always invoked through a worker thread."""
-    return trafilatura.extract(
+def _extract_sync(html: str) -> tuple[str | None, str | None]:
+    """Blocking trafilatura calls — always invoked through a worker thread.
+
+    The metadata pass is separate rather than ``with_metadata=True`` because that
+    flag prepends a YAML header to the markdown, and the markdown is the text this
+    application stores, chunks and quotes back to the model.
+    """
+    text = trafilatura.extract(
         html,
         output_format="markdown",
         include_comments=False,
         include_tables=True,
         favor_recall=True,
     )
+    title = None
+    try:
+        metadata = extract_metadata(html)
+    except Exception:  # noqa: BLE001 - a title is a nicety; the text is the point
+        logger.debug("Title extraction failed", exc_info=True)
+    else:
+        title = (getattr(metadata, "title", None) or "").strip() or None
+    return text, (title[:TITLE_MAX_CHARS] if title else None)
 
 
 def _truncate(text: str, max_chars: int) -> tuple[str, bool]:
@@ -159,7 +183,7 @@ async def extract_article(
         )
 
     try:
-        text = await anyio.to_thread.run_sync(_extract_sync, html)
+        text, title = await anyio.to_thread.run_sync(_extract_sync, html)
     except Exception as exc:  # noqa: BLE001 - a page we cannot parse is not a 500
         logger.warning("Extraction failed for %s", url, exc_info=True)
         return ExtractResult(ok=False, reason=f"{type(exc).__name__}: {exc}")
@@ -169,7 +193,7 @@ async def extract_article(
         return ExtractResult(ok=False, reason=REASON_THIN)
 
     text, truncated = _truncate(text, max_chars)
-    return ExtractResult(ok=True, text=text, truncated=truncated)
+    return ExtractResult(ok=True, text=text, truncated=truncated, title=title)
 
 
 async def extract_item(
@@ -218,6 +242,7 @@ async def extract_item(
 __all__ = [
     "DEFAULT_MAX_CHARS",
     "MIN_CONTENT_CHARS",
+    "TITLE_MAX_CHARS",
     "REASON_NO_URL",
     "REASON_THIN",
     "TRUNCATION_SUFFIX",

@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agent.turns import TurnRegistry
 from app.config import Settings
+from app.kb.service import KbService, searchable
 from app.mcp.manager import McpManager
 from app.services import settings as settings_service
 
@@ -57,6 +58,21 @@ def get_session_factory(request: Request) -> async_sessionmaker[AsyncSession]:
 
 
 SessionFactory = Annotated[async_sessionmaker[AsyncSession], Depends(get_session_factory)]
+
+
+def get_kb_service(session_factory: SessionFactory) -> KbService:
+    """The knowledge base, over this app's database.
+
+    A service rather than a bare session because capture opens **its own** short
+    transactions: the request's session is held for the whole request, and a
+    capture that borrowed it would keep a SQLite write transaction open across an
+    outbound fetch. Built per request (it holds nothing) and overridden wholesale
+    in tests, which is also where its HTTP transport comes from.
+    """
+    return searchable(session_factory)
+
+
+KbServiceDep = Annotated[KbService, Depends(get_kb_service)]
 
 
 def get_mcp_manager(request: Request) -> McpManager:
@@ -165,6 +181,7 @@ __all__ = [
     "AppSettings",
     "ChatClientFactory",
     "DbSession",
+    "KbServiceDep",
     "McpManagerDep",
     "SessionFactory",
     "TurnRegistryDep",
@@ -173,6 +190,7 @@ __all__ = [
     "get_app_settings",
     "get_chat_client_factory",
     "get_db",
+    "get_kb_service",
     "get_mcp_manager",
     "get_session_factory",
     "get_turn_registry",

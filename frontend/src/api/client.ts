@@ -26,6 +26,20 @@ export function isNotFound(error: unknown): boolean {
   return error instanceof ApiError && error.status === 404
 }
 
+/**
+ * The sentence behind a 409, or `null` for anything else.
+ *
+ * A 409 from this API is never a bug: it is the one refusal the user can act on
+ * — an Undo whose URL was captured again while the entry sat in the bin, a purge
+ * naming a live entry, a topic name already taken — and the backend writes that
+ * explanation into `detail`. Showing a generic "that did not work" over it is
+ * throwing away the only part the reader needs. Every other failure keeps its
+ * caller's own wording, because a 500 or a dead backend has nothing to explain.
+ */
+export function conflictDetail(error: unknown): string | null {
+  return error instanceof ApiError && error.status === 409 ? error.detail : null
+}
+
 async function readDetail(response: Response): Promise<string> {
   try {
     const body: unknown = await response.json()

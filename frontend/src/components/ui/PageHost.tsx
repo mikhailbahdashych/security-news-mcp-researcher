@@ -1,5 +1,6 @@
 import ChatPage from '../../pages/ChatPage'
 import InboxPage from '../../pages/Inbox'
+import KnowledgePage from '../../pages/Knowledge'
 import NotesPage from '../../pages/Notes'
 import SettingsPage from '../../pages/Settings'
 import type { PageKey } from './layout'
@@ -41,6 +42,8 @@ export default function PageHost({ page, embedded = false }: PageHostProps) {
       return <ChatPage embedded={embedded} />
     case 'notes':
       return <NotesPage embedded={embedded} />
+    case 'knowledge':
+      return <KnowledgePage embedded={embedded} />
     case 'settings':
       return <SettingsPage embedded={embedded} />
   }
