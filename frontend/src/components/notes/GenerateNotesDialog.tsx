@@ -231,10 +231,15 @@ export default function GenerateNotesDialog({
             category: null,
           }
     } finally {
-      abort.current = null
-      if (ownsStream(phase.current)) {
-        setStreaming(false)
-        setActivity(null)
+      // Only the run that still owns the controller may clear it: a late tail
+      // from an earlier run must never null a newer run's controller or reset
+      // its state, should a caller ever keep this dialog mounted between runs.
+      if (abort.current === controller) {
+        abort.current = null
+        if (ownsStream(phase.current)) {
+          setStreaming(false)
+          setActivity(null)
+        }
       }
     }
 
