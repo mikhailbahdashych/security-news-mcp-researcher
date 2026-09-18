@@ -351,6 +351,26 @@ a gap is an entry folded into a neighbour.
   path) must close it — e.g. `embed_pending` re-reads the configured model before each batch's
   write and drops the batch on a mismatch. — Cost if forgotten: silently degraded similarity for
   the chunks of one run, repaired only by a full re-index.
+- **P2-8 (done, 05c42ab).** `KbService` carries an optional client factory; `_auto_compile` runs inside
+  the capture's own `guarded` envelope, only for a newly created entry, and is a no-op without a
+  factory. **The bulk job opts out**: 200 selected items would otherwise be 200 Anthropic calls from
+  one click; compiling a selection stays the explicit `POST /api/kb/compile` with its estimate.
+- **P2-19. In `auto` mode the star and Save requests wait for the compile call — accepted.** Spec §4.5
+  says a single capture runs inside the request that caused it, and `auto` is opt-in. Moving it to a
+  background task would be a second job system for one setting. It is documented (contract, route
+  docstrings) and Task 2.7 gives those two actions a pending state and the toggle a sentence that says
+  so, and that the only brake on `auto` is the monthly budget. — Cost if wrong: a slow star.
+- **P2-20. The embedder L2-normalises every vector it returns.** `kb_chunk_vec` was created with
+  sqlite-vec's default metric, which is **L2** (the frozen DDL names none), so the near-duplicate check
+  converts with `cosine = 1 − d²/2` — exact only for unit vectors. Voyage's already are; normalising is
+  idempotent and makes the invariant ours rather than a vendor default, so re-opening
+  `output_dimension` later cannot silently switch duplicate flagging off. The plan's own brief had
+  assumed a cosine metric (`1 − d`), under which nothing would ever have been flagged.
+- **P2-21. Near-duplicate calibration is unvalidated.** `kb_duplicate_threshold = 0.92` (cosine) and
+  the title-trigram floor of 0.8 are reasoned, not measured: "The xz backdoor" vs "The xz backdoor,
+  explained" scores 0.698 and does not flag. With no Voyage key the trigram leg runs alone and
+  near-identical *headlines* over different stories can flag; it only ever flags, never merges.
+  Recalibrate from real use — one setting and one constant.
 
 ---
 

@@ -157,18 +157,28 @@ Request:
 `item_ids` 1–200 feed-item ids; `job_id` optional (the server generates one — but the client should
 send it, because Cancel needs it before the first frame arrives).
 
-`409 {detail}` when a job with that key is already running (`kb:bulk:{job_id}`).
+`409 {detail}` when a job with that key is already running (`kb:bulk:{job_id}`); `422` for an empty
+list or more than 200 ids. **`item_ids` is de-duplicated server-side**, so `total` in the frames can be
+smaller than the number of ids sent — key a progress bar on `total`, never on `item_ids.length`.
 Headers: `Cache-Control: no-cache`, `X-Accel-Buffering: no`, `ping` every 15 s.
 
 Frames, in order:
 
 | event | data | meaning |
 |---|---|---|
-| `turn_start` | `{"turn": 0}` | the job started |
+| `turn_start` | `{"turn": 0, "job_id": "5f3c…"}` | the job started; `job_id` is how Cancel reaches a server-generated id (the way note generation carries `generation_id`) |
 | `text_delta` | `{"text": "<json>"}` where `<json>` is `{"item_id":int,"entry_id":int\|null,"created":bool,"skipped_reason":string\|null,"possible_duplicate_of":int\|null,"done":int,"total":int}` | **one per finished item, in completion order, not submission order** |
-| `error` | `{"error_type":"cancelled","message":"The turn was stopped before it finished."}` | emitted by `pump_agent_events` when the job was cancelled or the client went away |
-| `error` | `{"error_type":"api_error","message":"A turn is already running."}` | a duplicate key lost the race; the stream then ends |
+| `error` | `{"type":"cancelled","message":"The turn was stopped before it finished."}` | emitted by `pump_agent_events` when the job was cancelled or the client went away |
+| `error` | `{"type":"api_error","message":"A turn is already running."}` | a duplicate key lost the race; the stream then ends |
 | `done` | `{"saved":int,"skipped":int,"duplicates":int,"entry_ids":[int]}` | **terminal**, emitted after the pump finishes — including after a cancel, so the page can show what was saved |
+
+**As built (amended 2026-09-18):** the `error` frame's key is `type`, the shape every stream in the app
+shares (`app/agent/events.py`). `possible_duplicate_of` is **always `null` in a `text_delta`**: a bulk run
+defers every embedding to one call at the end and flags near-duplicates only after it, so the flags
+arrive in `done.duplicates` — refetch the entries then. A **cancelled** run skips that tail: its entries
+stay captured and keyword-searchable, with their chunks pending and no duplicate check until
+`POST /api/kb/embed-pending` (or a re-save) embeds them. A bulk run **never auto-compiles**, whatever
+`kb_compile_mode` says (plan decision P2-8).
 
 The payload rides inside `text_delta` because the SSE vocabulary (`app/agent/events.py`) is the
 agent package's and Phase 2 does not widen it. The client parses `JSON.parse(frame.text)`.
@@ -222,7 +232,9 @@ Request `{ "entry_ids": [1,2,3] }` (1–100 ids).
   { "entries": 3, "input_tokens": 41230, "budget_remaining": 4958770, "would_exceed": false }
   ```
   `input_tokens` comes from `messages.count_tokens` on the prompt the batch would send.
-- Without it → `200 { "results": CompileResponse[] }`, one per entry, in request order.
+- Without it → `200 { "results": CompileResponse[] }`, one per entry, in request order. **Every id is
+  validated before anything is compiled**: one unknown id is a `404` for the whole batch, with no model
+  call made and nothing billed.
 
 ### `GET /api/kb/budget` → `200`
 
@@ -234,11 +246,23 @@ Request `{ "entry_ids": [1,2,3] }` (1–100 ids).
   "anthropic_total": 129146,
   "remaining": 4870854,
   "exhausted": false,
-  "voyage": 412000 }                     # month-to-date Voyage tokens, COUNTED SEPARATELY
+  "voyage": 412000,                      # month-to-date Voyage tokens, COUNTED SEPARATELY
+  "voyage_estimated": true }             # our own ceil(chars/3.6) per embedded batch, NOT Voyage's billed usage
 ```
 
 Derived from `kb_activity`: Anthropic from `action IN ('compile','recompile')`, Voyage from
 `action = 'embed'`. **The two counters are never added together.**
+
+A refusal, an unparseable answer and a `max_tokens` stop are billed responses: their tokens count
+against the month exactly like a successful compile.
+
+**`kb_compile_mode: auto`** (plan decisions P2-8, P2-19): a single capture — star, Save a URL, a saved
+note — compiles the entry it just created, *inside the request that caused it*. So in `auto` mode
+`PATCH /api/items/{id}` (star) and `POST /api/kb/entries` **wait for the Anthropic call** before they
+answer, and the `201` can already carry `summary_md` / `compile_model`. The UI needs a pending state on
+those two actions and a sentence on the toggle saying so, and that the only brake on `auto` is the
+monthly budget. A compile failure never fails the capture. `kb_activity.source` gains `auto` (the
+compile row) and `auto-compile` (a guarded failure).
 
 **Settings label (prescribed by I6 and the acceptance).** The budget control must say, in as many
 words, that *this counts compile tokens only and does not include chat spend*, and link to the
