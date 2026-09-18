@@ -64,12 +64,12 @@ uvicorn's own loggers alone. Without it every `app.*` record had no handler at a
 | `app/db/models.py` | The **complete, frozen** schema + `utcnow()`. No Alembic. |
 | `app/db/init.py` | `init_db(engine, session_factory=None)` — `create_all` + `ADDED_COLUMNS` top-up + the KB's virtual tables and triggers + `ADDED_INDEXES` top-up + `seed_defaults`, then one WARNING if the stored index format is outdated. Idempotent. |
 | `app/db/util.py` | `matches(column, value)` / `escape_like` / `like_pattern` / `LIKE_ESCAPE_CHAR` — **the** substring-match rule for the whole app. |
-| `app/schemas/` | Pydantic request/response models, one module per domain, plus `common.py` for what genuinely crosses domains (`CancelResponse`). |
-| `app/api/` | Routers (`health`, `settings`, `models`, `feeds`, `items`, `sessions`, `notes`, `search`, `kb`, `mcp`) wired in `app/api/__init__.py`; `deps.py`; `streaming.py` (shared SSE plumbing, **not** a router); `tasks.py` (**not** a router — the cancel registry, notes only). |
+| `app/schemas/` | Pydantic request/response models, one module per domain, plus `common.py` for what genuinely crosses domains (`CancelResponse`). The bulk job's two request bodies are `kb_bulk.py` (its *responses* are SSE frames, not models); everything else knowledge-base is `kb.py`. |
+| `app/api/` | Routers (`health`, `settings`, `models`, `feeds`, `items`, `sessions`, `notes`, `search`, `kb`, `kb_bulk`, `kb_compile`, `mcp`) wired in `app/api/__init__.py`; `deps.py`; `streaming.py` (shared SSE plumbing, **not** a router); `tasks.py` (**not** a router — the cancel registry, notes and the bulk job). `kb_bulk.py` (the streamed selection save) and `kb_compile.py` (compile, estimate, budget) are their own modules under the same `/api/kb` prefix, per plan decision P2-2. |
 | `app/services/` | Domain logic, no FastAPI imports: `settings` (kv store + key precedence), `feeds` (ingest), `extract` (trafilatura), `items` (inbox queries + keyset cursor + the public `sort_key()`), `notes` (context, sources, save), `search` (cross-entity queries), `http` (UA/timeout policy + the browser-TLS transport), `url_guard` (SSRF + body/time caps), `anthropic_models` (model list + key check, 1 h in-process cache keyed on a digest of the key). |
-| `app/agent/` | The agent loop, the tool registry and the **turn registry** (`turns.py`, `turnlog.py`) — see `app/agent/CLAUDE.md`. |
+| `app/agent/` | The agent loop, the tool registry, the **turn registry** (`turns.py`, `turnlog.py`) and `oneshot.py` — the one non-streaming, non-turn Anthropic call, which compile uses. See `app/agent/CLAUDE.md`. |
 | `app/mcp/` | The MCP client — see `app/mcp/CLAUDE.md`. |
-| `app/kb/` | The knowledge base: `models` (its tables), `schema` (the two **frozen** virtual tables, their versions and the rebuilds), `chunking`, `fts`, `entities`, `embeddings`, `store`, `retrieval`, `urls` (canonicalisation), `capture` (the writes), `service` (`KbService`, the one door). |
+| `app/kb/` | The knowledge base: `models` (its tables), `schema` (the two **frozen** virtual tables, their versions and the rebuilds), `chunking`, `fts`, `entities`, `embeddings` (the `Embedder` protocol, `VoyageEmbedder`, the token batcher, `l2_normalise`), `store`, `retrieval`, `urls` (canonicalisation), `capture` (the writes, the activity trail and the near-duplicate check), `bulk` (the cancellable selection job), `compile` (the model summary + its budget), `prompts` (the compile schema and renderer), `findings` (a chat turn kept as an entry), `service` (`KbService`, the one door). |
 
 A failed extension load is **fatal by design** and says so: `RuntimeError` naming
 `uv sync` when the wheel is absent, or the Python build when its `sqlite3` has no
@@ -123,6 +123,26 @@ Keys: `anthropic_api_key` (""), `model` (`claude-opus-5`), `effort` (`high`),
 `kb_capture_starred` (true), `kb_capture_notes` (true), `kb_min_snapshot_chars` (400),
 `kb_reviewed_only` (false).
 
+Phase 2 added, all of them read-only to everything but `PUT /api/settings`:
+`voyage_api_key` (""), `kb_embedding_model` (`voyage-4`), `kb_capture_findings`
+(**false**), `kb_compile_mode` (`manual`), `kb_compile_model` (`claude-sonnet-5`),
+`kb_compile_effort` (`low`), `kb_compile_prompt` (`DEFAULT_COMPILE_PROMPT`),
+`kb_compile_max_chars` (24 000), `kb_compile_monthly_token_budget` (5 000 000),
+`kb_auto_accept_suggestions` (true), `kb_recency_boost` (true), `kb_rerank` (true, and
+nothing reads it until the Phase 3 reranker), `kb_duplicate_threshold` (0.92).
+`DEFAULT_COMPILE_PROMPT` and `COMPILE_PROMPT_VERSION` live **here**, beside
+`DEFAULT_NOTE_TEMPLATE`, because the defaults dict needs them at import time;
+`app/kb/prompts.py` re-exports them (P2-10). A float setting reads through `get_float`,
+which exists for `kb_duplicate_threshold` and nothing else; a setting whose value is a
+closed set belongs in `ALLOWED_VALUES` **and** pinned against its `Literal` in
+`tests/test_settings_service.py`.
+
+**Changing `kb_embedding_model` empties `kb_chunk_vec`** in the same transaction as the
+settings write (`api/settings.py` → `embeddings.discard_vectors`, decision C1): the vec0
+DDL is frozen and carries no `embedding_model` column, so two models' vectors in one KNN
+would be meaningless similarity rather than merely worse. Every chunk goes back to
+pending and **Embed now** re-embeds them.
+
 `kb_reviewed_only` is deliberately **not** on `SettingsRead`: it is read by
 `KbService.search_for_model` and nothing else, and the API contract the frontend was
 built against names only the three capture keys. `kb_min_snapshot_chars`'s default is
@@ -142,6 +162,10 @@ adds the third; `get_key_source` names the winner (`"env"` / `"stored"` / `"none
 `GET /api/settings`. Neither external value is ever written back. `has_api_key` in the
 response means only "a key is stored **in this database**". `mask_key` is the only shape
 the key may take in a response or a log. `seed_defaults` only inserts missing keys.
+The **Voyage** key is the same three sources in the same order, through
+`external_voyage_key` / `get_effective_voyage_key` / `get_voyage_key_source`
+(`VOYAGE_KEY_ENV_VAR`), reported as `voyage_key_source` / `has_voyage_key` /
+`voyage_api_key_masked`.
 
 ## Endpoints
 
@@ -159,9 +183,13 @@ tail, **204** only when nothing is running *and* nothing finished in the last
 `POST /api/notes/generate` (**SSE**), `POST /api/notes/generate/cancel` ·
 `GET /api/search` ·
 `POST /api/kb/entries`, `GET /api/kb/entries`, `GET|PATCH /api/kb/entries/{id}`,
-`POST /api/kb/entries/{id}/delete|undelete|refresh|merge|topics|tags`,
+`POST /api/kb/entries/{id}/delete|undelete|refresh|merge|not-a-duplicate|topics|tags`,
 `POST /api/kb/purge`, `POST /api/kb/search`, `GET /api/kb/stats`,
-`GET /api/kb/activity`, `GET|POST /api/kb/topics`, `PATCH|DELETE /api/kb/topics/{id}` ·
+`POST /api/kb/embed-pending`, `GET /api/kb/activity`, `GET|POST /api/kb/topics`,
+`PATCH|DELETE /api/kb/topics/{id}`,
+`POST /api/kb/bulk` (**SSE**), `POST /api/kb/bulk/cancel`,
+`POST /api/kb/entries/{id}/compile`, `POST /api/kb/compile[?estimate=1]`,
+`GET /api/kb/budget` ·
 `GET|PUT /api/mcp/servers`,
 `POST /api/mcp/servers/{name}/reconnect`, `GET /api/mcp/tools`,
 `PATCH /api/mcp/tools/{namespaced}`.
@@ -203,7 +231,7 @@ disconnect. `app/agent/events.py` is the single event definition; each event's
 | event | payload |
 |---|---|
 | `turn_started` | `{"turn_id", "session_id", "prompt", "attachments": [{id,title,url}], "started_at"}` — **chat only**, first in every turn log, written by the registry so a late subscriber can draw the question it missed |
-| `turn_start` | `{"turn": 0}` (notes generation adds `"generation_id"`) |
+| `turn_start` | `{"turn": 0}` (notes generation adds `"generation_id"`; a bulk capture adds `"job_id"` — the client needs it to press Stop and may not have minted one) |
 | `thinking_delta` | `{"text": "..."}` |
 | `text_delta` | `{"text": "..."}` |
 | `tool_use_start` | `{"tool_use_id", "name", "source"}` (`source` ∈ `builtin`/`server`/`mcp`) |
@@ -213,7 +241,7 @@ disconnect. `app/agent/events.py` is the single event definition; each event's
 | `server_tool_result` | `{"tool_use_id", "name", "is_error", "results"}` |
 | `turn_end` | `{"turn", "stop_reason", "usage": {input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens}}` |
 | `error` | `{"type", "message", "category"}` + `"status"` **only** on an HTTP status error |
-| `done` | chat: `{"session_id", "message_ids": [...]}` · notes: `{"note_id"}` |
+| `done` | chat: `{"session_id", "message_ids": [...]}` · notes: `{"note_id"}` · bulk: `{"saved", "skipped", "duplicates", "entry_ids": [...]}` |
 
 `error.type` is a closed set: `refusal`, `rate_limit`, `turn_limit`, `max_tokens`,
 `api_error`, `connection`, `cancelled`. `category` is only ever set on `refusal` and is
@@ -232,6 +260,17 @@ next turn to finish anywhere — a log nobody asks about again is not free), and
 three events long and finishes inside the POST's own round trip, and answering 204 there
 meant the user saw their question and no notice at all. The log is closed, so the replay
 ends immediately.
+
+**The bulk capture is the third stream, and it reuses this vocabulary rather than
+widening it** (`app/api/kb_bulk.py`, `app/kb/bulk.py`). It runs on `pump_agent_events`
+like a generation, and one finished item is one `text_delta` whose text is JSON:
+`{item_id, entry_id, created, skipped_reason, possible_duplicate_of, done, total}`.
+`total` is the **de-duplicated** count and only the frames know it — the route
+de-duplicates `item_ids`, so a client that keys its bar on what it sent stops short.
+A cancel still ends on `done`, which is how the panel can say what was saved before the
+Stop; the one `error` with no `done` after it is a duplicate `job_id` losing the
+registration race. An empty or >`MAX_BULK_ITEMS` (200) selection is a 422 from the
+request model.
 
 **The two terminal contracts differ, deliberately.** A chat turn always ends on `done`
 (`TurnRegistry._finish` appends one if the runner ended without it). A
@@ -295,12 +334,55 @@ gone in. All three triggers take the service through `KbServiceDep`, including t
 inside the generation stream — `get_kb_service` does not *yield*, so there is nothing for
 the dependency teardown to close before the body is sent, and a trigger no override can
 reach is a trigger no test can drive. **Bulk starring does not capture**: 50 items is 50
-extractions, which is the Phase 2 SSE job (`kb:bulk:{id}`), not a request.
+extractions, which is the SSE job (`POST /api/kb/bulk`), not a request.
 
-The embedding call is likewise wrapped (`capture.py::_embed_pending_quietly`): it runs
+**The third trigger is a chat turn, and it is off.** When a turn reaches its own `done`
+without being stopped, crashed or ended by an `ev.Error`, `turns.py::_finish` offers it to
+`app/kb/findings.py::capture_turn_finding` — last, after the log is closed and the row is
+idled, so nothing the user is watching waits on it. It is kept only if
+`kb_capture_findings` (default **false**) is on and the answer **cited at least one
+source**, which means `services/notes.py::SourceCollector` and not a regex for `http`: a
+`fetch_article` that came back successfully, or a `web_search` result whose URL appears in
+the finished text. The entry is `kind='finding'`, `authorship='model'`,
+`review_status='unreviewed'`, `url` and `published_at` NULL, its text the question, the
+answer and the sources as Markdown, and its dedup key the `turn_message_id` (guarded by a
+`SELECT`, because `_find_duplicate` does not consult that column and the DB's partial
+unique index does). The authorship gate does the rest: `search_for_model` never returns it
+until a human reviews it, `search_for_user` shows it straight away (P2-17), and the
+`[AI finding, reviewed] ` prefix is applied at **read** time by
+`builtin.py::MODEL_TITLE_PREFIX`, never stored. A finding is **never auto-compiled** — no
+model prose summarising model prose, and no Anthropic call at the end of every chat turn —
+and it never flags a near-duplicate of its own (`defer_embedding`, and nothing flags
+afterwards): it quotes the article it cites, and a merge keeps the *older* entry.
+
+**A capture whose trigger is a single user action may compile it.** With
+`kb_compile_mode: auto` a star, a saved URL and a saved or generated note compile the
+entry they just created — after the commit and inside `guarded`, so a refusal, a spent
+budget or a missing key is an activity row and never a failed save. Only a *newly
+created* entry: a re-save that recognises an entry already held compiles nothing. The
+bulk job opts out (`auto_compile=False`), and a `KbService` with no `client_factory` —
+`searchable()`, and every hand-built one in the tests — cannot compile at all. The cost
+is that in `auto` mode those two requests **wait for the model** (P2-19); the only brake
+is the monthly budget.
+
+The embedding call is likewise wrapped (`capture.py::embed_pending_quietly`): it runs
 after the commit, so a provider outage leaves the chunks pending and writes an activity
 row rather than 500-ing a save that succeeded (spec §5). `embedded_at IS NULL` is the one
-definition of "pending" and what Re-index resumes from.
+definition of "pending", and it is what `POST /api/kb/embed-pending` — Settings →
+Knowledge → **Embed now** — resumes from: up to `EMBED_PENDING_LIMIT` (200) chunks per
+call, `{embedded, pending, tokens}` back, **409** with no Voyage key and **502** when
+Voyage refuses (the chunks it never reached stay pending). The client calls again while
+`pending > 0`. That limit bounds **chunks, not wall clock** — 200 chunks of long
+advisories is still several Voyage requests — and a full re-index is Phase 4.
+
+A **route that captures finishes its own DB work first.** `PATCH /items/{id}` and
+`PATCH /notes/{id}` build their response and then commit, because `session.refresh`
+reopens a read transaction that would otherwise span the embed. Note *generation*
+captures **after** the `done` frame (`app/api/notes.py`), for the same reason: the
+capture embeds and may compile, and the client must not wait on either — the generate
+dialog hands the note over on `done` and lets the stream finish in the background
+(`frontend/src/components/notes/generationPhase.ts`), so closing it past `done` must not
+abort the request.
 
 Capture order is fixed (spec §4.5): canonicalise the URL → dedup (feed item id / note id,
 else canonical URL, else content hash — the hash is the *fallback* for text with **no key
@@ -356,6 +438,129 @@ filter: clearing the box is not a mistake.
 re-fetches. Exactly one trailing slash is stripped (`/a//` → `/a/`) and the root keeps
 its own.
 
+### Which service you get
+
+`deps.py::get_kb_service` builds one per request through `kb.service.for_request`, which
+reads the Voyage key and `kb_embedding_model` **off the request's session** — so entering
+a key in Settings makes the very next search hybrid, with no restart and nothing cached.
+That read opens a transaction on a session the request holds to the end, so the
+dependency **commits it** before returning: otherwise every `/api/kb` route would break
+the rule capture's header states, worst of all `POST /kb/embed-pending`. `searchable()`
+is the synchronous, keyword-only fallback and exists for
+`BuiltinToolProvider.__post_init__`, which cannot await; anything with a session in hand
+must use `for_request`, or its caller silently gets keyword-only search and no compile.
+
+### Retrieval, Phase 2
+
+**Every filter a vec0 KNN can express lives inside the `MATCH`** (`store.py::knn`), never
+after it — narrowing k rows afterwards turns a 50-row answer into a 0-row one (S1). vec0's
+`WHERE` is a conjunction, so the two things that are not one are fanned out into several
+KNNs merged by distance: a multi-valued `kinds`/`chunk_kinds`, and the **authorship gate**,
+which is a disjunction — leg A `authorship != 'model'`, leg B `authorship = 'model' AND
+reviewed = 1`, and leg B is skipped entirely when the knowledge base holds no
+model-authored entry, which is the default. `since` becomes `published_day > day - 1`
+because vec0 has no `>=`.
+
+**The topic filter is the exception, and it is an adaptive `k`.** Topics are many-to-many
+and would over-shard vec0's partitioning, so `retrieval._vector_leg` widens instead: `k`
+starts at `DEFAULT_LEG_SIZE` (50), doubles while fewer than that many distinct entries
+survive the topic join, and stops at `TOPIC_K_CAP` (512). Running out of vectors is a
+complete answer; stopping at the cap is not, and `hybrid_search_outcome` returns
+`SearchOutcome(hits, topic_filter_truncated)` to say so — the sentence that signal is for
+is not wired to any UI yet (P2-14). `hybrid_search` is the thin wrapper that returns just
+the hits.
+
+**The recency prior is the last thing applied to the fused score.** With `kb_recency_boost`
+on (the default), an entry whose `COALESCE(published_at, captured_at)` is inside
+`RECENCY_WINDOW_DAYS` (90) has its fused score multiplied by `RECENCY_BOOST` (1.25) and the
+list is re-sorted: for security news recency is most of the relevance signal, not a
+tie-break. But it is a *prior* — RRF over two legs cannot exceed `2/(RRF_K+1)` ≈ 0.033, so
+a boosted hit stays ~30× below `ENTITY_SCORE` and an exact CVE match is never displaced.
+`retrieval.py` reads no settings (it has no session); the flag arrives as `recency_boost=`
+from `KbService.search_for_*`.
+
+**Every `since` goes through `store.py::naive_utc` first.** The API accepts
+`2026-01-01T00:00:00Z`, FastAPI parses it to an *aware* datetime, and the two legs would be
+wrong in different ways: the vector leg raises, the keyword leg silently drops the offset.
+
+**Reviewing an entry rewrites its vec0 metadata.** The six metadata columns are written
+once, at upsert, so `KbService.update_entry` calls `store.set_reviewed(entry_id, ...)`
+whenever `review_status` actually changes — otherwise a finding the user just approved
+stays invisible to the vector leg until something re-embeds it. A plain `UPDATE` on a vec0
+metadata column works in sqlite-vec 0.1.9. `authorship` never changes after capture, and a
+delete needs no sync: it drops the chunks and `kb_chunks_ad_vec` takes the vectors with
+them.
+
+### Near-duplicates
+
+A new entry is flagged from its **first body chunk's vector**: cosine ≥
+`kb_duplicate_threshold` (default **0.92**) **and** a character-trigram Dice similarity of
+the two titles ≥ `TITLE_TRIGRAM_MIN` (0.8). Both must hold; with no embedder the trigram
+leg runs alone over the newest `NEAR_DUPLICATE_TITLE_SCAN` (2 000) titles. `kb_chunk_vec`
+carries no `distance_metric=`, so vec0's distance is **L2** and the conversion is
+`cosine = 1 - d²/2` (`capture.py::cosine_from_distance`) — exact only for unit vectors,
+which is why every embedder L2-normalises (P2-20; assuming a cosine metric would have
+flagged nothing, silently). The entry is excluded from its own KNN with
+`SearchFilters.exclude_entry_id` — a 14-chunk advisory is otherwise 14 of its own nearest
+neighbours — while the separate `id < entry_id` rule says something else: the flag points
+backwards, at the copy that was already there. It only ever sets
+`kb_entries.possible_duplicate_of`; merging is a button, and
+`POST /entries/{id}/not-a-duplicate` clears the flag (idempotent, one activity row —
+P2-23). **Both numbers are uncalibrated** (P2-21): "The xz backdoor" vs "The xz backdoor,
+explained" scores 0.698 and does not flag, and with no Voyage key near-identical headlines
+over different stories do.
+
+### The bulk job (`app/kb/bulk.py`)
+
+Eight extractions at a time (`MAX_KB_EXTRACTIONS`) — the cap is about the *sites*, not this
+process. **One embed for the whole run, not one per article**: every capture runs with
+`defer_embedding=True` and the run embeds once at the end, scoped to the entries it created
+(up to `BULK_EMBED_LIMIT`), because `embed_pending` writes one `kb_activity` row per call
+and 200 of them for one click is a trail nobody can read. The near-duplicate pass comes
+after that embed, since it reads the vector the embed wrote. **A cancelled run leaves its
+chunks pending**: both are the last thing the job does and a Stop that first waited out a
+Voyage round trip is not a Stop. What was captured stays captured, and **Embed now** picks
+the rest up.
+
+### Compile (`app/kb/compile.py`, `app/kb/prompts.py`)
+
+Compile turns one entry's current snapshot into a summary plus topic/tag/entity
+suggestions, through `app/agent/oneshot.py::structured_call_result` — the only Anthropic
+call in the app that is not a chat turn. `prompts.py` holds the schema, the system text and
+the renderer; `tests/test_kb_compile.py` hashes the prompt against `COMPILE_PROMPT_VERSION`
+so the two cannot drift. **The schema carries no size keywords**: the structured-output
+subset rejects `maxItems`/`maxLength`, so `MAX_TAGS` (8), `MAX_ENTITIES` (24) ×
+`MAX_ENTITY_CHARS` (120) and `MAX_SUMMARY_CHARS` (6 000) are stated in the descriptions and
+**cut in code** (P2-22). A model may only propose `MODEL_ENTITY_KINDS` (`vendor`,
+`product`) — CVE ids come from the regex pass at capture time and the column has a CHECK.
+
+**Everything except an unknown entry is a 200** with `compiled: false` and a `reason_code`
+of `budget` / `refusal` / `parse` / `no_text` / `api_error`: compiling security content
+means a refusal is an ordinary outcome, never a 500 and never a 402. A refusal, an unusable
+answer and a `max_tokens` stop are **billed**, and are charged to the budget. The batch
+route **validates every id before compiling any** — one unknown id is a 404 with nothing
+spent — and `?estimate=1` prices the batch with `messages.count_tokens`, which generates
+nothing and bills nothing. Nothing holds a database transaction across the call: the
+request is built and the session closed, then the answer is written in a new one. The
+summary is stored as a `kind='summary'` chunk, which both search legs exclude by default
+(`chunk_kinds=('body',)`), so model-authored text is shown to the user and never handed
+back to a model as evidence.
+
+**The monthly budget** (`kb_compile_monthly_token_budget`, default 5 000 000) counts
+**compile tokens only, per calendar month in UTC**: `input_tokens` + both cache counters +
+`output_tokens`, summed from the `kb_activity` rows whose `action` is `compile` or
+`recompile`. Chat spend is per session and deliberately not part of it. A one-shot call
+sets no `cache_control`, so the cache counters are zero today — they are added anyway so
+that adding caching later cannot silently under-count. The check runs **before** the API
+call, so hitting the ceiling costs nothing and writes one `action='budget_hit'` row;
+capture keeps working, and a budget of **0 means "spend nothing"**, not "unlimited". The
+Voyage figure beside it comes from `action='embed'` rows, is **this application's own
+estimate** (`ceil(chars / 3.6)`, `voyage_estimated: true` on `GET /api/kb/budget`) and is
+never added to the Anthropic numbers. Because the budget is *derived* from the trail,
+`METERED_ACTIONS` (`compile`, `recompile`, `embed`) are **exempt from the
+`ACTIVITY_MAX_ROWS` prune** inside the window `month_usage` can still read — pruning is
+oldest-first, and the oldest rows of a month are exactly the spend already made.
+
 ## Cancellation (`app/agent/turns.py`, `app/api/tasks.py`)
 
 **An SSE disconnect does not stop billing** — and, for a chat turn, it does not stop the
@@ -365,8 +570,12 @@ turn either: leaving the stream is not a cancel. `POST /sessions/{id}/cancel` an
 `pump_agent_events` registers the consuming task under a namespaced key and cancels it
 on disconnect or on a cancel POST.
 
-`app/api/notes.py::generation_key(gid) -> "note:{gid}"` is the only key shape left —
-a chat turn is the `TurnRegistry`'s, not this module's. `register(key, task)` raises
+Two key shapes use the registry — `app/api/notes.py::generation_key(gid) -> "note:{gid}"`
+and `app/kb/bulk.py::bulk_key(job_id) -> "kb:bulk:{job_id}"`; a chat turn is the
+`TurnRegistry`'s, not this module's. The bulk job's `job_id` is a client-minted opaque
+handle, never a row: Stop has to be pressable before the first frame lands, so
+`POST /kb/bulk/cancel` takes the id the client sent (or the one `turn_start` echoed) and
+answers 200 with `cancelled=false` when nothing was running. `register(key, task)` raises
 `KeyError` if one is already running (a generation gets an `api_error` frame; a second
 chat turn is the `TurnRegistry`'s own **409**) ·
 `is_running` · `cancel -> bool` · `cancel_and_wait` (bounded by `CANCEL_WAIT_S = 10`,
@@ -425,6 +634,17 @@ without a second fetch path. The lifespan logs one WARNING at startup when
 that picked up the new code before the wheel was in the venv, and the row alone could not
 say so. The *article* path keeps its bare `HTTP 403`: it never claimed a retry happened.
 
+**Voyage is the one outbound call that is not `fetch_guarded`** — a fixed, app-owned
+endpoint with no redirects followed and no attacker-influenced host — so it carries its
+own budget instead: `CONNECT_TIMEOUT_S` (10 s) inside `DEFAULT_TIMEOUT_S` (120 s). A
+capture runs inside a request somebody is watching, and a provider that black-holes must
+not hold a click for the whole read budget. Batches are planned to 80 % of Voyage's
+documented per-request ceilings (texts *and* tokens, both rejected whole), and the token
+ceiling is **per model**: `embeddings.max_tokens_for` is the only place it is decided, and
+`capture.embed_pending` plans its commit groups with the same call, so one planned group
+is one HTTP request and a 429 resumes at a request boundary. `voyage-4-large`'s ceiling is
+*lower* than `voyage-4`'s; an unknown name gets the conservative number.
+
 Three more ingest invariants worth not re-litigating (`app/services/feeds.py`):
 
 - A feed that parses cleanly with **zero entries is `last_status="ok"`**, not an error.
@@ -444,18 +664,21 @@ Three more ingest invariants worth not re-litigating (`app/services/feeds.py`):
 vitest. One `test_<area>.py` per area, `fakes/` for client stand-ins, `fixtures/` for
 XML/HTML.
 
-One test is **opt-in**: `tests/test_kb_benchmark.py` builds 20 000 chunks and times
-the keyword leg. Run it with `KB_BENCHMARK=1 uv run pytest tests/test_kb_benchmark.py -s`
-and copy the printed line into the PR body and spec §9 — the numbers are the record
-of what FTS5 actually costs at the sizes this knowledge base reaches.
+Two tests are **opt-in**: `tests/test_kb_benchmark.py` builds 20 000 chunks and times the
+keyword leg and the KNN (unfiltered and with every metadata filter). Run them with
+`KB_BENCHMARK=1 uv run pytest tests/test_kb_benchmark.py -s` and copy the printed lines
+into the PR body and spec §9 — the numbers are the record of what FTS5 and a brute-force
+KNN actually cost at the sizes this knowledge base reaches.
 
 There is **no `tests/__init__.py`**, so pytest puts `tests/` on `sys.path`: helpers are
 imported either as `from fakes.anthropic import ...` or `from tests.feed_fixtures import ...`
 (the latter works because `pythonpath = ["."]`). Both spellings are in use.
 
-`conftest.py` fixtures: **`isolated_api_key_env`** (autouse) deletes
-`ANTHROPIC_API_KEY` so a developer's real key can never turn a "no key" test into a
-live call; **`offline_dns`** (autouse) stubs `socket.getaddrinfo` to a public address
+`conftest.py` fixtures: **`isolated_api_key_env`** (autouse) deletes `ANTHROPIC_API_KEY`
+**and `VOYAGE_API_KEY`** so a developer's real key can never turn a "no key" test into a
+live call — and the `app` fixture pins both `Settings` fields to `""`, because a key in
+the repo-root `.env` is loaded by pydantic-settings and would make `key_source` /
+`voyage_key_source` come back `env`; **`offline_dns`** (autouse) stubs `socket.getaddrinfo` to a public address
 so fixture hosts (`example.test`) pass the URL guard without a resolver; **`db_engine`**
 is a real temp-file SQLite DB per test (not `:memory:`, so WAL and the FK pragma behave
 as in production), initialised via `init_db`; then `session_factory`, `db_session`,
@@ -471,10 +694,14 @@ Fakes:
   `anthropic.types.beta.*` objects so shape drift is caught. Turn builders: `turn_text`,
   `turn_tool_use`, `turn_thinking_then_text`, `turn_thinking_then_tool_use`,
   `turn_refusal`, `turn_pause`, `turn_code_execution`, `turn_text_editor`,
-  `turn_text_with_usage`. Inject with
+  `turn_text_with_usage`, `turn_text_after_fallback` (text, a mid-output `fallback`
+  block, then the answering model's text — only the half **after** the boundary is the
+  answer, and `message.model` is the model that gave it). Inject with
   `app.dependency_overrides[get_chat_client_factory] = lambda: lambda _key: scripted`.
 - `tests/fakes/embedder.py` — `FakeEmbedder`, deterministic unit vectors from a
-  digest of the text. The knowledge base's tests never reach Voyage.
+  digest of the text; `fail_after_batch=n` makes the n+1-th `embed_documents` call raise,
+  which is how the partial-embed states are tested. The knowledge base's tests never reach
+  Voyage — `VoyageEmbedder` itself is driven through an `httpx2.MockTransport`.
 - `tests/fakes/mcp.py` — in-process `MCPServer` fixtures and target factories; see
   `app/mcp/CLAUDE.md`. `tests/feed_fixtures.py` —
   `routes_transport({url: Response|Exception|callable})` over `httpx2.MockTransport`,
@@ -543,7 +770,9 @@ drop-and-create so that a steady-state `init_db` still writes nothing.
 add the field to `SettingsRead`/`SettingsUpdate` in `app/schemas/settings.py`, read it in
 `app/api/settings.py::_read`, and surface it in `frontend/src/api/settings.ts` +
 `frontend/src/pages/Settings.tsx`. No migration needed — it is a row, not a column.
-If a *run* needs it, add it to `app/agent/providers.py::turn_settings` too.
+If a *run* needs it, add it to `app/agent/providers.py::turn_settings` too. A value from a
+closed set goes in `ALLOWED_VALUES` **and** is pinned against its `Literal` in
+`tests/test_settings_service.py`; a float reads through `get_float`.
 
 **...a new built-in tool.** Add the definition + handler to
 `app/agent/builtin.py::BuiltinToolProvider` and list it in `list_tools()` — see
