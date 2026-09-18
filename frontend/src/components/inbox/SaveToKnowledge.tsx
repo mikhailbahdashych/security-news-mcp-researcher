@@ -35,11 +35,17 @@ export interface SaveToKnowledgeProps {
  * ends on the terminal `done`, which says what is in the database *including
  * after a Cancel*. `bulkSave.ts` is the state machine and is tested on its own.
  *
- * Three things this must not get wrong, all of them silent:
+ * Two things this must not get wrong, both of them silent:
  * **the bar is keyed on the server's `total`**, because `item_ids` is
- * de-duplicated server-side; **the stream is never aborted once `done` has
- * arrived**, the lesson `components/notes/generationPhase.ts` records; and
- * **nothing sets state after the panel is gone**.
+ * de-duplicated server-side; and **the stream is never aborted once `done` has
+ * arrived**, the lesson `components/notes/generationPhase.ts` records.
+ *
+ * There is deliberately **no "am I still mounted" ref**. One was here and it
+ * killed the panel outright: a ref set `true` at its declaration is never set
+ * again, and StrictMode's mount→cleanup→mount runs the cleanup while the refs
+ * survive it, so the flag was `false` for the panel's whole life and no frame
+ * ever reached the screen. A `setState` after unmount has been a silent no-op
+ * since React 18; there is nothing to guard against.
  */
 export default function SaveToKnowledge({ itemIds, onClose }: SaveToKnowledgeProps) {
   const queryClient = useQueryClient()
@@ -49,11 +55,10 @@ export default function SaveToKnowledge({ itemIds, onClose }: SaveToKnowledgePro
   const [stopping, setStopping] = useState(false)
 
   // Refs, because the reader's closure outlives the render that made it: the
-  // frames arrive into this, and the two decisions afterwards (may I abort? may
-  // I still set state?) are read from it.
+  // frames arrive into this, and the one decision afterwards (may I abort?) is
+  // read from it.
   const latest = useRef<BulkState | null>(null)
   const abort = useRef<AbortController | null>(null)
-  const alive = useRef(true)
 
   /**
    * Stop is the **cancel alone**, and deliberately not an abort.
@@ -75,7 +80,6 @@ export default function SaveToKnowledge({ itemIds, onClose }: SaveToKnowledgePro
       // Leaving is different: there is no way back to this stream, so the reader
       // is released — and the run is cancelled, because a disconnected bulk job
       // is one nobody can see, stop or resume.
-      alive.current = false
       if (latest.current && !bulkDelivered(latest.current)) {
         void cancelBulkCapture(latest.current.jobId).catch(() => undefined)
         abort.current?.abort()
@@ -103,13 +107,11 @@ export default function SaveToKnowledge({ itemIds, onClose }: SaveToKnowledgePro
         onEvent: ({ event, data }) => {
           const next = bulkFrame(latest.current ?? startBulk(jobId), event, data)
           latest.current = next
-          if (alive.current) {
-            setState(next)
-          }
+          setState(next)
         },
       })
     } catch (error) {
-      if (alive.current && !(latest.current && bulkDelivered(latest.current))) {
+      if (!(latest.current && bulkDelivered(latest.current))) {
         setFailure(
           controller.signal.aborted
             ? 'Stopped. Everything saved before that is saved.'
