@@ -8,8 +8,8 @@ that passes here would also pass against the wire.
 
 from __future__ import annotations
 
+import ast
 import json
-import re
 from pathlib import Path
 
 import pytest
@@ -53,6 +53,24 @@ async def call(client, **overrides):
     return await structured_call(client, **kwargs)
 
 
+def _calls_the_messages_api(source: str) -> bool:
+    """Does this module *call* ``…messages.create(…)`` / ``…messages.stream(…)``?
+
+    Parsed rather than grepped: a comment or a docstring that names the rule is
+    not a breach of it, and a text search cannot tell the two apart. It still
+    misses ``getattr``/alias forms, which no amount of static reading catches —
+    what it has to catch is the plain call somebody writes without thinking.
+    """
+    return any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in {"create", "stream"}
+        and isinstance(node.func.value, ast.Attribute)
+        and node.func.value.attr == "messages"
+        for node in ast.walk(ast.parse(source))
+    )
+
+
 def test_only_the_runner_and_this_module_call_the_messages_api():
     """The rule this module's docstring states, enforced rather than remembered.
 
@@ -66,10 +84,18 @@ def test_only_the_runner_and_this_module_call_the_messages_api():
     callers = sorted(
         path.relative_to(app_dir).as_posix()
         for path in app_dir.rglob("*.py")
-        if re.search(r"messages\.(create|stream)\(", path.read_text(encoding="utf-8"))
+        if _calls_the_messages_api(path.read_text(encoding="utf-8"))
     )
 
     assert set(callers) - allowed == set()
+
+
+def test_the_messages_api_check_reads_code_and_not_prose():
+    """Both halves of the rule above, on source it is handed directly."""
+    assert _calls_the_messages_api("await client.beta.messages.stream(**kwargs)")
+    assert _calls_the_messages_api("client.messages.create(model=model)")
+    assert not _calls_the_messages_api("# Only the runner calls messages.create(...).")
+    assert not _calls_the_messages_api('"""Never call messages.stream() from here."""')
 
 
 async def test_a_structured_call_returns_the_parsed_object():

@@ -59,6 +59,12 @@ def max_tokens_for(model: str) -> int:
     """
     return MAX_TOKENS_BY_MODEL.get(model, MAX_TOKENS_PER_REQUEST)
 
+
+#: How much of a provider's own text any error message may carry. It reaches a
+#: log line and a ``kb_activity.detail`` row the Knowledge page renders, and the
+#: provider decides how long it is — so one line, this many characters.
+MAX_REASON_CHARS = 200
+
 #: Whole-request budget. Generous because a full batch is 256 000 tokens of text
 #: going out over one connection.
 DEFAULT_TIMEOUT_S = 120.0
@@ -246,14 +252,18 @@ class VoyageEmbedder:
         return vectors
 
     def _redact(self, message: str) -> str:
-        """Never pass on a message that quotes the key back at us.
+        """Never pass on a message that quotes the key back at us — nor more of
+        the provider's text than :data:`MAX_REASON_CHARS`.
 
         A provider that echoes the ``Authorization`` header into its own error
         body — or a proxy in front of one — would otherwise put the key into an
         exception, a log line and, through ``_embed_pending_quietly``, a row of
-        the activity trail the UI shows.
+        the activity trail the UI shows. The length cap lives here, in this
+        order, for the same three destinations: redacting *after* a cut could
+        leave half a key behind, and every error path goes through this method.
         """
-        return message.replace(self._api_key, "…") if self._api_key else message
+        safe = (message.replace(self._api_key, "…") if self._api_key else message).strip()
+        return safe.splitlines()[0][:MAX_REASON_CHARS] if safe else safe
 
 
 def _index_of(row: Any) -> int:
@@ -266,7 +276,8 @@ def _safe_reason(response: httpx2.Response) -> str:
 
     Voyage echoes nothing secret today, but the key travels in the header of the
     request that produced this body, so only the two documented message fields are
-    read and only the first line of either.
+    read. The caller passes what comes back through ``_redact``, which is where
+    the key is taken out and the length capped — one rule, one place.
     """
     reason = ""
     try:
@@ -276,8 +287,7 @@ def _safe_reason(response: httpx2.Response) -> str:
             reason = detail if isinstance(detail, str) else ""
     except ValueError:
         reason = ""
-    reason = reason.strip().splitlines()[0][:200] if reason.strip() else response.reason_phrase
-    return reason or "no reason given"
+    return reason.strip() or response.reason_phrase or "no reason given"
 
 
 async def build_embedder(session: AsyncSession, settings: Settings | None = None) -> Embedder:

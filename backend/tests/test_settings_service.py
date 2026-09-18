@@ -1,6 +1,7 @@
 """Key/value settings store and the API-key masking helper."""
 
 import logging
+import re
 from typing import get_args
 
 import pytest
@@ -301,9 +302,11 @@ def test_the_compile_prompt_is_generic_and_says_the_text_is_data():
     assert "instruction" in prompt.lower()
     assert prompt == prompt.strip()
     # The ground rule itself, not just the shape: nothing that would make the
-    # prompt about a particular employer, product or customer.
-    forbidden = ("employer", "company", "corporate", "organisation", "organization", "our ")
-    assert [word for word in forbidden if word in prompt.lower()] == []
+    # prompt about a particular employer, product or customer. Whole words —
+    # "our" is a substring of "your", "hour" and "four", and a prompt that said
+    # "your team" would have failed this with a baffling message.
+    forbidden = ("employer", "company", "corporate", "organisation", "organization", "our")
+    assert [word for word in forbidden if re.search(rf"\b{word}\b", prompt.lower())] == []
 
 
 def test_the_minimum_snapshot_default_matches_the_capture_constant():

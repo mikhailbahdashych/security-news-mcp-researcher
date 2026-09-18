@@ -23,6 +23,7 @@ from app.kb.chunking import estimate_tokens
 from app.kb.embeddings import (
     CONNECT_TIMEOUT_S,
     DEFAULT_TIMEOUT_S,
+    MAX_REASON_CHARS,
     MAX_TEXTS_PER_REQUEST,
     MAX_TOKENS_PER_REQUEST,
     Embedder,
@@ -259,6 +260,32 @@ async def test_an_unreadable_answer_is_redacted_too() -> None:
 
     assert KEY not in str(raised.value)
     assert KEY not in raised.value.message
+
+
+@pytest.mark.parametrize("readable", [True, False])
+async def test_provider_text_is_capped_before_it_reaches_the_trail(readable: bool) -> None:
+    """One line, ``MAX_REASON_CHARS`` of it — on every error path.
+
+    These messages become a log line and a ``kb_activity.detail`` row the
+    Knowledge page renders. The status path clipped; the unreadable-answer path
+    passed the exception's text — which is the provider's own data — through
+    whole.
+    """
+    flood = "\n".join("x" * 500 for _ in range(10))
+
+    def handle(request: httpx2.Request) -> httpx2.Response:
+        if readable:
+            return httpx2.Response(500, json={"detail": flood})
+        # `index` is parsed with `int()`: the flood lands inside the ValueError.
+        return httpx2.Response(200, json={"data": [{"index": flood, "embedding": [1.0]}]})
+
+    embedder = VoyageEmbedder(KEY, transport=httpx2.MockTransport(handle))
+
+    with pytest.raises(EmbeddingError) as raised:
+        await embedder.embed_documents(["a"])
+
+    assert len(raised.value.message) <= MAX_REASON_CHARS
+    assert "\n" not in raised.value.message
 
 
 async def test_a_short_answer_is_an_error_rather_than_a_silent_mismatch() -> None:
