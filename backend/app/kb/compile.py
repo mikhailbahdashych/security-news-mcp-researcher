@@ -612,12 +612,18 @@ async def _skip(
     model: str | None = None,
     detail: str | None = None,
 ) -> CompileResult:
-    """Record why nothing was compiled, and answer with it."""
+    """Record why nothing was compiled, and answer with it.
+
+    ``kb_activity.entry_id`` is a foreign key, so a row about an entry that does
+    not exist — compile called on an unknown id, or one purged mid-call — is
+    written without the reference rather than raising on the insert.
+    """
     async with session_factory() as session:
+        known = await session.get(KbEntry, entry_id) is not None
         await capture_module.log_activity(
             session,
             action,
-            entry_id=entry_id,
+            entry_id=entry_id if known else None,
             source=source,
             model=model,
             detail=detail or reason,
