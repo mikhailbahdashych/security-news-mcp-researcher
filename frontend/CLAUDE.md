@@ -663,7 +663,7 @@ hand-rolled `.prose-chat` block in `src/index.css`, deliberately instead of
 
 ## Tests
 
-`npx vitest run` — **15 files, 238 tests**, `environment: 'node'` with
+`npx vitest run` — **15 files, 259 tests**, `environment: 'node'` with
 **`TZ` pinned to `UTC`** (`test.env` in `vite.config.ts`: the backend sends naive UTC and
 the app renders the viewer's *local* day of it, so a test that asserts an instant would
 otherwise assert the machine's offset, and UTC+13/+14 roll a midday stamp over to the next
