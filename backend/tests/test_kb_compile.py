@@ -557,6 +557,26 @@ async def test_the_batch_endpoint_compiles_each_entry_and_reports_per_entry_outc
     assert results[1]["reason_code"] == "refusal"
 
 
+async def test_the_batch_route_validates_every_id_before_it_compiles_anything(
+    api, client, kb, entry, session_factory
+):
+    """One unknown id 404s the batch, and nothing before it was billed.
+
+    The id is checked *last* on purpose: a client that pasted a stale selection
+    must not pay for the entries ahead of the bad one and then be told the
+    request failed, with no body to say what it already spent.
+    """
+    await with_key(session_factory)
+    fake = scripted(api, ScriptedAnthropic([turn_text(answer()), turn_text(answer())]))
+
+    response = await client.post("/api/kb/compile", json={"entry_ids": [entry, entry, 4004]})
+
+    assert response.status_code == 404
+    assert fake.calls == []
+    assert (await rows(session_factory, KbEntry, KbEntry.id == entry))[0].compiled_at is None
+    assert await activity(session_factory, "compile") == []
+
+
 async def test_the_estimate_endpoint_makes_no_model_call_and_reports_the_remaining_budget(
     api, client, kb, entry, session_factory
 ):

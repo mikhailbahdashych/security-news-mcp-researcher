@@ -107,9 +107,14 @@ async def compile_batch(
     if estimate:
         return await _estimate(payload, kb, client_factory, app_settings)
 
-    results = []
+    # **Every id first, then the first token.** Interleaving the two spends real
+    # money on entries 1…N−1 and then answers 404 with no body, so the client
+    # cannot tell what it already paid for — and the obvious retry pays again.
     for entry_id in payload.entry_ids:
         await _load(kb, entry_id)
+
+    results = []
+    for entry_id in payload.entry_ids:
         results.append(
             await _response(
                 kb,
