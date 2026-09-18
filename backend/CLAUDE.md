@@ -344,6 +344,13 @@ narrows to *reviewed* and has no other half; nothing deleted is searchable at al
 trash is a list and a search of it is empty by definition), so they narrow the hits
 afterwards and a page of hits can come back shorter than `limit`.
 
+`entity` is parsed **before** that branch, by `api/kb.py::_entity`, and text it cannot
+read is a **422** on both branches and on `POST /search` — never a silently wider answer.
+`parse_entity` returns `None` for anything without a `kind:value`, and `None` is how the
+store spells *no filter*, so `entity=openssl` used to answer 200 with the whole list while
+the box still showed the word meant to narrow it. An **empty** `entity` is still no
+filter: clearing the box is not a mistake.
+
 `app/kb/urls.py::canonical_url` **filters** the query string, it never re-encodes it:
 `?b` is not `?b=` and `%20` is not `+`, and the canonical form is what "Refresh snapshot"
 re-fetches. Exactly one trailing slash is stripped (`/a//` → `/a/`) and the root keeps

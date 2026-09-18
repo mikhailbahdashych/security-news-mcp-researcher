@@ -207,6 +207,51 @@ async def test_the_entries_list_filters_by_kind_review_since_topic_and_entity(
     assert await ids(since=(utcnow() - timedelta(days=7)).isoformat()) == [first.entry_id]
 
 
+@pytest.mark.parametrize(
+    "params",
+    [
+        pytest.param({"entity": "openssl"}, id="list"),
+        pytest.param({"entity": "openssl", "q": "liblzma"}, id="hits"),
+        pytest.param({"entity": "cve:"}, id="no value"),
+        pytest.param({"entity": ":CVE-2024-3094"}, id="no kind"),
+    ],
+)
+async def test_a_malformed_entity_filter_is_refused_on_both_branches(client, kb, params):
+    """An unparseable filter must not quietly become *no* filter.
+
+    ``parse_entity`` answers ``None`` for anything without a ``kind:value``, and
+    ``None`` means "no filter", so a typo used to answer 200 with the whole
+    unfiltered list while the box still showed the text meant to narrow it —
+    the one thing ``store._sql_filters`` promises not to do.
+    """
+    await _seed(kb, title="The xz backdoor", url="https://example.test/xz", text=BODY)
+
+    response = await client.get("/api/kb/entries", params=params)
+
+    assert response.status_code == 422, response.text
+    assert "kind:value" in response.json()["detail"]
+
+
+async def test_a_malformed_entity_filter_is_refused_by_the_search_route(client, kb):
+    await _seed(kb, title="The xz backdoor", url="https://example.test/xz", text=BODY)
+
+    response = await client.post("/api/kb/search", json={"q": "liblzma", "entity": "openssl"})
+
+    assert response.status_code == 422, response.text
+    assert "kind:value" in response.json()["detail"]
+
+
+async def test_an_empty_entity_filter_is_no_filter_rather_than_a_refusal(client, kb):
+    """Clearing the box is not a mistake — only text that cannot be parsed is."""
+    saved = await _seed(kb, title="The xz backdoor", url="https://example.test/xz", text=BODY)
+
+    listed = await client.get("/api/kb/entries", params={"entity": "  "})
+    searched = await client.post("/api/kb/search", json={"q": "liblzma", "entity": ""})
+
+    assert [entry["id"] for entry in listed.json()["entries"]] == [saved.entry_id]
+    assert [hit["entry"]["id"] for hit in searched.json()["hits"]] == [saved.entry_id]
+
+
 async def test_a_query_string_returns_hits_rather_than_entries(client, kb):
     saved = await _seed(kb, title="The xz backdoor", url="https://example.test/xz", text=BODY)
 

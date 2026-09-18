@@ -482,6 +482,24 @@ export function entityFilter(raw: string): string | null {
   return `${kind.trim().toLowerCase()}:${value}`
 }
 
+/**
+ * What to say under the entity box when its text is not a filter.
+ *
+ * `entityFilter` declining to send is the right call — an unqualified word would
+ * reach `parse_entity` as *no filter* and widen the search — but on its own it
+ * is silent: the box shows the text, the list shows everything, and nothing says
+ * the two are unrelated. (The API refuses the same text with a 422 now, which is
+ * what this box exists to keep the user from ever seeing.)
+ *
+ * `null` while the box is empty: a hint over an untouched field is noise.
+ */
+export function entityHint(raw: string): string | null {
+  if (!raw.trim() || entityFilter(raw) !== null) {
+    return null
+  }
+  return 'Needs kind:value — for example cve:CVE-2026-1234'
+}
+
 /** `since` for "the last N days", as the naive-UTC string the API expects. */
 export function sinceDaysAgo(days: number, now: Date = new Date()): string {
   const at = new Date(now.getTime() - days * 24 * 60 * 60 * 1000)

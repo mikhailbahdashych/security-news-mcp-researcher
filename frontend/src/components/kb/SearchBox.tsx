@@ -3,6 +3,9 @@ import Input from '../ui/Input'
 import Select from '../ui/Select'
 import { cx } from '../ui/classes'
 
+/** Ties the entity box to the line explaining why its text is not a filter. */
+const ENTITY_HINT_ID = 'kb-entity-hint'
+
 /** The date filter, as the page holds it: a number of days, or everything. */
 const SINCE_OPTIONS = [
   { value: 0, label: 'Any date' },
@@ -21,6 +24,9 @@ export interface SearchBoxProps {
   /** The entity box's raw text; `entityFilter` qualifies it before it is sent. */
   entity: string
   onEntity: (entity: string) => void
+  /** `entityHint` over the *debounced* text, or `null` — the page owns the
+   *  debounce, so the hint does not flicker through every half-typed prefix. */
+  entityHint: string | null
   /** Topics with their entry counts. Empty until something has been compiled. */
   topics: KbTopic[]
   topicId: number | null
@@ -44,6 +50,7 @@ export default function SearchBox({
   onSinceDays,
   entity,
   onEntity,
+  entityHint,
   topics,
   topicId,
   onTopic,
@@ -91,16 +98,25 @@ export default function SearchBox({
             takes `kind:value`, and a bare CVE id is qualified for you — that is
             the one form people paste. An unqualified word is *no* filter to the
             API, so `entityFilter` refuses to send one rather than silently
-            widening the search. */}
+            widening the search — and says so underneath, because a filter that
+            is neither applied nor complained about is the worst of the three. */}
         <Input
           type="search"
           aria-label="Filter by entity"
           value={entity}
           placeholder="cve:CVE-2026-1234"
           onChange={(event) => onEntity(event.target.value)}
+          aria-invalid={entityHint !== null}
+          aria-describedby={entityHint ? ENTITY_HINT_ID : undefined}
           className="max-w-[190px]"
         />
       </div>
+
+      {entityHint ? (
+        <p id={ENTITY_HINT_ID} className="text-[11px] text-amber">
+          {entityHint}
+        </p>
+      ) : null}
 
       {topics.length > 0 ? (
         <div className="flex flex-wrap items-center gap-1.5">

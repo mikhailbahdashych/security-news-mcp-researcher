@@ -9,6 +9,7 @@ import {
   KB_SEARCH_LIMIT,
   createEntry,
   entityFilter,
+  entityHint,
   kbEntriesKey,
   kbEntryLink,
   kbQueryKey,
@@ -214,6 +215,9 @@ function KnowledgeTimeline({ embedded, onOpen, list, onList }: TimelineProps) {
         onSinceDays={(value) => edit('sinceDays', value)}
         entity={entity}
         onEntity={(value) => edit('entity', value)}
+        // Over the debounced text, not the raw box: the hint would otherwise
+        // flash through every prefix of a value being typed.
+        entityHint={entityHint(debouncedEntity)}
         topics={topics.data ?? []}
         topicId={topicId}
         onTopic={(value) => edit('topicId', value)}

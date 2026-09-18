@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   cveChips,
   entityFilter,
+  entityHint,
   entryTimestamp,
   groupEntriesByDay,
   hitSnippet,
@@ -241,6 +242,24 @@ describe('entityFilter', () => {
     expect(entityFilter('acme')).toBeNull()
     expect(entityFilter('cve:')).toBeNull()
     expect(entityFilter(':CVE-2026-60004')).toBeNull()
+  })
+})
+
+describe('entityHint', () => {
+  it('says nothing about a box that is empty or already a filter', () => {
+    expect(entityHint('')).toBeNull()
+    expect(entityHint('   ')).toBeNull()
+    expect(entityHint('cve:CVE-2026-60004')).toBeNull()
+    expect(entityHint('CVE-2026-60004')).toBeNull()
+  })
+
+  it('names the form when the text is not one', () => {
+    // Declining to send is right, but silent: the box keeps the text, the list
+    // shows everything, and nothing says the two have nothing to do with each
+    // other.
+    expect(entityHint('openssl')).toBe('Needs kind:value — for example cve:CVE-2026-1234')
+    expect(entityHint('cve:')).toBe('Needs kind:value — for example cve:CVE-2026-1234')
+    expect(entityHint(':CVE-2026-60004')).toBe('Needs kind:value — for example cve:CVE-2026-1234')
   })
 })
 

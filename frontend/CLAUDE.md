@@ -582,7 +582,10 @@ which leg answered.
   `entityFilter` is what turns what was typed into that: the API reads a value with no
   `kind:` as *no filter at all*, so an unqualified word is refused rather than silently
   widening the search, and a bare CVE id is qualified for you because that is the form
-  people paste.
+  people paste. Refusing to send is only half of it: `entityHint` — over the **debounced**
+  text, so it does not flash through every prefix — draws the line under the box that says
+  why nothing narrowed. The API now answers the same text with a 422, which is exactly
+  what this box exists to keep the user from meeting.
 - **`next_cursor` belongs to the list branch alone** — the backend drops it with the
   absent leg when the answer is a search, so `listEntries` normalises it back to `null`.
 - **The timeline dates rows on `published_at ?? captured_at`** (`entryTimestamp`),
@@ -675,7 +678,7 @@ here, which is the point: the caller measures, the function decides),
 `lib/highlight.test.ts` (`splitOnQuery`, `splitOnTerms`),
 `api/kb.test.ts` (`kbEntryLink`, `parseEntryId`, `entryTimestamp`, the day grouping,
 `matchMarker`, `hitSnippet`, `cveChips`, `sourceLabel`, `kindLabel`, `sinceDaysAgo`,
-`entityFilter`, `vecVersionLabel`, `refreshMessage`/`refreshFailed`),
+`entityFilter`/`entityHint`, `vecVersionLabel`, `refreshMessage`/`refreshFailed`),
 `components/kb/autosave.test.ts` (`autosaveDecision`, `autosaveLabel`, `flushPlan`),
 `components/notes/excerpt.test.ts` and `lib/ids.test.ts`.
 

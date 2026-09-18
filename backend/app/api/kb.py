@@ -83,6 +83,32 @@ async def _load(kb: KbService, entry_id: int) -> KbEntry:
     return entry
 
 
+#: The one sentence every route says about a bad ``entity``. One string, because
+#: three copies of a form description drift and the user meets whichever route
+#: they happened to hit.
+ENTITY_FORM = 'entity must be "kind:value" — for example "cve:CVE-2026-1234"'
+
+
+def _entity(raw: str | None) -> tuple[str, str] | None:
+    """``"cve:CVE-2024-3094"`` → ``("cve", "CVE-2024-3094")``, or a **422**.
+
+    ``parse_entity`` answers ``None`` for anything it cannot parse, and ``None``
+    means *no filter* — so a typo used to hand back the whole unfiltered list
+    with the filter box still showing the text that was meant to narrow it. That
+    is the one thing ``store._sql_filters`` promises in its own docstring not to
+    do ("a filter the user set on the Knowledge page must not fall away"), and
+    the chat tool already refuses it; refusing here is what makes the two agree.
+
+    Absent and empty are still "no filter": clearing the box is not a mistake.
+    """
+    if raw is None or not raw.strip():
+        return None
+    parsed = parse_entity(raw)
+    if parsed is None:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, detail=ENTITY_FORM)
+    return parsed
+
+
 # ----------------------------------------------------------------- entries
 
 
@@ -151,6 +177,10 @@ async def list_entries(
     ``POST /search`` already enforces: a score-ordered list has no second page, so
     asking for two hundred hits is asking for a slower query, not for more answers.
     """
+    # Before the branch, so the answer to a malformed filter is the same one on
+    # both of them: a filter that cannot be parsed is a 422, never silence.
+    parsed_entity = _entity(entity)
+
     if q and q.strip():
         if deleted:
             # A soft delete drops the chunks, and with them the FTS and vector
@@ -163,7 +193,7 @@ async def list_entries(
             q.strip(),
             topic_ids=(topic_id,) if topic_id is not None else None,
             kinds=(kind,) if kind else None,
-            entity=parse_entity(entity),
+            entity=parsed_entity,
             since=since,
             reviewed_only=review == "reviewed",
             limit=min(limit, MAX_SEARCH_LIMIT),
@@ -182,7 +212,7 @@ async def list_entries(
         page = await kb.list_entries(
             kind=kind,
             topic_id=topic_id,
-            entity=parse_entity(entity),
+            entity=parsed_entity,
             since=since,
             review=review,
             deleted=deleted,
@@ -310,7 +340,7 @@ async def search(payload: SearchRequest, kb: KbServiceDep) -> SearchResponse:
         payload.q,
         topic_ids=tuple(payload.topic_ids) if payload.topic_ids else None,
         kinds=tuple(payload.kinds) if payload.kinds else None,
-        entity=parse_entity(payload.entity),
+        entity=_entity(payload.entity),
         since=payload.since,
         reviewed_only=bool(payload.reviewed_only),
         limit=payload.limit or DEFAULT_SEARCH_LIMIT,
