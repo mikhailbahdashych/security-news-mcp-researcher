@@ -1263,6 +1263,41 @@ async def test_the_article_fetch_holds_no_database_connection(
     assert checked_out == [baseline]
 
 
+async def test_an_item_deleted_while_its_article_is_fetched_is_a_lookup_error(
+    session_factory, db_session
+):
+    """The fetch happens between two short transactions, and the row can go in between.
+
+    ``extract_item`` used to raise ``LookupError`` for this; fetching outside the
+    session must not turn it into an ``AttributeError`` on ``None`` — a 500 on
+    ``POST /api/kb/entries`` and an unreadable ``skip`` row on the star path.
+    """
+    feed = Feed(url="https://example.test/feed.xml", title="Example")
+    db_session.add(feed)
+    await db_session.flush()
+    item = FeedItem(
+        feed_id=feed.id,
+        guid="vanishes",
+        title="An advisory that is deleted mid-fetch",
+        url="https://example.test/article",
+    )
+    db_session.add(item)
+    await db_session.commit()
+    item_id = item.id
+    page = fixture_text("article.html")
+
+    async def handle(request: httpx2.Request) -> httpx2.Response:
+        async with session_factory() as session:
+            await session.delete(await session.get(FeedItem, item_id))
+            await session.commit()
+        return httpx2.Response(200, text=page)
+
+    service = KbService(session_factory=session_factory, transport=httpx2.MockTransport(handle))
+
+    with pytest.raises(LookupError):
+        await service.capture_feed_item(item_id)
+
+
 async def test_a_long_entrys_own_chunks_do_not_crowd_the_duplicate_out_of_the_knn(
     session_factory, db_session
 ):

@@ -309,6 +309,10 @@ class KbService:
         # ``expire_on_commit=True`` away from a ``DetachedInstanceError``.
         async with self.session_factory() as session:
             item = await session.get(FeedItem, item_id)
+            if item is None:
+                # Deleted while its article was being fetched, between the two
+                # short transactions above.
+                raise LookupError(f"No feed item with id {item_id}")
             source_name = await session.scalar(select(Feed.title).where(Feed.id == item.feed_id))
             url, title = item.url, item.title
             published_at = item.published_at
