@@ -400,6 +400,49 @@ async def test_a_refusal_leaves_the_entry_uncompiled_with_the_reason_in_the_trai
     assert "refused (cyber)" in detail
 
 
+async def test_a_refusal_a_parse_failure_and_a_max_tokens_stop_are_all_billed(
+    kb, entry, session_factory
+):
+    """Three outcomes that cost real money, and all three must reach the budget.
+
+    A refusal is an HTTP 200 whose input tokens Anthropic bills; a ``max_tokens``
+    stop bills the whole output as well. Recording them as zero is what lets a
+    feed of content the model declines spend forever against a budget that never
+    moves — the one spend control the user has, defeated by the app's most
+    expected failure mode.
+    """
+    await with_key(session_factory)
+    client = ScriptedAnthropic(
+        [
+            turn_refusal(),
+            turn_text('{"summary_md": "unterminated'),
+            turn_text(answer(), "max_tokens"),
+        ]
+    )
+
+    for _ in range(3):
+        await compile_module.compile_entry(session_factory, factory(client), entry)
+
+    # The fake bills 11 in and 7 out per turn, and none of the three compiled.
+    usage = await compile_module.month_usage(session_factory)
+    assert (usage["anthropic_input"], usage["anthropic_output"]) == (33, 21)
+    trail = await activity(session_factory, "compile")
+    assert [(row.input_tokens, row.output_tokens) for row in trail] == [(11, 7)] * 3
+
+
+async def test_a_transport_error_bills_nothing(kb, entry, session_factory):
+    """The other half of the rule: no response, no tokens, no budget movement."""
+    from tests.fakes.anthropic import api_error
+
+    await with_key(session_factory)
+    client = ScriptedAnthropic(error=api_error(429, "slow down"))
+
+    await compile_module.compile_entry(session_factory, factory(client), entry)
+
+    usage = await compile_module.month_usage(session_factory)
+    assert (usage["anthropic_input"], usage["anthropic_output"]) == (0, 0)
+
+
 async def test_malformed_json_is_a_reason_not_a_five_hundred(kb, entry, session_factory):
     await with_key(session_factory)
     client = ScriptedAnthropic([turn_text('{"summary_md": "unterminated')])
@@ -773,6 +816,40 @@ async def test_auto_compile_checks_the_budget_before_it_calls(session_factory):
 
     assert result.created is True
     assert scripted_client.calls == []
+    assert len(await activity(session_factory, "budget_hit")) == 1
+
+
+async def test_auto_mode_over_content_the_model_refuses_still_runs_out_of_budget(session_factory):
+    """The failure mode this app is most likely to meet, metered.
+
+    Exploit write-ups trip the cyber safeguards, every refusal is billed, and in
+    ``auto`` mode every star fires one. If refusals recorded nothing, the budget
+    would read zero after ten thousand of them.
+    """
+    settings = {
+        "kb_compile_mode": "auto",
+        "kb_min_snapshot_chars": "1",
+        "kb_compile_monthly_token_budget": "100000",
+    }
+    await with_key(session_factory, **settings)
+    scripted_client = ScriptedAnthropic([turn_refusal(), turn_refusal()])
+    kb = auto_kb(session_factory, scripted_client)
+
+    await kb.capture_feed_item(await seed_feed_item(session_factory, guid="refused-1"))
+
+    spent = await compile_module.month_usage(session_factory)
+    assert spent["anthropic_input"] > 0
+
+    # Leave one token of headroom: less than any call's estimate, so the next
+    # capture cannot afford one. Without the refusal's own spend on record the
+    # budget would still be untouched and the call would go out.
+    total = spent["anthropic_input"] + spent["anthropic_output"]
+    await with_key(
+        session_factory, **{**settings, "kb_compile_monthly_token_budget": str(total + 1)}
+    )
+    await kb.capture_feed_item(await seed_feed_item(session_factory, guid="refused-2"))
+
+    assert len(scripted_client.calls) == 1
     assert len(await activity(session_factory, "budget_hit")) == 1
 
 

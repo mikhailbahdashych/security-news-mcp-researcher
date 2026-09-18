@@ -328,6 +328,14 @@ anything else → `OneshotError`; a body that is not a JSON *object* →
 - Callers catch **two** families: `OneshotError` and `anthropic.APIStatusError`.
   The SDK's exceptions are deliberately not wrapped, so a 429 is still a 429 to
   whoever decides whether to retry.
+- **A failed structured call is still a billed one.** A refusal and a
+  `max_tokens` stop are HTTP 200s Anthropic charges for, so every `OneshotError`
+  — `RefusalError` and `StructuredParseError` included — carries the turn's
+  `usage` dict in the same shape `StructuredResult.usage` has; it is `None` only
+  when the SDK raised before any response. `kb/compile.py` writes those tokens
+  onto the skip's `kb_activity` row, which is what the monthly compile budget is
+  summed from, so dropping them would leave the budget reading zero through the
+  most expected failure mode this app has.
 
 ## Turn ownership (`turns.py`, `turnlog.py`)
 

@@ -351,6 +351,8 @@ async def compile_entry(
             schema=COMPILE_SCHEMA,
         )
     except RefusalError as exc:
+        # Billed like any other 200: the tokens go in the trail so the month's
+        # budget moves, or a feed the model always declines spends forever.
         return await _skip(
             session_factory,
             entry_id,
@@ -360,10 +362,12 @@ async def compile_entry(
             source=source,
             model=plan.model,
             detail=f"refused ({exc.category or 'no category'}): {exc}",
+            usage=exc.usage,
         )
     except OneshotError as exc:
         # Both the unparseable answer and the one that ran out of output tokens:
-        # either way nothing usable came back, and neither is a 500.
+        # either way nothing usable came back, and neither is a 500. The
+        # max_tokens one billed the whole output budget, so it is charged too.
         return await _skip(
             session_factory,
             entry_id,
@@ -373,6 +377,7 @@ async def compile_entry(
             source=source,
             model=plan.model,
             detail=f"unusable answer: {exc}",
+            usage=exc.usage,
         )
     except (anthropic.APIStatusError, anthropic.APIConnectionError) as exc:
         # The SDK's exceptions are deliberately not wrapped by ``oneshot``, so
@@ -417,6 +422,24 @@ async def compile_if_auto(
 # ------------------------------------------------------------------ writing
 
 
+def _usage_tokens(usage: dict[str, Any] | None) -> tuple[int, int]:
+    """One turn's ``(input, output)`` as the budget counts them.
+
+    The input figure is **all three input counters** summed
+    (``input_tokens`` + ``cache_creation_input_tokens`` + ``cache_read_input_tokens``),
+    which is how :func:`month_usage` reads them back. ``structured_call`` sets no
+    ``cache_control``, so the two cache figures are zero today — adding them
+    anyway is what keeps the budget honest if that ever changes.
+    """
+    usage = usage or {}
+    return (
+        int(usage.get("input_tokens") or 0)
+        + int(usage.get("cache_creation_input_tokens") or 0)
+        + int(usage.get("cache_read_input_tokens") or 0),
+        int(usage.get("output_tokens") or 0),
+    )
+
+
 async def _store(
     session_factory: async_sessionmaker[AsyncSession],
     plan: _Plan,
@@ -428,16 +451,7 @@ async def _store(
 ) -> CompileResult:
     """Apply one answer: the summary, its chunk, the entities and the suggestions."""
     data = result.data if isinstance(result.data, dict) else {}
-    usage = result.usage or {}
-    # All three input counters. ``structured_call`` sets no ``cache_control``, so
-    # the two cache figures are zero today — adding them anyway is what keeps the
-    # budget honest if that ever changes.
-    input_tokens = (
-        int(usage.get("input_tokens") or 0)
-        + int(usage.get("cache_creation_input_tokens") or 0)
-        + int(usage.get("cache_read_input_tokens") or 0)
-    )
-    output_tokens = int(usage.get("output_tokens") or 0)
+    input_tokens, output_tokens = _usage_tokens(result.usage)
 
     summary = str(data.get("summary_md") or "").strip()
     wanted_topic_ids = _ints(data.get("topic_ids"))
@@ -611,13 +625,20 @@ async def _skip(
     source: str,
     model: str | None = None,
     detail: str | None = None,
+    usage: dict[str, Any] | None = None,
 ) -> CompileResult:
     """Record why nothing was compiled, and answer with it.
 
     ``kb_activity.entry_id`` is a foreign key, so a row about an entry that does
     not exist — compile called on an unknown id, or one purged mid-call — is
     written without the reference rather than raising on the insert.
+
+    *usage* is the tokens the attempt **cost**, and a failure is not free: a
+    refusal is an HTTP 200 Anthropic bills and a ``max_tokens`` stop bills the
+    output as well. It is ``None`` only where nothing was spent — a spent budget,
+    a missing key, an entry with no text, a connection that never answered.
     """
+    input_tokens, output_tokens = _usage_tokens(usage)
     async with session_factory() as session:
         known = await session.get(KbEntry, entry_id) is not None
         await capture_module.log_activity(
@@ -626,6 +647,8 @@ async def _skip(
             entry_id=entry_id if known else None,
             source=source,
             model=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
             detail=detail or reason,
         )
         await session.commit()

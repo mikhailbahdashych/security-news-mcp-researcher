@@ -20,6 +20,9 @@ Four rules that are easy to get wrong:
 * **Read ``stop_reason`` before ``content``.** A refusal is an HTTP 200 whose
   ``content`` can be ``[]``, and this app compiles *security* content, so a
   refusal is a first-class state rather than an edge case.
+* **A failed call is still a billed call.** A refusal and a ``max_tokens`` stop
+  are HTTP 200s Anthropic charges for, so every :class:`OneshotError` carries the
+  turn's ``usage``; only an exception raised before a response has ``None``.
 * **Only the text after the last ``fallback`` block is the answer.** The same
   safeguards that produce a refusal also produce a mid-output model switch, and
   the abandoned model's half-written JSON stays in ``content`` ahead of the
@@ -61,7 +64,19 @@ PARSE_PREVIEW_CHARS = 200
 
 
 class OneshotError(Exception):
-    """A structured call that did not come back with an object."""
+    """A structured call that did not come back with an object.
+
+    ``usage`` carries the turn's token counters whenever a response existed. A
+    refusal and a ``max_tokens`` stop are ordinary HTTP 200s that Anthropic
+    **bills** — the second one for the whole output budget — so an error that
+    dropped its usage would keep a spend meter reading zero through the app's
+    most expected failure mode. ``None`` means the SDK raised before any
+    response, and then there is genuinely nothing to bill.
+    """
+
+    def __init__(self, message: str, *, usage: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.usage = usage
 
 
 class RefusalError(OneshotError):
@@ -73,8 +88,9 @@ class RefusalError(OneshotError):
         *,
         category: str | None = None,
         explanation: str | None = None,
+        usage: dict[str, Any] | None = None,
     ) -> None:
-        super().__init__(message)
+        super().__init__(message, usage=usage)
         self.category = category
         self.explanation = explanation
 
@@ -122,6 +138,9 @@ async def structured_call_result(
         final = await stream.get_final_message()
 
     stop_reason = getattr(final, "stop_reason", None)
+    # Read before any branch: every outcome below this line is a billed 200, and
+    # the caller's budget has to see the tokens whichever way the turn went.
+    usage = _usage_dict(getattr(final, "usage", None))
 
     if stop_reason == "refusal":
         # stop_details exists only here, and content is not touched at all:
@@ -133,13 +152,17 @@ async def structured_call_result(
             explanation or f"The model declined this request (category: {category}).",
             category=category,
             explanation=explanation,
+            usage=usage,
         )
     if stop_reason == "max_tokens":
-        raise OneshotError(f"The answer hit the {MAX_TOKENS}-token output limit before finishing.")
+        raise OneshotError(
+            f"The answer hit the {MAX_TOKENS}-token output limit before finishing.",
+            usage=usage,
+        )
     if stop_reason != "end_turn":
         # A tool-free call has nothing to resume and nothing to dispatch, so
         # pause_turn and tool_use are as unexpected as an unknown reason.
-        raise OneshotError(f"Unexpected stop_reason: {stop_reason!r}")
+        raise OneshotError(f"Unexpected stop_reason: {stop_reason!r}", usage=usage)
 
     # Only the blocks after the last ``fallback`` are the answer. A turn can
     # switch models mid-output — the whole point of the beta on a module that
@@ -156,16 +179,16 @@ async def structured_call_result(
         data = json.loads(text)
     except ValueError as exc:
         raise StructuredParseError(
-            f"The answer was not JSON: {text[:PARSE_PREVIEW_CHARS]!r}"
+            f"The answer was not JSON: {text[:PARSE_PREVIEW_CHARS]!r}", usage=usage
         ) from exc
     if not isinstance(data, dict):
         raise StructuredParseError(
-            f"The answer was JSON but not an object: {text[:PARSE_PREVIEW_CHARS]!r}"
+            f"The answer was JSON but not an object: {text[:PARSE_PREVIEW_CHARS]!r}", usage=usage
         )
 
     return StructuredResult(
         data=data,
-        usage=_usage_dict(getattr(final, "usage", None)),
+        usage=usage,
         model=getattr(final, "model", model),
         stop_reason=stop_reason,
     )
