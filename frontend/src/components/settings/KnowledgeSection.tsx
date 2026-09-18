@@ -1,7 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useRef, useState } from 'react'
 
-import { ApiError } from '../../api/client'
 import {
   KB_ACTIVITY_LOG_LIMIT,
   budgetLabel,
@@ -38,6 +37,7 @@ import { FIELD_HINT, cx } from '../ui/classes'
 import Field, { FIELD_GRID } from './Field'
 import NumberField from './NumberField'
 import SettingsSection from './SettingsSection'
+import { embedAgain, embedProblem } from './embedNow'
 
 /** The knowledge base's share of the settings draft. */
 export interface KnowledgeDraft {
@@ -542,7 +542,15 @@ function Stats({
  * `POST /kb/embed-pending` takes a bounded slice per call and reports the whole
  * backlog, so this calls it again while anything is left and the user has not
  * stopped. There is no poller anywhere in this app and this is not one: it is a
- * loop the user started and can end.
+ * loop the user started and can end. `embedNow.ts::embedAgain` is the decision
+ * that ends it, tested on its own — including the case that used to spin.
+ *
+ * There is deliberately **no "am I still mounted" ref** either. One was here and
+ * it jammed the button: a ref set `true` at its declaration is never set again,
+ * StrictMode's mount cleanup put it to `false` before the first click, and the
+ * loop then returned after one batch without ever clearing `running`. A
+ * `setState` after unmount is a silent no-op in React 18+; `stop`, which *is*
+ * re-set on every run, is the only flag worth keeping.
  */
 function EmbedNow({ pending, configured }: { pending: number; configured: boolean }) {
   const queryClient = useQueryClient()
@@ -551,17 +559,10 @@ function EmbedNow({ pending, configured }: { pending: number; configured: boolea
   const [left, setLeft] = useState<number | null>(null)
   const [problem, setProblem] = useState<string | null>(null)
   const stop = useRef(false)
-  const alive = useRef(true)
 
-  useEffect(
-    () => () => {
-      // Leaving the page ends the loop, and nothing it is holding may set state
-      // afterwards: the request in flight still has to resolve somewhere.
-      alive.current = false
-      stop.current = true
-    },
-    [],
-  )
+  // Leaving the page ends the loop; the request in flight still resolves, and
+  // the state it lands on belongs to a component nobody is looking at.
+  useEffect(() => () => void (stop.current = true), [])
 
   const run = async () => {
     stop.current = false
@@ -573,30 +574,19 @@ function EmbedNow({ pending, configured }: { pending: number; configured: boolea
       for (;;) {
         const result = await embedPending()
         total += result.embedded ?? 0
-        if (!alive.current) {
-          return
-        }
         setEmbedded(total)
         setLeft(result.pending ?? 0)
-        // `embedded === 0` as well as `pending === 0`: a backend that reports a
-        // backlog it cannot make progress on must not spin this loop forever.
-        if (stop.current || (result.pending ?? 0) <= 0 || (result.embedded ?? 0) <= 0) {
+        if (!embedAgain(result, stop.current)) {
           break
         }
       }
     } catch (error) {
-      if (alive.current) {
-        // 409 (no key) and 502 (Voyage refused) both arrive here with a sentence
-        // worth showing; the count on screen stays true either way, because the
-        // chunks it did not reach are still pending.
-        setProblem(
-          error instanceof ApiError ? error.detail : 'The embedder could not be reached.',
-        )
-      }
+      // 409 (no key) and 502 (Voyage refused) both arrive here with a sentence
+      // worth showing; the count on screen stays true either way, because the
+      // chunks it did not reach are still pending.
+      setProblem(embedProblem(error))
     } finally {
-      if (alive.current) {
-        setRunning(false)
-      }
+      setRunning(false)
       await queryClient.invalidateQueries({ queryKey: kbQueryKey })
     }
   }
