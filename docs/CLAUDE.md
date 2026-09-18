@@ -6,6 +6,7 @@
 |---|---|---|
 | `DESIGN.md` | The **design record**: product decisions, the views, the verified API facts, the data model, and the PR-by-PR build sequence (complete). Each section that the code outgrew carries an **Implementation notes** block. | Authoritative for *intent* and for *why*. **Not** authoritative for signatures — read the code. Where an Implementation-notes block contradicts the prose above it, the block wins. |
 | `ROADMAP.md` | Post-core backlog: knowledge base with topics, CVE/KEV enrichment, meeting-prep triage, action-item tracker, story clustering, presentation export, exposing the app *as* an MCP server, trends, plus a "Smaller improvements" section. | Nothing here is scheduled. **Do not start one unprompted.** Its framing sentence ("nothing until the seven core PRs are merged") is now satisfied — that still does not schedule anything. |
+| `superpowers/specs/`, `superpowers/plans/` | The design and phased plan of the feature **in flight** (the knowledge base). | Authoritative for that feature until it is complete; see "Planning documents" below. |
 | `CLAUDE.md` (this file) | The map. | — |
 
 The `CLAUDE.md` files are the current map of the **code**, and they are what to read
@@ -44,13 +45,24 @@ into, all of which the Implementation-notes blocks now call out explicitly:
   pieces" list about the shell or the chat view is superseded by the "Frontend
   redesign" section and by `frontend/CLAUDE.md`.
 
-## Where the implementation-report files live
+## Planning documents and the executor's scratch
 
-Detailed per-task reports (public signatures, decisions, live-smoke findings and the
-"fix round" sections that changed behaviour after review) are in the untracked
-`.superpowers/sdd/i-am-building-a-sprightly-truffle/` directory of the main checkout:
-`task-{1..7}-{brief,report}.md`, `live-smoke-t4-report.md`, `final-fix-report.md`,
-`redesign-brief.md` and `redesign-*-report.md`, plus `rulings.md` and the review diffs.
-They are gitignored scratch, they describe the state at the time they were written, and
-later fix rounds and the redesign superseded parts of them — **verify against the code
-before acting on one.**
+There is **one** source of truth for planned work, and it is tracked:
+
+| Path | What it is | Lifetime |
+|---|---|---|
+| `docs/superpowers/specs/*.md` | The approved design of a feature in flight (today: the knowledge base, plus the HTTP contract agreed for its Phase 2). | Until the feature is complete — then its lasting content is folded into `DESIGN.md` and the file is deleted (as was done for background turns). |
+| `docs/superpowers/plans/*.md` | The phase-and-task plan for that design, ending in a **Decisions log**: every decision taken during execution that changes what gets built. Where the log and a task's text disagree, the log wins. | Same. |
+
+`.superpowers/` (git-ignored) is **not** a second plan. It is the scratch of whoever executes
+a plan — a progress ledger, per-task briefs cut from the tracked plan, subagent reports, review
+verdicts, PR-body drafts. It is derived from the tracked files, it goes stale the day its work
+merges, and it is deleted then. Rules that keep it that way:
+
+- A decision that changes *what gets built, where it lives or which task owns it* is written into
+  the plan's Decisions log **in the PR of the phase that made it**. It may never live only in
+  `.superpowers/`.
+- An HTTP contract that two parallel tasks build against is tracked under `docs/superpowers/specs/`.
+- Nothing in the tracked docs may point into `.superpowers/` as a reference.
+- Every phase branch is cut from `main` and its PR base is `main`; a stacked PR merges into its
+  *base branch*, which is how Phase 1 of the knowledge base first missed `main`.
