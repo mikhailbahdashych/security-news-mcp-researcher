@@ -4,29 +4,38 @@ import { useNavigate, useParams } from 'react-router-dom'
 
 import { ApiError } from '../api/client'
 import {
+  KB_ATTENTION_ACTIVITY,
+  KB_COMPILE_BATCH_MAX,
   KB_DELETED_LIMIT,
   KB_MIN_SEARCH_CHARS,
   KB_SEARCH_LIMIT,
   createEntry,
   entityFilter,
   entityHint,
+  getStats,
+  kbActivityKey,
   kbEntriesKey,
   kbEntryLink,
   kbQueryKey,
   kbSearchKey,
+  kbStatsKey,
   kbTopicsKey,
+  listActivity,
   listEntries,
   listTopics,
   parseEntryId,
   searchEntries,
+  searchModeLabel,
   sinceDaysAgo,
   type EntryFilters,
   type EntryKind,
   type KbEntry,
 } from '../api/kb'
+import CompileDialog from '../components/kb/CompileDialog'
 import EntryDetail from '../components/kb/EntryDetail'
 import EntryList from '../components/kb/EntryList'
 import NeedsAttention from '../components/kb/NeedsAttention'
+import NewTopic from '../components/kb/NewTopic'
 import SearchBox from '../components/kb/SearchBox'
 import Button from '../components/ui/Button'
 import Card from '../components/ui/Card'
@@ -141,6 +150,10 @@ interface TimelineProps {
 
 function KnowledgeTimeline({ embedded, onOpen, list, onList }: TimelineProps) {
   const { q, kind, sinceDays, topicId, entity } = list
+  // The ids the compile dialog was opened over, frozen at the click: the list
+  // refetches while it is open, and a batch that changed size mid-estimate
+  // would be priced as one thing and sent as another.
+  const [compiling, setCompiling] = useState<number[] | null>(null)
   const edit = <K extends keyof ListState>(key: K, value: ListState[K]) =>
     onList({ ...list, [key]: value })
   const debouncedQ = useDebouncedValue(q)
@@ -190,12 +203,27 @@ function KnowledgeTimeline({ embedded, onOpen, list, onList }: TimelineProps) {
     queryFn: () => listEntries(DELETED_FILTERS, undefined, KB_DELETED_LIMIT),
   })
 
+  // Two reads the strip and the search line need, both shared with Settings'
+  // panel through their query keys rather than fetched twice.
+  const stats = useQuery({ queryKey: kbStatsKey, queryFn: getStats })
+  const activity = useQuery({
+    queryKey: kbActivityKey(KB_ATTENTION_ACTIVITY),
+    queryFn: () => listActivity(KB_ATTENTION_ACTIVITY),
+  })
+
   // `entries` is absent — not null — when the answer was a search, so an
   // undefined leg is "no page yet" rather than "nothing matched".
   const entries: KbEntry[] = timeline.data?.pages.flatMap((page) => page.entries ?? []) ?? []
   const hits = searching ? (search.data?.hits ?? []) : null
   const active = searching ? search : timeline
-  const mode = search.data?.mode
+  const mode = searching ? search.data?.mode : undefined
+  const shown = hits ? hits.map((row) => row.entry) : entries
+  // What "Compile N" would take: what is on screen and has no summary yet. The
+  // page has no selection model of its own, and the batch route takes 100.
+  const compilable = shown
+    .filter((row) => row.deleted_at === null && !row.summary_md)
+    .slice(0, KB_COMPILE_BATCH_MAX)
+  const modeLabel = searchModeLabel(mode, stats.data?.embeddings_configured ?? false)
 
   return (
     <Page>
@@ -223,13 +251,27 @@ function KnowledgeTimeline({ embedded, onOpen, list, onList }: TimelineProps) {
         onTopic={(value) => edit('topicId', value)}
       />
 
-      {searching && mode === 'keyword' ? (
-        <p className="text-[11px] text-faint">
-          Keyword search. Meaning-based search arrives with the embedding step.
-        </p>
-      ) : null}
+      <div className="flex flex-wrap items-center gap-2">
+        {/* The server's word for which legs answered, never a guess from the
+            settings: a configured key that has embedded nothing still answers
+            `keyword`, and saying otherwise would be the page lying about its
+            own results. */}
+        {modeLabel ? <p className="flex-1 text-[11px] text-faint">{modeLabel}</p> : <span className="flex-1" />}
+        <NewTopic />
+        {compilable.length > 0 ? (
+          <Button size="sm" onClick={() => setCompiling(compilable.map((row) => row.id))}>
+            Compile {compilable.length}
+          </Button>
+        ) : null}
+      </div>
 
-      <NeedsAttention deleted={deleted.data?.entries ?? []} />
+      <NeedsAttention
+        entries={shown}
+        deleted={deleted.data?.entries ?? []}
+        activity={activity.data ?? []}
+        embeddingsConfigured={stats.data?.embeddings_configured ?? false}
+        onOpen={onOpen}
+      />
 
       <Card padded={false}>
         <ListState
@@ -261,6 +303,17 @@ function KnowledgeTimeline({ embedded, onOpen, list, onList }: TimelineProps) {
         <p className="self-center text-[11px] text-faint">
           The first {KB_SEARCH_LIMIT} matches. Narrow the search to see further.
         </p>
+      ) : null}
+
+      {compiling ? (
+        <CompileDialog
+          entryIds={compiling}
+          onClose={() => setCompiling(null)}
+          onOpen={(id) => {
+            setCompiling(null)
+            onOpen(id)
+          }}
+        />
       ) : null}
     </Page>
   )
@@ -317,9 +370,18 @@ function SaveUrl({ onOpen }: { onOpen: (id: number) => void }) {
           className="min-w-[220px] flex-1"
         />
         <Button type="submit" variant="primary" loading={save.isPending} disabled={!url.trim()}>
-          Save
+          {save.isPending ? 'Saving…' : 'Save'}
         </Button>
       </div>
+      {/* In `auto` compile mode the 201 waits for the model, so this request can
+          take seconds. A control that looks frozen for that long reads as a
+          broken page — say what it is waiting for instead. */}
+      {save.isPending ? (
+        <p className="text-[11.5px] text-faint">
+          Fetching the page and storing it. With compile mode set to auto, this also waits for the
+          summary to be written.
+        </p>
+      ) : null}
       {problem ? <p className="text-[11.5px] text-red">{problem}</p> : null}
       {saved ? (
         <p className="text-[11.5px] text-faint">

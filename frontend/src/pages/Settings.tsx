@@ -43,13 +43,19 @@ import {
 import type { EmbeddablePageProps } from '../components/ui/PageHost'
 import Page from './Page'
 
-/** Everything this form edits: not the write-only API key, not the read-only
- *  `key_source` that describes where it came from, and not the KB schema version
- *  the index reports about itself. `SettingsUpdate` omits exactly the same four,
- *  because `PUT /api/settings` forbids extra fields. */
+/** Everything this form edits: not the two write-only API keys, not the
+ *  read-only `*_key_source` fields that describe where they came from, and not
+ *  the KB schema version the index reports about itself. `SettingsUpdate` omits
+ *  exactly the same ones, because `PUT /api/settings` forbids extra fields. */
 type Draft = Omit<
   AppSettings,
-  'has_api_key' | 'api_key_masked' | 'key_source' | 'kb_schema_version'
+  | 'has_api_key'
+  | 'api_key_masked'
+  | 'key_source'
+  | 'kb_schema_version'
+  | 'has_voyage_key'
+  | 'voyage_api_key_masked'
+  | 'voyage_key_source'
 >
 
 /** Listed field by field so that adding a setting to the API is a type error here
@@ -68,6 +74,19 @@ const toDraft = (settings: AppSettings): Draft => ({
   kb_capture_starred: settings.kb_capture_starred,
   kb_capture_notes: settings.kb_capture_notes,
   kb_min_snapshot_chars: settings.kb_min_snapshot_chars,
+  kb_embedding_model: settings.kb_embedding_model,
+  kb_capture_findings: settings.kb_capture_findings,
+  kb_compile_mode: settings.kb_compile_mode,
+  kb_compile_model: settings.kb_compile_model,
+  kb_compile_effort: settings.kb_compile_effort,
+  kb_compile_prompt: settings.kb_compile_prompt,
+  kb_compile_max_chars: settings.kb_compile_max_chars,
+  kb_compile_monthly_token_budget: settings.kb_compile_monthly_token_budget,
+  kb_auto_accept_suggestions: settings.kb_auto_accept_suggestions,
+  kb_reviewed_only: settings.kb_reviewed_only,
+  kb_recency_boost: settings.kb_recency_boost,
+  kb_rerank: settings.kb_rerank,
+  kb_duplicate_threshold: settings.kb_duplicate_threshold,
 })
 
 /**
@@ -139,14 +158,22 @@ function SettingsForm({ settings }: { settings: AppSettings }) {
     },
   })
 
-  const edit = <K extends keyof Draft>(key: K, value: Draft[K]) => {
+  const editMany = (patch: Partial<Draft>) => {
     save.reset()
-    setDraft((current) => ({ ...current, [key]: value }))
+    setDraft((current) => ({ ...current, ...patch }))
+  }
+
+  const edit = <K extends keyof Draft>(key: K, value: Draft[K]) => {
+    editMany({ [key]: value } as Partial<Draft>)
   }
 
   // Every value in a draft is a primitive, so key-by-key identity is the whole
   // comparison — no deep equality, and no false positives from a re-render.
   const dirty = (Object.keys(draft) as (keyof Draft)[]).some((key) => draft[key] !== saved[key])
+  // The one field a save must not be allowed to empty: the API accepts an empty
+  // prompt and would then compile with no instructions at all, and the shipped
+  // default is not on the wire anywhere to put back.
+  const invalid = draft.kb_compile_prompt.trim() === ''
   const models = modelsQuery.data ?? []
 
   return (
@@ -274,16 +301,7 @@ function SettingsForm({ settings }: { settings: AppSettings }) {
 
       <McpSection />
 
-      <KnowledgeSection
-        uid={uid}
-        captureStarred={draft.kb_capture_starred}
-        captureNotes={draft.kb_capture_notes}
-        minSnapshotChars={draft.kb_min_snapshot_chars}
-        schema={settings.kb_schema_version}
-        onCaptureStarred={(checked) => edit('kb_capture_starred', checked)}
-        onCaptureNotes={(checked) => edit('kb_capture_notes', checked)}
-        onMinSnapshotChars={(value) => edit('kb_min_snapshot_chars', value)}
-      />
+      <KnowledgeSection uid={uid} draft={draft} settings={settings} onEdit={editMany} />
 
       <SettingsSection title="Feeds">
         <NumberField
@@ -340,7 +358,7 @@ function SettingsForm({ settings }: { settings: AppSettings }) {
       <div className="flex flex-wrap items-center gap-3">
         <Button
           variant="primary"
-          disabled={!dirty}
+          disabled={!dirty || invalid}
           loading={save.isPending}
           onClick={() => save.mutate(draft)}
         >
