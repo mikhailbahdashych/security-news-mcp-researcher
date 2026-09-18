@@ -337,6 +337,11 @@ a gap is an entry folded into a neighbour.
   rebuild stay in Task 4.4. — Why: without it, entries captured before the Voyage key was entered
   would stay keyword-only until Phase 4, and Task 2.7's acceptance ("enter a key → a semantic query
   finds the entry") is unreachable. Cost: one small endpoint Task 4.4 later subsumes.
+- **P2-17. `POST /api/kb/search` is user-facing and returns unreviewed model-authored entries**,
+  labelled by `authorship` / `review_status`. The authorship gate (S5) governs what the *model* is
+  fed — the two chat tools and the notes generator, through `search_for_model` — not what the user
+  sees of their own knowledge base. The Phase 2 contract first said otherwise; it is amended in the
+  same commit. — Cost if wrong: one filter flag on one route.
 
 ---
 

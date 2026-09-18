@@ -255,8 +255,10 @@ kind: 'finding', authorship: 'model', review_status: 'unreviewed', captured_by: 
 url: null, published_at: null, links.session_id: <the chat>, snapshot_md: "## Question … ## Answer … ## Sources …"
 ```
 
-- `GET /api/kb/entries` (the Knowledge page, `search_for_user`) **shows it immediately**.
-- `POST /api/kb/search` and the two chat tools (`search_for_model`) **never return it** until
+- `GET /api/kb/entries` **and `POST /api/kb/search`** (both the Knowledge page, `search_for_user`)
+  **show it immediately**, labelled by `authorship` / `review_status` — it is the user's own
+  knowledge base (plan decision P2-17).
+- The two chat tools and the notes generator (`search_for_model`) **never return it** until
   `review_status === 'reviewed'`, whatever `kb_reviewed_only` says. After review, the chat tool's
   rendered title carries `[AI finding, reviewed] ` — applied at read time by
   `app/agent/builtin.py::MODEL_TITLE_PREFIX`, **not stored in `title`**.
