@@ -214,7 +214,14 @@ async def run_bulk_capture(
 async def _embed_and_flag(
     kb: KbService, entry_ids: Sequence[int], *, duplicate_threshold: float
 ) -> int:
-    """Embed the run's backlog once, then flag near-duplicates. Returns the flags.
+    """Embed what **this run** created, once, then flag near-duplicates.
+
+    Scoped to *entry_ids* rather than to every pending chunk in the database: a
+    user who captured nine hundred entries before they had a Voyage key has nine
+    thousand pending chunks, and a three-item save that quietly sent all of them
+    to Voyage would stall the stream for minutes with no progress, no Stop and
+    one ``bulk`` row billing the lot. The backlog is what Settings → Knowledge →
+    **Embed now** is for.
 
     Both halves are best-effort by design (spec §5): an embedding provider being
     down leaves the chunks pending and the entries keyword-searchable, which is a
@@ -225,7 +232,13 @@ async def _embed_and_flag(
     if not entry_ids:
         return 0
     try:
-        await embed_pending(kb.session_factory, kb.embedder, limit=BULK_EMBED_LIMIT, source="bulk")
+        await embed_pending(
+            kb.session_factory,
+            kb.embedder,
+            entry_ids=entry_ids,
+            limit=BULK_EMBED_LIMIT,
+            source="bulk",
+        )
     except Exception:  # noqa: BLE001 - the entries are committed; chunks stay pending
         logger.exception("The bulk run's embedding failed; its chunks stay pending")
 

@@ -867,13 +867,21 @@ async def embed_pending(
     embedder: Embedder,
     *,
     entry_id: int | None = None,
+    entry_ids: Sequence[int] | None = None,
     limit: int = 500,
     source: str = "",
 ) -> int:
     """Embed chunks that have no vector yet, and return how many were embedded.
 
     ``embedded_at IS NULL`` is the one definition of "pending", so this is also
-    what Re-index resumes from. With an embedder that cannot embed —
+    what Re-index resumes from.
+
+    **The selection is the whole backlog unless it is narrowed.** *entry_id* is
+    one entry and also what the activity row is attributed to; *entry_ids* is a
+    set of them and attributes nothing, which is what a bulk run wants: it must
+    embed the entries it just created and leave a pre-existing backlog — nine
+    thousand chunks captured before a Voyage key existed — for **Embed now**,
+    which is the explicit button that exists for exactly that. With an embedder that cannot embed —
     :class:`~app.kb.embeddings.NullEmbedder`, used whenever no Voyage key is
     configured — it is a no-op and the chunks stay pending, which is a normal
     state of the knowledge base rather than a failure.
@@ -916,6 +924,8 @@ async def embed_pending(
         )
         if entry_id is not None:
             statement = statement.where(KbChunk.entry_id == entry_id)
+        if entry_ids is not None:
+            statement = statement.where(KbChunk.entry_id.in_(list(entry_ids)))
         rows = (await session.execute(statement)).all()
 
     if not rows:

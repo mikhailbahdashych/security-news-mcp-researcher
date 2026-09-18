@@ -24,6 +24,8 @@ from app.api.deps import get_kb_service
 from app.api.streaming import ALREADY_RUNNING_MESSAGE, CANCELLED_MESSAGE
 from app.db.models import Feed, FeedItem
 from app.kb.bulk import MAX_KB_EXTRACTIONS, bulk_key
+from app.kb.capture import capture_article
+from app.kb.embeddings import NullEmbedder
 from app.kb.models import KbActivity, KbChunk, KbEntry
 from app.kb.service import KbService
 from app.services import settings as settings_service
@@ -241,6 +243,47 @@ async def test_the_run_embeds_once_rather_than_once_per_entry(
         select(func.count()).select_from(KbChunk).where(KbChunk.embedded_at.is_(None))
     )
     assert pending == 0
+
+
+async def test_the_end_of_run_embed_never_touches_a_backlog_the_run_did_not_create(
+    app, client, session_factory, db_session, feed
+):
+    """Saving three items must not send a nine-thousand-chunk backlog to Voyage.
+
+    Pending chunks are the knowledge base's resting state — everything captured
+    before a Voyage key existed is pending — and **Embed now** is the button that
+    clears them, on purpose. A three-item save that silently embedded the lot
+    would sit silent for minutes with no progress and no Stop, and would bill the
+    whole backlog to one ``bulk`` row.
+    """
+    backlog = await capture_article(
+        session_factory,
+        NullEmbedder(),
+        url="https://example.test/backlog",
+        title="An advisory captured before the key was configured",
+        text=BODY,
+    )
+    ids = await seed_items(db_session, feed, 3)
+    app.dependency_overrides[get_kb_service] = lambda: KbService(
+        session_factory=session_factory, embedder=FakeEmbedder(), transport=article_transport(8)
+    )
+
+    response = await client.post("/api/kb/bulk", json={"item_ids": ids, "job_id": "j-scope"})
+
+    assert payloads_for(response.text, "done")[0]["saved"] == 3
+    still_pending = await db_session.scalar(
+        select(func.count())
+        .select_from(KbChunk)
+        .where(KbChunk.entry_id == backlog.entry_id, KbChunk.embedded_at.is_(None))
+    )
+    assert still_pending > 0
+    # And the run's own chunks did get embedded.
+    unembedded = await db_session.scalar(
+        select(func.count())
+        .select_from(KbChunk)
+        .where(KbChunk.entry_id != backlog.entry_id, KbChunk.embedded_at.is_(None))
+    )
+    assert unembedded == 0
 
 
 async def test_the_run_flags_near_duplicates_after_it_has_embedded(
