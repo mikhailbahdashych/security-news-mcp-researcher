@@ -128,7 +128,12 @@ export default function KnowledgePage({ embedded = false }: EmbeddablePageProps)
     return (
       <Page width="note">
         <ErrorBoundary key={entryId}>
-          <EntryDetail entryId={entryId} embedded={embedded} onBack={back} />
+          <EntryDetail
+            entryId={entryId}
+            embedded={embedded}
+            onBack={back}
+            onOpen={openEntry}
+          />
         </ErrorBoundary>
       </Page>
     )

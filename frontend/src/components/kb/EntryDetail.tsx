@@ -4,19 +4,26 @@ import { Link } from 'react-router-dom'
 
 import { conflictDetail, isNotFound } from '../../api/client'
 import {
+  compileEntry,
+  compileMetaLabel,
+  compileOutcome,
   deleteEntry,
+  embeddingStatus,
   entityChips,
   getEntry,
   kbEntryKey,
   kbQueryKey,
   kindLabel,
+  mergeEntry,
   patchEntry,
   refreshEntry,
   refreshFailed,
   refreshMessage,
   sourceLabel,
+  summaryStale,
   undeleteEntry,
   type KbActivity,
+  type KbEntry,
   type KbEntryDetail,
   type KbSnapshotVersion,
 } from '../../api/kb'
@@ -41,10 +48,13 @@ export interface EntryDetailProps {
   /** `replace` when the entry left on its own — a dead id is not a place to
    *  return to, and Back onto it would only 404 forward again. */
   onBack: (replace?: boolean) => void
+  /** Open another entry — the duplicate banner's only way across, and the page
+   *  owns whether that is a navigation or a swap of the pane's own state. */
+  onOpen: (id: number) => void
 }
 
 /** One entry in full: what it says, what it was captured from, what to do with it. */
-export default function EntryDetail({ entryId, embedded, onBack }: EntryDetailProps) {
+export default function EntryDetail({ entryId, embedded, onBack, onOpen }: EntryDetailProps) {
   const queryClient = useQueryClient()
 
   const entry = useQuery({
@@ -135,6 +145,15 @@ export default function EntryDetail({ entryId, embedded, onBack }: EntryDetailPr
             <span>
               {data.snapshot_chars.toLocaleString()} chars · v{data.snapshot_version}
             </span>
+            {/* Counted here rather than sent: `chunks - pending_chunks` is the
+                whole of it, and it is the line that explains a captured entry
+                that the meaning-based leg cannot find yet. */}
+            {embeddingStatus(data) ? <span>{embeddingStatus(data)}</span> : null}
+            {data.authorship === 'model' ? (
+              <Badge tone={data.review_status === 'reviewed' ? 'neutral' : 'amber'}>
+                {data.review_status === 'reviewed' ? 'AI, reviewed' : 'AI, unreviewed'}
+              </Badge>
+            ) : null}
             {data.url ? (
               <a href={data.url} target="_blank" rel="noopener noreferrer">
                 Open the source
@@ -153,15 +172,12 @@ export default function EntryDetail({ entryId, embedded, onBack }: EntryDetailPr
 
       {data.deleted_at !== null ? <DeletedBanner entry={data} onChanged={invalidate} /> : null}
 
+      {data.possible_duplicate_of !== null && data.deleted_at === null ? (
+        <DuplicateBanner entry={data} onChanged={invalidate} onOpen={onOpen} />
+      ) : null}
+
       {data.summary_md ? (
-        <Card>
-          <SectionLabel as="h2" className="text-muted">
-            Summary · written by the model
-          </SectionLabel>
-          <div className="mt-2">
-            <Markdown>{data.summary_md}</Markdown>
-          </div>
-        </Card>
+        <Summary key={`summary-${data.id}`} entry={data} onChanged={invalidate} />
       ) : null}
 
       <NotesEditor key={`notes-${data.id}`} entryId={data.id} initial={data.notes_md} />
@@ -173,9 +189,14 @@ export default function EntryDetail({ entryId, embedded, onBack }: EntryDetailPr
   )
 }
 
-/** Save, refresh, delete — the three things you can do to a captured entry. */
+/** Refresh, compile, review, delete — what you can do to a captured entry. */
 function Actions({ entry, onChanged }: { entry: KbEntryDetail; onChanged: () => Promise<void> }) {
   const [note, setNote] = useState<{ text: string; failed: boolean } | null>(null)
+
+  const review = useMutation({
+    mutationFn: () => patchEntry(entry.id, { review_status: 'reviewed' }),
+    onSuccess: onChanged,
+  })
 
   const refresh = useMutation({
     mutationFn: () => refreshEntry(entry.id),
@@ -216,6 +237,18 @@ function Actions({ entry, onChanged }: { entry: KbEntryDetail; onChanged: () => 
       >
         Refresh
       </Button>
+      {/* Only when there is no summary yet: once there is one, Recompile lives
+          on the summary itself, beside the hint that says it has gone stale. */}
+      {entry.summary_md ? null : <CompileButton entry={entry} onChanged={onChanged} />}
+      {entry.authorship === 'model' && entry.review_status === 'unreviewed' ? (
+        <Button
+          loading={review.isPending}
+          title="Until this is reviewed, the chat and note generation never see it."
+          onClick={() => review.mutate()}
+        >
+          Mark reviewed
+        </Button>
+      ) : null}
       <Button
         className="text-muted hover:border-red hover:text-red"
         loading={remove.isPending}
@@ -224,6 +257,203 @@ function Actions({ entry, onChanged }: { entry: KbEntryDetail; onChanged: () => 
         Delete
       </Button>
     </>
+  )
+}
+
+/**
+ * Compile, or compile again.
+ *
+ * Every outcome here is an HTTP 200: a spent budget, a refusal and an
+ * unreadable answer are things that happen when a model is asked to summarise
+ * security writing, so they are explained on the page rather than thrown. The
+ * sentence stays until the next click — a toast for "the model declined" is a
+ * sentence the reader has to catch.
+ */
+function CompileButton({
+  entry,
+  onChanged,
+}: {
+  entry: KbEntry
+  onChanged: () => Promise<void>
+}) {
+  const [note, setNote] = useState<{ text: string; failed: boolean } | null>(null)
+
+  const compile = useMutation({
+    mutationFn: () => compileEntry(entry.id),
+    onSuccess: async (result) => {
+      setNote({ text: compileOutcome(result), failed: !result.compiled })
+      await onChanged()
+    },
+    onError: () => setNote({ text: 'The compile request did not get through.', failed: true }),
+  })
+
+  return (
+    <>
+      {note ? (
+        <span className={cx('text-[11.5px]', note.failed ? 'text-amber' : 'text-faint')}>
+          {note.text}
+        </span>
+      ) : null}
+      <Button
+        loading={compile.isPending}
+        disabled={entry.deleted_at !== null}
+        title="Summarise this entry, and propose topics, tags and entities for it."
+        onClick={() => compile.mutate()}
+      >
+        {entry.summary_md ? 'Recompile' : 'Compile'}
+      </Button>
+    </>
+  )
+}
+
+/**
+ * The summary: the model's prose, said to be the model's prose.
+ *
+ * Rendered through `Markdown` like every other untrusted string in this app —
+ * never `dangerouslySetInnerHTML` — and editable in place through the same
+ * `PATCH summary_md` the compile writes, because a summary you cannot correct
+ * is one you end up not trusting.
+ */
+function Summary({ entry, onChanged }: { entry: KbEntryDetail; onChanged: () => Promise<void> }) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(entry.summary_md ?? '')
+
+  const save = useMutation({
+    mutationFn: (summary_md: string) => patchEntry(entry.id, { summary_md }),
+    onSuccess: async () => {
+      setEditing(false)
+      await onChanged()
+    },
+  })
+
+  const meta = compileMetaLabel(entry)
+  const stale = summaryStale(entry)
+
+  return (
+    <Card>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <SectionLabel as="h2" className="text-muted">
+          Summary · written by the model
+        </SectionLabel>
+        <div className="flex flex-wrap items-center gap-2">
+          {editing ? (
+            <>
+              <Button
+                size="sm"
+                variant="primary"
+                loading={save.isPending}
+                onClick={() => save.mutate(draft)}
+              >
+                Save
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => {
+                  setDraft(entry.summary_md ?? '')
+                  setEditing(false)
+                }}
+              >
+                Cancel
+              </Button>
+            </>
+          ) : (
+            <Button size="sm" variant="ghost" onClick={() => setEditing(true)}>
+              Edit
+            </Button>
+          )}
+          <CompileButton entry={entry} onChanged={onChanged} />
+        </div>
+      </div>
+
+      {meta || entry.compiled_at ? (
+        <p className="mt-1 text-[11px] text-faint">
+          {[meta, entry.compiled_at ? `compiled ${formatNoteDay(entry.compiled_at)}` : null]
+            .filter(Boolean)
+            .join(' · ')}
+        </p>
+      ) : null}
+      {stale ? (
+        <p className="mt-1 text-[11px] text-amber">
+          The entry has changed since this was written — a notes edit or a re-read never recompiles
+          it.
+        </p>
+      ) : null}
+
+      {editing ? (
+        <div className="mt-2 flex flex-col gap-1.5">
+          <Textarea
+            aria-label="Summary"
+            tone="bg"
+            rows={7}
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+          />
+          {save.isError ? (
+            <span className="text-[11.5px] text-red">That could not be saved.</span>
+          ) : null}
+        </div>
+      ) : (
+        <div className="mt-2">
+          <Markdown>{entry.summary_md ?? ''}</Markdown>
+        </div>
+      )}
+    </Card>
+  )
+}
+
+/**
+ * "This looks like something you already have."
+ *
+ * The flag is set at capture on the **newer** entry and points at the older
+ * one; Merge folds them together and the **older** one survives, which the
+ * button has to say before it is pressed. Without a Voyage key the flag comes
+ * from the title alone, so it is offered and never acted on automatically.
+ */
+function DuplicateBanner({
+  entry,
+  onChanged,
+  onOpen,
+}: {
+  entry: KbEntryDetail
+  onChanged: () => Promise<void>
+  onOpen: (id: number) => void
+}) {
+  const other = entry.possible_duplicate_of as number
+
+  const merge = useMutation({
+    mutationFn: () => mergeEntry(entry.id, other),
+    onSuccess: onChanged,
+  })
+
+  const conflict = conflictDetail(merge.error)
+
+  return (
+    <div
+      className={cx(
+        CARD,
+        'flex flex-wrap items-center gap-3 bg-panel2 px-4 py-3 text-[12px] text-muted',
+      )}
+    >
+      <span className="flex-1">
+        Flagged as a possible duplicate of entry #{other}.
+      </span>
+      <Button size="sm" variant="ghost" onClick={() => onOpen(other)}>
+        Open that one
+      </Button>
+      <Button
+        size="sm"
+        loading={merge.isPending}
+        title="Folds the two together. The older entry survives and keeps both sets of notes."
+        onClick={() => merge.mutate()}
+      >
+        Merge
+      </Button>
+      {conflict ? <span className="basis-full text-red">{conflict}</span> : null}
+      {merge.isError && conflict === null ? (
+        <span className="basis-full text-red">They could not be merged.</span>
+      ) : null}
+    </div>
   )
 }
 
@@ -547,7 +777,7 @@ function Facts({ entry, embedded }: { entry: KbEntryDetail; embedded: boolean })
       </SectionLabel>
       <div className="mt-2.5 flex flex-col gap-2.5">
         <Chips label="Entities" values={entities} empty="None found yet." />
-        <Chips label="Topics" values={topics} empty="None — topics arrive with the compile step." />
+        <Chips label="Topics" values={topics} empty="None — a compile is what proposes them." />
         <Chips label="Tags" values={tags} empty="None." />
         <BackLinks entry={entry} embedded={embedded} />
         <Activity rows={entry.activity} />
