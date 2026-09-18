@@ -1227,13 +1227,23 @@ async def _nearest_by_vector(
 
     ``include_model_authored`` is set: this is the user's own knowledge base
     checking itself for duplicates, not the authorship gate that governs what the
-    model is fed.
+    model is fed. ``exclude_model_authored`` is then set on top of it, which is a
+    different rule and not the same one twice — the gate would still let a
+    *reviewed* finding through, and a finding must never be a candidate at all.
+    A finding quotes the article it cites, so it pairs with that article on the
+    vector leg; and a merge keeps the **older** entry, so accepting the
+    suggestion would soft-delete the user's own research and keep its source.
+    ``capture_finding`` already refuses to flag in the other direction, and this
+    is the reverse leg of the same rule.
     """
     rows = await store.knn(
         list(vector),
         NEAR_DUPLICATE_K,
         filters=SearchFilters(
-            chunk_kinds=("body",), include_model_authored=True, exclude_entry_id=entry_id
+            chunk_kinds=("body",),
+            include_model_authored=True,
+            exclude_model_authored=True,
+            exclude_entry_id=entry_id,
         ),
     )
     chunk_ids = [chunk_id for chunk_id, _ in rows]
@@ -1275,13 +1285,20 @@ async def _nearest_by_title(
 
     Walked newest-first and compared with ``>=`` so that a tie resolves to the
     **oldest** entry: the flag points backwards, at the copy that was already
-    there.
+    there. Model-authored entries are excluded for the reason
+    :func:`_nearest_by_vector` gives, and this leg needs it more: a finding is
+    titled with the user's own question, and with no Voyage key the title is the
+    whole test.
     """
     async with session_factory() as session:
         candidates = (
             await session.execute(
                 select(KbEntry.id, KbEntry.title)
-                .where(KbEntry.deleted_at.is_(None), KbEntry.id < entry_id)
+                .where(
+                    KbEntry.deleted_at.is_(None),
+                    KbEntry.id < entry_id,
+                    KbEntry.authorship != "model",
+                )
                 .order_by(KbEntry.id.desc())
                 .limit(NEAR_DUPLICATE_TITLE_SCAN)
             )

@@ -1124,6 +1124,67 @@ async def test_with_no_embedder_only_the_trigram_runs_and_it_only_flags(
     assert {row.id for row in live} == {first.entry_id, second.entry_id}
 
 
+async def test_a_later_article_is_never_flagged_against_a_finding_on_the_vector_leg(
+    session_factory,
+):
+    """The reverse direction of the rule ``capture_finding`` keeps.
+
+    A finding quotes the article it cites, so it sits right next to it on the
+    vector leg — and a merge keeps the **older** entry, so a suggestion accepted
+    here would soft-delete the user's own research and keep its source. The
+    authorship gate is not enough on its own: it lets a *reviewed* finding
+    through, and this must exclude every one of them.
+    """
+    embedder = MarkerEmbedder()
+    finding = await capture_article(
+        session_factory,
+        embedder,
+        url=None,
+        title=HEADLINE,
+        text=_marked("xz"),
+        kind="finding",
+        authorship="model",
+        captured_by="auto",
+    )
+    # Reviewed, in the column *and* in the vec0 metadata: the authorship gate
+    # would let this one back in, which is why the near-duplicate check has a
+    # rule of its own rather than reusing the gate.
+    async with session_factory() as session:
+        (await session.get(KbEntry, finding.entry_id)).review_status = "reviewed"
+        await session.commit()
+    await SqliteKnowledgeStore(session_factory).set_reviewed(finding.entry_id, True)
+
+    article = await capture_article(
+        session_factory,
+        embedder,
+        url="https://example.test/xz",
+        title=HEADLINE_RETITLED,
+        text=_marked("xz"),
+    )
+
+    assert article.possible_duplicate_of is None
+
+
+async def test_a_later_article_is_never_flagged_against_a_finding_on_the_title_leg(
+    session_factory,
+):
+    """With no Voyage key the title is the whole test, and a finding is titled
+    with the user's own question — which is often the headline they read."""
+    await capture_article(
+        session_factory,
+        NullEmbedder(),
+        url=None,
+        title=HEADLINE,
+        text=ARTICLE,
+        kind="finding",
+        authorship="model",
+        captured_by="auto",
+    )
+    article = await _capture(session_factory, url="https://example.test/two", title=HEADLINE)
+
+    assert article.possible_duplicate_of is None
+
+
 async def test_the_flag_is_a_column_and_the_trail_names_both_scores(session_factory, db_session):
     """``possible_duplicate_of`` is a column, never a string inside a detail (spec §8)
     — the detail carries the *evidence*, which is what makes 0.92 calibratable."""

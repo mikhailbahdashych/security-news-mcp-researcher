@@ -73,9 +73,9 @@ class SearchFilters:
     the user everything they have captured. The chat tool and the notes generator
     never pass it, which is what makes the authorship gate unconditional for them.
 
-    ``exclude_entry_id`` is honoured by :meth:`SqliteKnowledgeStore.knn` alone —
-    ``entry_id`` is one of vec0's metadata columns, and the near-duplicate check
-    is the only leg that has to keep an entry from matching itself.
+    ``exclude_entry_id`` and ``exclude_model_authored`` are honoured by
+    :meth:`SqliteKnowledgeStore.knn` alone — both are vec0 metadata columns, and
+    the near-duplicate check is the only leg that needs either of them.
     """
 
     kinds: tuple[str, ...] | None = None
@@ -85,6 +85,10 @@ class SearchFilters:
     reviewed_only: bool = False
     include_model_authored: bool = False
     exclude_entry_id: int | None = None
+    #: Drop model-authored candidates outright — *not* the authorship gate, which
+    #: lets a **reviewed** finding through. The near-duplicate check wants neither,
+    #: because a merge keeps the older entry (see ``capture._nearest_by_vector``).
+    exclude_model_authored: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -229,6 +233,11 @@ class SqliteKnowledgeStore:
             # afterwards leaves k slots that never held a candidate.
             shared.append("entry_id != :exclude_entry_id")
             params["exclude_entry_id"] = filters.exclude_entry_id
+        if filters.exclude_model_authored:
+            # ``!=`` is one of the four operators vec0's WHERE accepts, so this
+            # is a clause and not a post-filter: a finding's chunks would
+            # otherwise use up the k the real candidates needed.
+            shared.append("authorship != 'model'")
         if filters.since is not None:
             # vec0 has no >=; for integers "> day - 1" is the same thing.
             # Whole days, because ``published_day`` is an integer column and the
