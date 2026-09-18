@@ -9,6 +9,8 @@ that passes here would also pass against the wire.
 from __future__ import annotations
 
 import json
+import re
+from pathlib import Path
 
 import pytest
 
@@ -49,6 +51,25 @@ async def call(client, **overrides):
     }
     kwargs.update(overrides)
     return await structured_call(client, **kwargs)
+
+
+def test_only_the_runner_and_this_module_call_the_messages_api():
+    """The rule this module's docstring states, enforced rather than remembered.
+
+    Every request the app makes has to carry the same betas, the same
+    ``fallbacks`` and the same ``stop_reason``-before-``content`` handling, and a
+    third caller would be a fourth copy of all of it by the time anyone noticed.
+    """
+    app_dir = Path(__file__).resolve().parents[1] / "app"
+    allowed = {"agent/runner.py", "agent/oneshot.py"}
+
+    callers = sorted(
+        path.relative_to(app_dir).as_posix()
+        for path in app_dir.rglob("*.py")
+        if re.search(r"messages\.(create|stream)\(", path.read_text(encoding="utf-8"))
+    )
+
+    assert set(callers) - allowed == set()
 
 
 async def test_a_structured_call_returns_the_parsed_object():

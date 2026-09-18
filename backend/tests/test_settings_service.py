@@ -212,16 +212,6 @@ async def test_a_turn_reads_the_same_coerced_values_as_the_settings_page(db_sess
 # --------------------------------------------------------------- the Voyage key
 
 
-@pytest.fixture(autouse=True)
-def isolated_voyage_key_env(monkeypatch):
-    """Keep an ambient ``VOYAGE_API_KEY`` out of this module.
-
-    ``conftest.py`` does this for ``ANTHROPIC_API_KEY``; it has one writer this
-    phase, so the Voyage half lives here until the docs commit moves it.
-    """
-    monkeypatch.delenv(settings_service.VOYAGE_KEY_ENV_VAR, raising=False)
-
-
 async def test_effective_voyage_key_precedence_is_env_then_dotenv_then_stored(
     db_session, monkeypatch
 ):

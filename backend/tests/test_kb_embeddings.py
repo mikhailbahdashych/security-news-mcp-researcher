@@ -411,12 +411,6 @@ async def test_a_null_embedder_embeds_nothing_and_leaves_no_trail(
 # --------------------------------------------------------------- the wiring
 
 
-@pytest.fixture(autouse=True)
-def isolated_voyage_key_env(monkeypatch):
-    """No ambient ``VOYAGE_API_KEY`` — ``conftest.py`` only clears the Anthropic one."""
-    monkeypatch.delenv(settings_service.VOYAGE_KEY_ENV_VAR, raising=False)
-
-
 @pytest.fixture
 def offline_voyage(monkeypatch):
     """Whatever the app builds as a Voyage embedder, it embeds locally here."""

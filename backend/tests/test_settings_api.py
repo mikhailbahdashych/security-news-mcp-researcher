@@ -17,16 +17,6 @@ RAW_KEY = "sk-ant-api03-supersecretvalue-a1b2"
 RAW_VOYAGE_KEY = "pa-voyagesupersecretvalue-c3d4"
 
 
-@pytest.fixture(autouse=True)
-def isolated_voyage_key_env(monkeypatch):
-    """Keep an ambient ``VOYAGE_API_KEY`` out of this module.
-
-    ``conftest.py``'s autouse fixture does this for ``ANTHROPIC_API_KEY``, but
-    ``conftest.py`` has a single writer this phase — see the report's docs delta.
-    """
-    monkeypatch.delenv(settings_service.VOYAGE_KEY_ENV_VAR, raising=False)
-
-
 @pytest.fixture
 def use_client(app):
     """Install a stub Anthropic client (or ``None``) for the endpoints that need one."""
