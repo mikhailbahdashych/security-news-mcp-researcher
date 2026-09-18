@@ -171,6 +171,18 @@ def test_the_batcher_is_a_no_op_on_nothing() -> None:
     assert plan_batches([]) == []
 
 
+async def test_a_model_with_a_smaller_ceiling_sends_smaller_requests() -> None:
+    """voyage-4-large documents 120 000 tokens per request, not 320 000. One
+    batch built for voyage-4 would be rejected whole, every time."""
+    recorded: list[httpx2.Request] = []
+    text = "x" * int(32_000 * 3.6)
+    embedder = VoyageEmbedder(KEY, "voyage-4-large", transport=voyage_transport(recorded))
+
+    await embedder.embed_documents([text] * 4)
+
+    assert [len(json.loads(request.content)["input"]) for request in recorded] == [3, 1]
+
+
 async def test_a_twelve_hundred_text_list_is_two_requests() -> None:
     recorded: list[httpx2.Request] = []
     embedder = VoyageEmbedder(KEY, transport=voyage_transport(recorded))

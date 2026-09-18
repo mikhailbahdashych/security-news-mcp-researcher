@@ -41,6 +41,15 @@ DEFAULT_EMBEDDING_MODEL = "voyage-4"
 MAX_TEXTS_PER_REQUEST = 800
 MAX_TOKENS_PER_REQUEST = 256_000
 
+#: The same 80 % of the ceilings Voyage documents for the other two models. The
+#: name is a settings field, so ``voyage-4-large`` is one edit away — and its
+#: ceiling is *lower* than ``voyage-4``'s, which would make every request one the
+#: API rejects whole. An unknown name gets the conservative ``voyage-4`` number.
+MAX_TOKENS_BY_MODEL = {
+    "voyage-4-lite": 800_000,
+    "voyage-4-large": 96_000,
+}
+
 #: Whole-request budget. Generous because a full batch is 256 000 tokens of text
 #: going out over one connection.
 DEFAULT_TIMEOUT_S = 120.0
@@ -105,7 +114,9 @@ class EmbeddingError(RuntimeError):
         self.message = message
 
 
-def plan_batches(texts: Sequence[str]) -> list[list[int]]:
+def plan_batches(
+    texts: Sequence[str], *, max_tokens: int = MAX_TOKENS_PER_REQUEST
+) -> list[list[int]]:
     """Group *texts* into per-request batches, as lists of indices.
 
     Packs greedily to :data:`MAX_TEXTS_PER_REQUEST` and
@@ -119,9 +130,7 @@ def plan_batches(texts: Sequence[str]) -> list[list[int]]:
     tokens = 0
     for index, text in enumerate(texts):
         cost = estimate_tokens(text)
-        if current and (
-            len(current) >= MAX_TEXTS_PER_REQUEST or tokens + cost > MAX_TOKENS_PER_REQUEST
-        ):
+        if current and (len(current) >= MAX_TEXTS_PER_REQUEST or tokens + cost > max_tokens):
             batches.append(current)
             current, tokens = [], 0
         current.append(index)
@@ -182,7 +191,8 @@ class VoyageEmbedder:
                 "User-Agent": USER_AGENT,
             },
         ) as client:
-            for batch in plan_batches(texts):
+            max_tokens = MAX_TOKENS_BY_MODEL.get(self.model, MAX_TOKENS_PER_REQUEST)
+            for batch in plan_batches(texts, max_tokens=max_tokens):
                 sent = [texts[index] for index in batch]
                 vectors.extend(await self._post(client, sent, input_type))
         return vectors
@@ -293,6 +303,7 @@ __all__ = [
     "DEFAULT_EMBEDDING_MODEL",
     "DEFAULT_TIMEOUT_S",
     "MAX_TEXTS_PER_REQUEST",
+    "MAX_TOKENS_BY_MODEL",
     "MAX_TOKENS_PER_REQUEST",
     "VOYAGE_URL",
     "Embedder",
