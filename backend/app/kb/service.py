@@ -200,6 +200,7 @@ class KbService:
         captured_by: str = "auto",
         trigger: str = "star",
         transport: httpx2.AsyncBaseTransport | None = None,
+        defer_embedding: bool = False,
     ) -> CaptureResult:
         """Capture the article behind a feed item.
 
@@ -208,6 +209,10 @@ class KbService:
         through ``extract_item``, so the URL guard and the body caps apply — and
         only if that fails does the RSS summary stand in, and only if it is long
         enough to clear ``kb_min_snapshot_chars``.
+
+        *defer_embedding* is passed straight through to ``capture_article``: the
+        bulk job (:mod:`app.kb.bulk`) embeds and flags duplicates once for a whole
+        run instead of once per article.
         """
         min_chars = await self.min_snapshot_chars()
 
@@ -251,6 +256,7 @@ class KbService:
             source_ref=f"feed item {item_id}: {title}",
             min_chars=min_chars,
             trigger=trigger,
+            defer_embedding=defer_embedding,
         )
 
     async def capture_url(
@@ -850,6 +856,19 @@ class KbService:
             entry.updated_at = utcnow()
             await session.commit()
             return entry
+
+    # -- bulk capture (Task 2.3) -----------------------------------------
+
+    async def duplicate_threshold(self) -> float:
+        """``kb_duplicate_threshold`` — the cosine a near-duplicate needs.
+
+        Read once per bulk run by the route, before the stream opens, and handed
+        down: ``capture_article`` takes it as an argument the way it takes
+        ``min_chars``, so a two-hundred-item run reads the row once rather than
+        two hundred times.
+        """
+        async with self.session_factory() as session:
+            return await settings_service.get_float(session, "kb_duplicate_threshold")
 
 
 async def capture_note_if_enabled(

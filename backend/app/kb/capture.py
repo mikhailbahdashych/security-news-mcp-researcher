@@ -1075,13 +1075,19 @@ async def near_duplicate(
     first_body_vector: Sequence[float],
     title: str,
     threshold: float,
-    exclude_entry_id: int,
+    entry_id: int,
 ) -> DuplicateMatch | None:
-    """The older entry this one is probably a re-run of, or ``None``.
+    """The older entry *entry_id* is probably a re-run of, or ``None``.
 
     The vector is the **first body chunk's**, which is the only one that exists at
     capture time — the summary chunk does not exist until a compile. An empty
     vector is the no-embedder case and runs the trigram leg on its own.
+
+    Only entries **older** than *entry_id* are candidates, which is what makes the
+    flag point backwards at the copy that was already there (spec §4.5). A bulk
+    run flags after capturing its whole selection, so without that rule the first
+    article of a run would be flagged against the last one of the same run and the
+    two would point at each other.
     """
     if first_body_vector:
         return await _nearest_by_vector(
@@ -1090,10 +1096,10 @@ async def near_duplicate(
             vector=first_body_vector,
             title=title,
             threshold=threshold,
-            exclude_entry_id=exclude_entry_id,
+            entry_id=entry_id,
         )
     return await _nearest_by_title(
-        session_factory, title=title, threshold=threshold, exclude_entry_id=exclude_entry_id
+        session_factory, title=title, threshold=threshold, entry_id=entry_id
     )
 
 
@@ -1104,14 +1110,14 @@ async def _nearest_by_vector(
     vector: Sequence[float],
     title: str,
     threshold: float,
-    exclude_entry_id: int,
+    entry_id: int,
 ) -> DuplicateMatch | None:
-    """The first of the nearest few body chunks whose entry's title agrees too.
+    """The nearest older body chunk whose entry's title agrees as well.
 
     ``k`` is one more than :data:`NEAR_DUPLICATE_K` because the entry being
-    captured is its own nearest neighbour and is dropped below.
+    captured is its own nearest neighbour and the ``id`` filter below drops it.
     ``include_model_authored`` is set: this is the user's own knowledge base
-    checking itself for duplicates, not the authorship gate that gouverns what the
+    checking itself for duplicates, not the authorship gate that governs what the
     model is fed.
     """
     rows = await store.knn(
@@ -1127,14 +1133,18 @@ async def _nearest_by_vector(
             await session.execute(
                 select(KbChunk.id, KbEntry.id, KbEntry.title)
                 .join(KbEntry, KbEntry.id == KbChunk.entry_id)
-                .where(KbChunk.id.in_(chunk_ids), KbEntry.deleted_at.is_(None))
+                .where(
+                    KbChunk.id.in_(chunk_ids),
+                    KbEntry.deleted_at.is_(None),
+                    KbEntry.id < entry_id,
+                )
             )
         ).all()
-    by_chunk = {chunk_id: (entry_id, other) for chunk_id, entry_id, other in found}
+    by_chunk = {chunk_id: (found_id, other) for chunk_id, found_id, other in found}
 
     for chunk_id, distance in rows:
         candidate = by_chunk.get(chunk_id)
-        if candidate is None or candidate[0] == exclude_entry_id:
+        if candidate is None:
             continue
         cosine = cosine_from_distance(distance)
         score = title_similarity(title, candidate[1])
@@ -1148,9 +1158,9 @@ async def _nearest_by_title(
     *,
     title: str,
     threshold: float,
-    exclude_entry_id: int,
+    entry_id: int,
 ) -> DuplicateMatch | None:
-    """The best-matching title among the newest entries — the no-embedder leg.
+    """The best-matching title among the older entries — the no-embedder leg.
 
     Walked newest-first and compared with ``>=`` so that a tie resolves to the
     **oldest** entry: the flag points backwards, at the copy that was already
@@ -1160,19 +1170,19 @@ async def _nearest_by_title(
         candidates = (
             await session.execute(
                 select(KbEntry.id, KbEntry.title)
-                .where(KbEntry.deleted_at.is_(None), KbEntry.id != exclude_entry_id)
+                .where(KbEntry.deleted_at.is_(None), KbEntry.id < entry_id)
                 .order_by(KbEntry.id.desc())
                 .limit(NEAR_DUPLICATE_TITLE_SCAN)
             )
         ).all()
 
     best: DuplicateMatch | None = None
-    for entry_id, other in candidates:
+    for candidate_id, other in candidates:
         score = title_similarity(title, other)
         if not is_near_duplicate(None, score, threshold=threshold):
             continue
         if best is None or score >= best.title_score:
-            best = DuplicateMatch(entry_id=entry_id, cosine=None, title_score=score)
+            best = DuplicateMatch(entry_id=candidate_id, cosine=None, title_score=score)
     return best
 
 
@@ -1218,7 +1228,7 @@ async def flag_near_duplicate(
             first_body_vector=vector,
             title=title,
             threshold=threshold,
-            exclude_entry_id=entry_id,
+            entry_id=entry_id,
         )
         if found is None:
             return None
