@@ -8,6 +8,7 @@ import {
   deleteEntry,
   kbQueryKey,
   mergeEntry,
+  notADuplicate,
   patchEntry,
   purgeEntries,
   refreshEntry,
@@ -66,6 +67,12 @@ export default function NeedsAttention({
     mutationFn: ({ id, into }: { id: number; into: number }) => mergeEntry(id, into),
     onSuccess: invalidate,
   })
+  // The answer to a false positive, which with no Voyage key is most of them:
+  // the flag goes, nothing is merged and nothing is deleted.
+  const dismiss = useMutation({
+    mutationFn: (id: number) => notADuplicate(id),
+    onSuccess: invalidate,
+  })
   const review = useMutation({
     mutationFn: (id: number) => patchEntry(id, { review_status: 'reviewed' }),
     onSuccess: invalidate,
@@ -110,6 +117,7 @@ export default function NeedsAttention({
     (undo.isError && conflictDetail(undo.error) === null) ||
     (merge.isError && conflictDetail(merge.error) === null) ||
     review.isError ||
+    dismiss.isError ||
     retry.isError ||
     compile.isError ||
     remove.isError
@@ -131,6 +139,7 @@ export default function NeedsAttention({
               row={row}
               busy={{
                 merge: merge.isPending && merge.variables?.id === row.entryId,
+                dismiss: dismiss.isPending && dismiss.variables === row.entryId,
                 review: review.isPending && review.variables === row.entryId,
                 retry: retry.isPending && retry.variables === row.entryId,
                 compile: compile.isPending && compile.variables === row.entryId,
@@ -139,6 +148,7 @@ export default function NeedsAttention({
               }}
               onOpen={onOpen}
               onMerge={(id, into) => merge.mutate({ id, into })}
+              onDismiss={(id) => dismiss.mutate(id)}
               onReview={(id) => review.mutate(id)}
               onRetry={(id) => retry.mutate(id)}
               onCompile={(id) => {
@@ -195,6 +205,7 @@ interface ActionsProps {
   row: AttentionRow
   busy: {
     merge: boolean
+    dismiss: boolean
     review: boolean
     retry: boolean
     compile: boolean
@@ -203,6 +214,7 @@ interface ActionsProps {
   }
   onOpen: (id: number) => void
   onMerge: (id: number, into: number) => void
+  onDismiss: (id: number) => void
   onReview: (id: number) => void
   onRetry: (id: number) => void
   onCompile: (id: number) => void
@@ -216,6 +228,7 @@ function Actions({
   busy,
   onOpen,
   onMerge,
+  onDismiss,
   onReview,
   onRetry,
   onCompile,
@@ -242,6 +255,15 @@ function Actions({
           onClick={() => onMerge(row.entryId as number, row.mergeInto as number)}
         >
           Merge
+        </Button>
+        <Button
+          size="sm"
+          variant="ghost"
+          loading={busy.dismiss}
+          title="Clears the flag. Nothing is merged and nothing is deleted."
+          onClick={() => onDismiss(row.entryId as number)}
+        >
+          Dismiss
         </Button>
       </>
     )

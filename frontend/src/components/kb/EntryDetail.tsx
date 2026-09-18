@@ -15,6 +15,7 @@ import {
   kbQueryKey,
   kindLabel,
   mergeEntry,
+  notADuplicate,
   patchEntry,
   refreshEntry,
   refreshFailed,
@@ -438,6 +439,14 @@ function DuplicateBanner({
     onSuccess: onChanged,
   })
 
+  // The third answer, and with no Voyage key the usual one: the flag was wrong.
+  // Merging two unrelated entries or deleting one of them used to be the only
+  // ways out of a false positive (plan decision P2-23).
+  const dismiss = useMutation({
+    mutationFn: () => notADuplicate(entry.id),
+    onSuccess: onChanged,
+  })
+
   const conflict = conflictDetail(merge.error)
 
   return (
@@ -461,9 +470,21 @@ function DuplicateBanner({
       >
         Merge
       </Button>
+      <Button
+        size="sm"
+        variant="ghost"
+        loading={dismiss.isPending}
+        title="Clears the flag. Nothing is merged and nothing is deleted."
+        onClick={() => dismiss.mutate()}
+      >
+        Dismiss
+      </Button>
       {conflict ? <span className="basis-full text-red">{conflict}</span> : null}
       {merge.isError && conflict === null ? (
         <span className="basis-full text-red">They could not be merged.</span>
+      ) : null}
+      {dismiss.isError ? (
+        <span className="basis-full text-red">The flag could not be cleared.</span>
       ) : null}
     </div>
   )

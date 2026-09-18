@@ -385,6 +385,15 @@ export const listTopics = (): Promise<KbTopic[]> => apiGet<KbTopic[]>('/kb/topic
 export const mergeEntry = (id: number, into: number): Promise<KbEntry> =>
   apiPost<KbEntry>(`/kb/entries/${id}/merge`, { into })
 
+/**
+ * "This is not a duplicate": clears the flag and nothing else.
+ *
+ * Idempotent, which is what lets the strip and the entry page both offer it —
+ * an entry with no flag is a 200 too. Only an unknown id is an error.
+ */
+export const notADuplicate = (id: number): Promise<KbEntry> =>
+  apiPost<KbEntry>(`/kb/entries/${id}/not-a-duplicate`)
+
 /** Hard delete, and the only irreversible action in the app. Soft-deleted ids only. */
 export const purgeEntries = (ids: number[]): Promise<{ purged: number }> =>
   apiPost<{ purged: number }>('/kb/purge', { ids })
