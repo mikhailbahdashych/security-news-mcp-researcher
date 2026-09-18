@@ -17,6 +17,7 @@ from app.kb.schema import (
     parse_schema_version,
 )
 from app.schemas.settings import (
+    CompileMode,
     Effort,
     KbSchemaVersionRead,
     SettingsRead,
@@ -39,6 +40,7 @@ def _as_text(value: Any) -> str:
 
 async def _read(session: DbSession, settings: AppSettings) -> SettingsRead:
     api_key = await settings_service.get_str(session, "anthropic_api_key")
+    voyage_key = await settings_service.get_str(session, "voyage_api_key")
     return SettingsRead(
         model=await settings_service.get_str(session, "model"),
         # Coerced in the service, not here, so that the turn settings read the
@@ -66,6 +68,35 @@ async def _read(session: DbSession, settings: AppSettings) -> SettingsRead:
         kb_capture_notes=await settings_service.get_bool(session, "kb_capture_notes"),
         kb_min_snapshot_chars=await settings_service.get_int(session, "kb_min_snapshot_chars"),
         kb_schema_version=await _schema_version(session),
+        # The same two meanings as above: "stored here" and "where the effective
+        # key comes from". `mask_key` invents no prefix for a Voyage key, so this
+        # is the bare `…c3d4` form.
+        has_voyage_key=bool(voyage_key.strip()),
+        voyage_api_key_masked=settings_service.mask_key(voyage_key),
+        voyage_key_source=await settings_service.get_voyage_key_source(session, settings),
+        kb_embedding_model=await settings_service.get_str(session, "kb_embedding_model"),
+        kb_capture_findings=await settings_service.get_bool(session, "kb_capture_findings"),
+        kb_compile_mode=cast(
+            CompileMode, await settings_service.get_choice(session, "kb_compile_mode")
+        ),
+        kb_compile_model=await settings_service.get_str(session, "kb_compile_model"),
+        kb_compile_effort=cast(
+            Effort, await settings_service.get_choice(session, "kb_compile_effort")
+        ),
+        kb_compile_prompt=await settings_service.get_str(session, "kb_compile_prompt"),
+        kb_compile_max_chars=await settings_service.get_int(session, "kb_compile_max_chars"),
+        kb_compile_monthly_token_budget=await settings_service.get_int(
+            session, "kb_compile_monthly_token_budget"
+        ),
+        kb_auto_accept_suggestions=await settings_service.get_bool(
+            session, "kb_auto_accept_suggestions"
+        ),
+        kb_reviewed_only=await settings_service.get_bool(session, "kb_reviewed_only"),
+        kb_recency_boost=await settings_service.get_bool(session, "kb_recency_boost"),
+        kb_rerank=await settings_service.get_bool(session, "kb_rerank"),
+        kb_duplicate_threshold=await settings_service.get_float(
+            session, "kb_duplicate_threshold"
+        ),
     )
 
 
@@ -96,8 +127,9 @@ async def update_settings(
         for key, value in update.model_dump(exclude_unset=True).items()
         if value is not None
     }
-    if "anthropic_api_key" in changes:
-        changes["anthropic_api_key"] = changes["anthropic_api_key"].strip()
+    for key in ("anthropic_api_key", "voyage_api_key"):
+        if key in changes:
+            changes[key] = changes[key].strip()
 
     await settings_service.set_many(session, changes)
     await session.commit()

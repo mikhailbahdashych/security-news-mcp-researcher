@@ -9,6 +9,9 @@ from pydantic import BaseModel, ConfigDict, Field
 Effort = Literal["low", "medium", "high", "xhigh", "max"]
 ThinkingDisplay = Literal["summarized", "omitted"]
 KeySource = Literal["env", "stored", "none"]
+#: ``manual`` — entries wait for a "Compile N entries" click; ``auto`` — compile
+#: at capture time.
+CompileMode = Literal["manual", "auto"]
 
 
 class KbSchemaVersionRead(BaseModel):
@@ -57,13 +60,33 @@ class SettingsRead(BaseModel):
     kb_capture_notes: bool
     kb_min_snapshot_chars: int
     kb_schema_version: KbSchemaVersionRead
+    #: Whether a Voyage key is stored **in this database** — not whether one is
+    #: usable; ``voyage_key_source`` answers that. Both mirror the Anthropic key.
+    has_voyage_key: bool
+    voyage_api_key_masked: str
+    voyage_key_source: KeySource
+    kb_embedding_model: str
+    kb_capture_findings: bool
+    kb_compile_mode: CompileMode
+    kb_compile_model: str
+    kb_compile_effort: Effort
+    kb_compile_prompt: str
+    kb_compile_max_chars: int
+    #: Compile tokens per calendar month. **Chat spend is not counted here.**
+    kb_compile_monthly_token_budget: int
+    kb_auto_accept_suggestions: bool
+    kb_reviewed_only: bool
+    kb_recency_boost: bool
+    #: Read by nobody until the reranker lands (Phase 3).
+    kb_rerank: bool
+    kb_duplicate_threshold: float
 
 
 class SettingsUpdate(BaseModel):
     """A partial update: every field is optional and only what is sent is written.
 
-    ``anthropic_api_key`` is write-only — it is accepted here and never returned by
-    any endpoint. Sending an empty string clears the stored key.
+    ``anthropic_api_key`` and ``voyage_api_key`` are write-only — accepted here and
+    never returned by any endpoint. Sending an empty string clears the stored key.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -82,6 +105,20 @@ class SettingsUpdate(BaseModel):
     kb_capture_starred: bool | None = None
     kb_capture_notes: bool | None = None
     kb_min_snapshot_chars: int | None = Field(default=None, ge=0, le=100_000)
+    voyage_api_key: str | None = Field(default=None, max_length=500)
+    kb_embedding_model: str | None = Field(default=None, min_length=1, max_length=200)
+    kb_capture_findings: bool | None = None
+    kb_compile_mode: CompileMode | None = None
+    kb_compile_model: str | None = Field(default=None, min_length=1, max_length=200)
+    kb_compile_effort: Effort | None = None
+    kb_compile_prompt: str | None = Field(default=None, max_length=20_000)
+    kb_compile_max_chars: int | None = Field(default=None, ge=1_000, le=200_000)
+    kb_compile_monthly_token_budget: int | None = Field(default=None, ge=0, le=1_000_000_000)
+    kb_auto_accept_suggestions: bool | None = None
+    kb_reviewed_only: bool | None = None
+    kb_recency_boost: bool | None = None
+    kb_rerank: bool | None = None
+    kb_duplicate_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
 class TestKeyResult(BaseModel):
@@ -99,6 +136,7 @@ class ModelOption(BaseModel):
 
 
 __all__ = [
+    "CompileMode",
     "Effort",
     "KbSchemaVersionRead",
     "KeySource",

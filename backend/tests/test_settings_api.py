@@ -14,6 +14,17 @@ from app.kb import schema as kb_schema
 from app.services import settings as settings_service
 
 RAW_KEY = "sk-ant-api03-supersecretvalue-a1b2"
+RAW_VOYAGE_KEY = "pa-voyagesupersecretvalue-c3d4"
+
+
+@pytest.fixture(autouse=True)
+def isolated_voyage_key_env(monkeypatch):
+    """Keep an ambient ``VOYAGE_API_KEY`` out of this module.
+
+    ``conftest.py``'s autouse fixture does this for ``ANTHROPIC_API_KEY``, but
+    ``conftest.py`` has a single writer this phase — see the report's docs delta.
+    """
+    monkeypatch.delenv(settings_service.VOYAGE_KEY_ENV_VAR, raising=False)
 
 
 @pytest.fixture
@@ -48,6 +59,22 @@ async def test_get_settings_returns_seeded_defaults(client: httpx2.AsyncClient) 
         "kb_capture_notes": True,
         "kb_min_snapshot_chars": 400,
         "kb_schema_version": kb_schema.current_schema_version(),
+        "has_voyage_key": False,
+        "voyage_api_key_masked": "",
+        "voyage_key_source": "none",
+        "kb_embedding_model": "voyage-4",
+        "kb_capture_findings": False,
+        "kb_compile_mode": "manual",
+        "kb_compile_model": "claude-sonnet-5",
+        "kb_compile_effort": "low",
+        "kb_compile_prompt": settings_service.DEFAULT_COMPILE_PROMPT,
+        "kb_compile_max_chars": 24_000,
+        "kb_compile_monthly_token_budget": 5_000_000,
+        "kb_auto_accept_suggestions": True,
+        "kb_reviewed_only": False,
+        "kb_recency_boost": True,
+        "kb_rerank": True,
+        "kb_duplicate_threshold": 0.92,
     }
 
 
@@ -389,3 +416,103 @@ async def test_key_source_is_stored_once_a_key_is_saved(client: httpx2.AsyncClie
     await client.put("/api/settings", json={"anthropic_api_key": RAW_KEY})
 
     assert (await client.get("/api/settings")).json()["key_source"] == "stored"
+
+
+# ------------------------------------------------- the Voyage key and Phase 2
+
+
+async def test_the_voyage_key_is_only_ever_read_back_masked(client: httpx2.AsyncClient) -> None:
+    put_response = await client.put("/api/settings", json={"voyage_api_key": RAW_VOYAGE_KEY})
+    get_response = await client.get("/api/settings")
+
+    assert put_response.status_code == 200
+    for response in (put_response, get_response):
+        body = response.json()
+        assert body["has_voyage_key"] is True
+        assert body["voyage_key_source"] == "stored"
+        assert body["voyage_api_key_masked"] == "…c3d4"
+        assert RAW_VOYAGE_KEY not in response.text
+        assert "voyagesupersecret" not in response.text
+
+    await client.put("/api/settings", json={"voyage_api_key": ""})
+    cleared = (await client.get("/api/settings")).json()
+    assert cleared["has_voyage_key"] is False
+    assert cleared["voyage_api_key_masked"] == ""
+
+
+async def test_the_voyage_env_override_wins_over_the_stored_key(
+    client: httpx2.AsyncClient, app_factory, tmp_path, monkeypatch
+) -> None:
+    """``has_voyage_key`` keeps meaning "stored here"; the source explains the rest."""
+    monkeypatch.setenv(settings_service.VOYAGE_KEY_ENV_VAR, "pa-from-the-environment-0001")
+
+    body = (await client.get("/api/settings")).json()
+    assert body["has_voyage_key"] is False
+    assert body["voyage_key_source"] == "env"
+
+    await client.put("/api/settings", json={"voyage_api_key": RAW_VOYAGE_KEY})
+    stored_too = (await client.get("/api/settings")).json()
+    assert stored_too["has_voyage_key"] is True
+    assert stored_too["voyage_key_source"] == "env"
+
+    # The other spelling of "configured outside the app": a key in `.env`, which
+    # reaches the app as `Settings` and never as an environment variable.
+    monkeypatch.delenv(settings_service.VOYAGE_KEY_ENV_VAR, raising=False)
+    dotenv_app = app_factory(
+        Settings(
+            db_path=tmp_path / "app.db",
+            static_dir=tmp_path / "absent",
+            anthropic_api_key="",
+            voyage_api_key="pa-from-the-dotenv-0002",
+        )
+    )
+    async with httpx2.AsyncClient(
+        transport=ASGITransport(app=dotenv_app), base_url="http://test"
+    ) as http:
+        from_dotenv = (await http.get("/api/settings")).json()
+    assert from_dotenv["voyage_key_source"] == "env"
+    assert "pa-from-the-dotenv-0002" not in str(from_dotenv)
+
+
+PHASE_TWO_SETTINGS = {
+    "kb_embedding_model": "voyage-4-lite",
+    "kb_capture_findings": True,
+    "kb_compile_mode": "auto",
+    "kb_compile_model": "claude-opus-5",
+    "kb_compile_effort": "medium",
+    "kb_compile_prompt": "# Summarise it",
+    "kb_compile_max_chars": 32_000,
+    "kb_compile_monthly_token_budget": 250_000,
+    "kb_auto_accept_suggestions": False,
+    "kb_reviewed_only": True,
+    "kb_recency_boost": False,
+    "kb_rerank": False,
+    "kb_duplicate_threshold": 0.75,
+}
+
+
+async def test_every_phase_two_setting_round_trips(client: httpx2.AsyncClient) -> None:
+    response = await client.put("/api/settings", json=PHASE_TWO_SETTINGS)
+
+    assert response.status_code == 200, response.text
+    for body in (response.json(), (await client.get("/api/settings")).json()):
+        for key, value in PHASE_TWO_SETTINGS.items():
+            assert body[key] == value, key
+            assert isinstance(body[key], type(value)), key
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"kb_compile_mode": "sometimes"},
+        {"kb_compile_effort": "turbo"},
+        {"kb_duplicate_threshold": 1.5},
+        {"kb_compile_max_chars": 10},
+        {"kb_embedding_model": ""},
+        {"kb_compile_monthly_token_budget": -1},
+    ],
+)
+async def test_put_rejects_out_of_range_phase_two_values(
+    client: httpx2.AsyncClient, payload: dict
+) -> None:
+    assert (await client.put("/api/settings", json=payload)).status_code == 422

@@ -7,7 +7,7 @@ import pytest
 
 from app.agent.providers import turn_settings
 from app.config import Settings
-from app.schemas.settings import Effort, ThinkingDisplay
+from app.schemas.settings import CompileMode, Effort, ThinkingDisplay
 from app.services import settings as settings_service
 
 
@@ -167,6 +167,8 @@ def test_the_allowed_values_are_the_ones_the_api_promises():
     drifts from the response model would coerce a value the API then rejects."""
     assert settings_service.ALLOWED_VALUES["effort"] == get_args(Effort)
     assert settings_service.ALLOWED_VALUES["thinking_display"] == get_args(ThinkingDisplay)
+    assert settings_service.ALLOWED_VALUES["kb_compile_effort"] == get_args(Effort)
+    assert settings_service.ALLOWED_VALUES["kb_compile_mode"] == get_args(CompileMode)
 
 
 async def test_get_choice_returns_a_stored_value_from_the_set(db_session):
@@ -205,6 +207,109 @@ async def test_a_turn_reads_the_same_coerced_values_as_the_settings_page(db_sess
 
     assert resolved["effort"] == "high"
     assert resolved["thinking_display"] == "summarized"
+
+
+# --------------------------------------------------------------- the Voyage key
+
+
+@pytest.fixture(autouse=True)
+def isolated_voyage_key_env(monkeypatch):
+    """Keep an ambient ``VOYAGE_API_KEY`` out of this module.
+
+    ``conftest.py`` does this for ``ANTHROPIC_API_KEY``; it has one writer this
+    phase, so the Voyage half lives here until the docs commit moves it.
+    """
+    monkeypatch.delenv(settings_service.VOYAGE_KEY_ENV_VAR, raising=False)
+
+
+async def test_effective_voyage_key_precedence_is_env_then_dotenv_then_stored(
+    db_session, monkeypatch
+):
+    dotenv = Settings(voyage_api_key="pa-from-dotenv-7777")
+    await settings_service.set_value(db_session, "voyage_api_key", "pa-stored-1234")
+
+    assert await settings_service.get_effective_voyage_key(db_session) == "pa-stored-1234"
+    assert await settings_service.get_effective_voyage_key(db_session, dotenv) == (
+        "pa-from-dotenv-7777"
+    )
+
+    monkeypatch.setenv("VOYAGE_API_KEY", "pa-from-env-9999")
+    assert await settings_service.get_effective_voyage_key(db_session, dotenv) == (
+        "pa-from-env-9999"
+    )
+
+    # An empty env var is not an override.
+    monkeypatch.setenv("VOYAGE_API_KEY", "")
+    assert await settings_service.get_effective_voyage_key(db_session, dotenv) == (
+        "pa-from-dotenv-7777"
+    )
+
+
+async def test_the_external_voyage_key_is_never_written_to_the_database(db_session):
+    dotenv = Settings(voyage_api_key="pa-from-dotenv-7777")
+
+    assert await settings_service.get_effective_voyage_key(db_session, dotenv)
+
+    assert await settings_service.get(db_session, "voyage_api_key") == ""
+
+
+async def test_voyage_key_source_names_the_winning_source(db_session, monkeypatch):
+    empty = Settings(voyage_api_key="")
+    assert await settings_service.get_voyage_key_source(db_session, empty) == "none"
+
+    await settings_service.set_value(db_session, "voyage_api_key", "pa-stored-1234")
+    assert await settings_service.get_voyage_key_source(db_session, empty) == "stored"
+
+    dotenv = Settings(voyage_api_key="pa-from-dotenv-7777")
+    assert await settings_service.get_voyage_key_source(db_session, dotenv) == "env"
+
+    monkeypatch.setenv("VOYAGE_API_KEY", "pa-from-env-9999")
+    assert await settings_service.get_voyage_key_source(db_session, empty) == "env"
+
+
+# ------------------------------------------------------- the Phase 2 settings
+
+
+async def test_the_phase_two_defaults_are_seeded(db_session):
+    assert await settings_service.get(db_session, "voyage_api_key") == ""
+    assert await settings_service.get_str(db_session, "kb_embedding_model") == "voyage-4"
+    assert await settings_service.get_bool(db_session, "kb_capture_findings") is False
+    assert await settings_service.get_choice(db_session, "kb_compile_mode") == "manual"
+    assert await settings_service.get_str(db_session, "kb_compile_model") == "claude-sonnet-5"
+    assert await settings_service.get_choice(db_session, "kb_compile_effort") == "low"
+    assert await settings_service.get_int(db_session, "kb_compile_max_chars") == 24_000
+    assert (
+        await settings_service.get_int(db_session, "kb_compile_monthly_token_budget") == 5_000_000
+    )
+    assert await settings_service.get_bool(db_session, "kb_auto_accept_suggestions") is True
+    assert await settings_service.get_bool(db_session, "kb_reviewed_only") is False
+    assert await settings_service.get_bool(db_session, "kb_recency_boost") is True
+    assert await settings_service.get_bool(db_session, "kb_rerank") is True
+    assert await settings_service.get_float(db_session, "kb_duplicate_threshold") == 0.92
+    assert (
+        await settings_service.get_str(db_session, "kb_compile_prompt")
+        == settings_service.DEFAULT_COMPILE_PROMPT
+    )
+
+
+async def test_get_float_falls_back_on_garbage(db_session):
+    await settings_service.set_value(db_session, "kb_duplicate_threshold", "0.5")
+    assert await settings_service.get_float(db_session, "kb_duplicate_threshold") == 0.5
+
+    await settings_service.set_value(db_session, "kb_duplicate_threshold", "nearly")
+    assert await settings_service.get_float(db_session, "kb_duplicate_threshold") == 0.92
+    # A key with no documented default is 0.0 rather than an exception.
+    assert await settings_service.get_float(db_session, "nope") == 0.0
+
+
+def test_the_compile_prompt_is_generic_and_says_the_text_is_data():
+    """Ground rule: no employer or company context in a shipped prompt, and the
+    article is material to summarise rather than instructions to obey."""
+    prompt = settings_service.DEFAULT_COMPILE_PROMPT
+
+    assert isinstance(settings_service.COMPILE_PROMPT_VERSION, int)
+    assert "instruction" in prompt.lower()
+    assert prompt == prompt.strip()
 
 
 def test_the_minimum_snapshot_default_matches_the_capture_constant():

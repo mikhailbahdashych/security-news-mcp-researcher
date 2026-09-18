@@ -41,6 +41,10 @@ class Settings(BaseSettings):
     #: ``app.services.settings.get_effective_api_key`` and is never written to the
     #: database — see the precedence rules there.
     anthropic_api_key: str = ""
+    #: Optional ``VOYAGE_API_KEY`` for the knowledge base's embeddings. Same story
+    #: and same precedence as the Anthropic key above — see
+    #: ``app.services.settings.get_effective_voyage_key``.
+    voyage_api_key: str = ""
     #: Root log level for the application's own loggers; see ``app.logging_config``.
     log_level: str = "INFO"
 
