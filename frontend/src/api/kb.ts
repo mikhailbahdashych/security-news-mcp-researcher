@@ -1,4 +1,4 @@
-import { groupByDay, type DayGroup } from '../lib/dates'
+import { groupByDay, parseUtc, type DayGroup } from '../lib/dates'
 import type { BadgeTone } from '../components/ui/Badge'
 import { apiGet, apiPatch, apiPost } from './client'
 import { hostOf } from '../lib/urls'
@@ -72,6 +72,10 @@ export interface KbEntry {
   summary_md: string | null
   notes_md: string
   compiled_at: string | null
+  /** The model that actually answered — a fallback switch can make it another
+   *  one than `kb_compile_model`. Null until something has been compiled. */
+  compile_model: string | null
+  compile_prompt_version: number | null
   entities: KbEntity[]
   topics: KbTopicRef[]
   tags: KbTagRef[]
@@ -173,6 +177,69 @@ export interface KbTopic {
   entry_count: number
 }
 
+/** What one "Embed now" did, and what is still waiting for the next call. */
+export interface KbEmbedPending {
+  embedded: number
+  /** The whole backlog, not this call's remainder — loop while it is above zero. */
+  pending: number
+  /** Voyage's, counted apart from the Anthropic compile budget. */
+  tokens: number
+}
+
+/** Why a compile did nothing. All five are a 200 — none of them is a server error. */
+export type CompileReasonCode = 'budget' | 'refusal' | 'parse' | 'no_text' | 'api_error'
+
+/** A topic the model proposed. **Nothing is created from it** until the user says so. */
+export interface KbCompileNewTopic {
+  name: string
+  description: string | null
+}
+
+export interface KbCompileResult {
+  /** Re-read after the write, so `summary_md` / `compiled_at` are current. */
+  entry: KbEntry
+  compiled: boolean
+  reason: string | null
+  reason_code: CompileReasonCode | null
+  input_tokens: number
+  output_tokens: number
+  model: string | null
+  prompt_version: number | null
+  new_topic: KbCompileNewTopic | null
+  /** Already applied (and still marked `suggested`) when auto-accept is on. */
+  suggested_topic_ids: number[]
+  suggested_tags: string[]
+  entities: { kind: string; value: string }[]
+}
+
+/** What "Compile N" would cost. No model call is made to produce it. */
+export interface KbCompileEstimate {
+  entries: number
+  input_tokens: number
+  budget_remaining: number
+  would_exceed: boolean
+}
+
+/**
+ * Month-to-date knowledge-base spend.
+ *
+ * The Anthropic figures are **compile only** — chat spend is counted per session
+ * and deliberately not added here — and `voyage` is never added to them either:
+ * it is this app's own estimate of what was embedded, which is what
+ * `voyage_estimated` says out loud.
+ */
+export interface KbBudget {
+  month: string
+  limit: number
+  anthropic_input: number
+  anthropic_output: number
+  anthropic_total: number
+  remaining: number
+  exhausted: boolean
+  voyage: number
+  voyage_estimated: boolean
+}
+
 /** Exactly one of the two sources, never both — the API answers 422 otherwise. */
 export interface EntryCreate {
   feed_item_id?: number
@@ -233,6 +300,16 @@ export const kbSearchKey = (q: string, filters: EntryFilters) =>
 export const kbEntryKey = (id: number) => ['kb', 'entry', id] as const
 export const kbStatsKey = ['kb', 'stats'] as const
 export const kbTopicsKey = ['kb', 'topics'] as const
+export const kbBudgetKey = ['kb', 'budget'] as const
+export const kbActivityKey = (limit: number) => ['kb', 'activity', limit] as const
+
+/** How many trail rows the strip reads to find failures; 200 is the API's cap. */
+export const KB_ATTENTION_ACTIVITY = 40
+export const KB_ACTIVITY_LOG_LIMIT = 200
+/** The batch compile route takes 100 ids at most. */
+export const KB_COMPILE_BATCH_MAX = 100
+/** `POST /kb/bulk` takes 200 item ids at most. */
+export const KB_BULK_MAX_ITEMS = 200
 
 function entryParams(filters: EntryFilters, limit: number, cursor?: string): string {
   const params = new URLSearchParams({ limit: String(limit) })
@@ -303,6 +380,65 @@ export const refreshEntry = (id: number): Promise<KbRefreshResult> =>
 export const getStats = (): Promise<KbStats> => apiGet<KbStats>('/kb/stats')
 
 export const listTopics = (): Promise<KbTopic[]> => apiGet<KbTopic[]>('/kb/topics')
+
+/** Fold two entries together. The **older** one survives, whichever is named. */
+export const mergeEntry = (id: number, into: number): Promise<KbEntry> =>
+  apiPost<KbEntry>(`/kb/entries/${id}/merge`, { into })
+
+/** Hard delete, and the only irreversible action in the app. Soft-deleted ids only. */
+export const purgeEntries = (ids: number[]): Promise<{ purged: number }> =>
+  apiPost<{ purged: number }>('/kb/purge', { ids })
+
+/** 201, or **409** when the name is taken — the detail is the message to show. */
+export const createTopic = (name: string, description?: string): Promise<KbTopic> =>
+  apiPost<KbTopic>('/kb/topics', description ? { name, description } : { name })
+
+export const listActivity = (limit = KB_ACTIVITY_LOG_LIMIT): Promise<KbActivity[]> =>
+  apiGet<{ items: KbActivity[] }>(`/kb/activity?limit=${limit}`).then((page) => page.items ?? [])
+
+/**
+ * Embed a bounded slice of the chunks that have no vector yet.
+ *
+ * **409** with no Voyage key configured, **502** when the provider refuses — and
+ * in both cases the chunks stay pending, so the count on screen is still true.
+ */
+export const embedPending = (): Promise<KbEmbedPending> =>
+  apiPost<KbEmbedPending>('/kb/embed-pending')
+
+// ------------------------------------------------------------ compile + budget
+
+/** One entry. Everything but an unknown id is a 200 with `compiled: false`. */
+export const compileEntry = (id: number): Promise<KbCompileResult> =>
+  apiPost<KbCompileResult>(`/kb/entries/${id}/compile`)
+
+/**
+ * What a batch would cost, before anything is spent. No model call is made.
+ *
+ * `entries` counts only the ids that could be priced — an unknown id is skipped
+ * here rather than refused, so it can be smaller than what was asked for.
+ */
+export const estimateCompile = (entryIds: number[]): Promise<KbCompileEstimate> =>
+  apiPost<KbCompileEstimate>('/kb/compile?estimate=1', { entry_ids: entryIds })
+
+/**
+ * Compile a batch. **A 404 means nothing was compiled** — the route validates
+ * every id before the first token, so an unknown id costs nothing.
+ */
+export const compileBatch = (entryIds: number[]): Promise<KbCompileResult[]> =>
+  apiPost<{ results: KbCompileResult[] }>('/kb/compile', { entry_ids: entryIds }).then(
+    (page) => page.results ?? [],
+  )
+
+export const getBudget = (): Promise<KbBudget> => apiGet<KbBudget>('/kb/budget')
+
+// ------------------------------------------------------------------ bulk save
+
+/** The SSE endpoint `streamSSE` POSTs to; `apiPost` cannot read a stream. */
+export const bulkCaptureUrl = (): string => '/api/kb/bulk'
+
+/** 200 with `cancelled: false` when nothing is running — Stop may lose the race. */
+export const cancelBulkCapture = (jobId: string): Promise<{ cancelled: boolean }> =>
+  apiPost<{ cancelled: boolean }>('/kb/bulk/cancel', { job_id: jobId })
 
 // ------------------------------------------------------------- derivations
 
@@ -524,4 +660,169 @@ export function entityHint(raw: string): string | null {
 export function sinceDaysAgo(days: number, now: Date = new Date()): string {
   const at = new Date(now.getTime() - days * 24 * 60 * 60 * 1000)
   return at.toISOString().replace(/\.\d+Z$/, '')
+}
+
+// --------------------------------------------------- Phase 2: tokens, budget
+
+/**
+ * A token count at a glance: `12 340` → `12.3K`, `5 000 000` → `5.0M`.
+ *
+ * Deliberately **not** `api/chat.ts::formatTokens`, which stops at `k` and would
+ * draw the five-million-token budget as `5000k`. A monthly ceiling is the one
+ * number in this app that reaches seven figures.
+ */
+export function formatTokens(count: number): string {
+  // A negative is a backend that subtracted more than it added; it is not a
+  // fact worth rendering, and `-0.0K` is not a number anyone can act on.
+  if (!Number.isFinite(count) || count <= 0) {
+    return '0'
+  }
+  if (count < 1_000) {
+    return String(Math.round(count))
+  }
+  if (count < 1_000_000) {
+    return `${(count / 1_000).toFixed(1)}K`
+  }
+  return `${(count / 1_000_000).toFixed(1)}M`
+}
+
+export interface BudgetLabel {
+  used: string
+  limit: string
+  /** 0–100, for the bar. A limit of 0 is "no budget at all", so it reads full. */
+  pct: number
+  exhausted: boolean
+}
+
+/**
+ * The compile budget as the Settings panel draws it.
+ *
+ * Derived rather than read off `exhausted`, so a backend that predates the flag
+ * still gets the right bar — and so the bar and the word can never disagree.
+ * A limit of **0** means no compiling at all: full bar, spent, and no division.
+ */
+export function budgetLabel(budget: KbBudget): BudgetLabel {
+  const limit = Math.max(0, budget.limit ?? 0)
+  const used = Math.max(0, budget.anthropic_total ?? 0)
+  return {
+    used: formatTokens(used),
+    limit: formatTokens(limit),
+    pct: limit > 0 ? Math.min(100, Math.round((used / limit) * 100)) : 100,
+    // `>=`, the same comparison the backend makes: the limit is the last token
+    // that may be spent, so hitting it exactly is hitting it.
+    exhausted: used >= limit,
+  }
+}
+
+/**
+ * "8 of 11 chunks embedded" — or nothing at all when none is waiting.
+ *
+ * Counted on the client from `chunks - pending_chunks`: there is no API field
+ * for it, and inventing one would have meant a migration for a subtraction.
+ */
+export function embeddingStatus(entry: Pick<KbEntry, 'chunks' | 'pending_chunks'>): string | null {
+  const total = Math.max(0, entry.chunks ?? 0)
+  const pending = Math.max(0, entry.pending_chunks ?? 0)
+  if (pending <= 0 || total <= 0) {
+    return null
+  }
+  return `${Math.max(0, total - pending)} of ${total} chunks embedded`
+}
+
+/**
+ * The line under the search box that says which legs answered.
+ *
+ * `mode` is the **server's** word, never a guess from the settings: a key that
+ * is configured but has embedded nothing yet still answers `keyword`, and
+ * claiming hybrid there would be the page lying about its own results.
+ * `null` when nothing was searched — there is then nothing to explain.
+ */
+export function searchModeLabel(
+  mode: 'keyword' | 'hybrid' | undefined,
+  embeddingsConfigured: boolean,
+): string | null {
+  if (mode === 'hybrid') {
+    return 'Hybrid search: the words and the meaning.'
+  }
+  if (mode === 'keyword') {
+    return embeddingsConfigured
+      ? 'Keyword search — nothing is embedded yet. Settings → Knowledge → Embed now.'
+      : 'Keyword search — add a Voyage API key in Settings → Knowledge for meaning-based search.'
+  }
+  return null
+}
+
+/**
+ * The "Needs attention" row for a flagged near-duplicate.
+ *
+ * Without a Voyage key the flag comes from the **title trigram alone**, which
+ * flags two unrelated advisories with similar headlines — so the row says so
+ * rather than letting the user read a coincidence as a finding.
+ */
+export function duplicateLabel(
+  entry: KbEntry,
+  other: KbEntry | undefined,
+  embeddingsConfigured = true,
+): string {
+  const named = other ? `“${other.title}”` : `entry #${entry.possible_duplicate_of ?? '?'}`
+  const how = embeddingsConfigured
+    ? ''
+    : ' — flagged on the title alone, because no Voyage key is configured.'
+  return `Possible duplicate of ${named}${how}`
+}
+
+const COMPILE_REASONS: Record<CompileReasonCode, string> = {
+  budget: 'The monthly compile budget is spent, so nothing was sent to the model.',
+  refusal: 'The model declined to summarise this one — security content sometimes trips its safeguards.',
+  parse: 'The model answered, but not in a shape that could be stored.',
+  no_text: 'There is no captured text on this entry to summarise.',
+  api_error: 'The call to the model did not get through.',
+}
+
+/**
+ * What one compile did, as a sentence.
+ *
+ * Every one of these is an HTTP 200, so they are outcomes and not errors: a
+ * spent budget is a fact about the month, and a refusal is an ordinary Tuesday
+ * for security content. The backend's own `reason` follows the sentence when it
+ * has one, because it carries the detail (which category, which status code).
+ */
+export function compileOutcome(result: {
+  compiled: boolean
+  reason: string | null
+  reason_code: CompileReasonCode | null
+}): string {
+  if (result.compiled) {
+    return 'Summarised.'
+  }
+  const sentence = result.reason_code
+    ? (COMPILE_REASONS[result.reason_code] ?? 'Not summarised.')
+    : 'Not summarised.'
+  return result.reason ? `${sentence} ${result.reason}` : sentence
+}
+
+/** `claude-sonnet-5 · prompt v3` under a summary, or nothing to say. */
+export function compileMetaLabel(entry: KbEntry): string | null {
+  const parts: string[] = []
+  if (entry.compile_model) {
+    parts.push(entry.compile_model)
+  }
+  if (typeof entry.compile_prompt_version === 'number') {
+    parts.push(`prompt v${entry.compile_prompt_version}`)
+  }
+  return parts.length > 0 ? parts.join(' · ') : null
+}
+
+/**
+ * Has the entry moved since its summary was written?
+ *
+ * `compiled_at` against `updated_at` is the only signal there is — a notes edit
+ * and a snapshot refresh both bump `updated_at` and neither recompiles — so this
+ * is an invitation to recompile, never a claim that the summary is wrong.
+ */
+export function summaryStale(entry: KbEntry): boolean {
+  if (!entry.summary_md || !entry.compiled_at) {
+    return false
+  }
+  return parseUtc(entry.updated_at).getTime() > parseUtc(entry.compiled_at).getTime()
 }
