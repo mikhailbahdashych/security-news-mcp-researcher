@@ -39,6 +39,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agent import events as ev
 from app.agent.turnlog import TurnLog
+from app.config import Settings
 from app.db.models import ResearchSession, utcnow
 from app.kb.findings import FindingDraft, capture_turn_finding
 
@@ -81,6 +82,11 @@ class RunningTurn:
     #: The question that started the turn. Kept because the finding capture needs
     #: it at the *end* of the turn, long after the request that carried it.
     prompt: str = ""
+    #: The app's :class:`Settings`, for the same reason and with the same problem:
+    #: the embedder a finding is captured with is built when the turn is over, and
+    #: a Voyage key that lives only in ``.env`` reaches the application here and
+    #: nowhere else (``settings.get_effective_voyage_key``).
+    settings: Settings | None = field(default=None, repr=False)
     client: Any | None = field(default=None, repr=False)
     #: Set — synchronously, before any await — by the first call to ``_finish``.
     #: Every path that can close a turn out (the task's own cleanup, a cancel that
@@ -176,6 +182,7 @@ class TurnRegistry:
         client: Any | None,
         prompt: str,
         attachments: list[dict[str, Any]],
+        settings: Settings | None = None,
     ) -> RunningTurn:
         """Own *generator* as this session's turn.
 
@@ -219,6 +226,7 @@ class TurnRegistry:
                 log=log,
                 session_factory=session_factory,
                 prompt=prompt,
+                settings=settings,
                 client=client,
             )
             turn.task = asyncio.create_task(self._drive(turn, generator), name=f"turn:{session_id}")
@@ -337,6 +345,7 @@ class TurnRegistry:
                 draft,
                 session_id=turn.session_id,
                 question=turn.prompt,
+                settings=turn.settings,
             )
 
     def _remember(self, turn: RunningTurn) -> None:
