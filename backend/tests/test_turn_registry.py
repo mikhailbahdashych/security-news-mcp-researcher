@@ -645,3 +645,35 @@ async def test_drain_is_bounded_by_one_cancel_wait_not_two(session_factory, monk
 
     stubborn.task.cancel()
     await asyncio.gather(stubborn.task, closing.task, return_exceptions=True)
+
+
+async def test_drain_cancels_a_cleanup_that_outlasts_the_deadline(session_factory, monkeypatch):
+    """A cleanup still running at the deadline is stopped, not left behind.
+
+    The lifespan disposes the engine the moment ``drain`` returns, so anything
+    the wait gave up on — a Voyage embed for a finding is the slow one — would
+    run on and try to write its ``skip`` row against a dead engine, surfacing as
+    "Task exception was never retrieved" on an otherwise clean shutdown.
+    """
+    monkeypatch.setattr(turns_module, "CANCEL_WAIT_S", 0.05)
+    registry = TurnRegistry()
+    session_id = await _new_session(session_factory)
+    turn = await registry.start(
+        session_id=session_id,
+        session_factory=session_factory,
+        generator=slow_turn(50, 0.02),
+        # Far longer than the whole shutdown budget.
+        client=SlowClosingClient(5.0),
+        prompt="a",
+        attachments=[],
+    )
+    await asyncio.sleep(0.02)
+    assert await registry.cancel(session_id) is True
+    await asyncio.sleep(0.02)  # the cleanup is now inside client.close()
+    leftovers = set(registry._finishing)
+    assert leftovers, "the cleanup should still be in flight"
+
+    await registry.drain()
+
+    assert all(task.cancelled() for task in leftovers)
+    await asyncio.gather(turn.task, return_exceptions=True)

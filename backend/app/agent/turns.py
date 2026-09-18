@@ -441,7 +441,21 @@ class TurnRegistry:
         # Turns already past ``done`` are no longer registered but may still be
         # writing their last row; the engine goes away right after this.
         if self._finishing:
-            await asyncio.wait(set(self._finishing), timeout=max(0.0, deadline - loop.time()))
+            leftovers = set(self._finishing)
+            await asyncio.wait(leftovers, timeout=max(0.0, deadline - loop.time()))
+            # Whatever is still in flight at the deadline has to be *stopped*, not
+            # merely left behind: the slow thing is a network round trip (a Voyage
+            # embed for a finding), and `create_app`'s lifespan disposes the engine
+            # the moment this returns. Its `except` would then try to write a
+            # `skip` row against a disposed engine and raise out of `guarded`,
+            # surfacing as "Task exception was never retrieved" on an otherwise
+            # clean shutdown. Cancelling is the quiet ending, and awaiting is what
+            # makes "cancelled" true rather than merely requested.
+            unfinished = [task for task in leftovers if not task.done()]
+            for task in unfinished:
+                task.cancel()
+            if unfinished:
+                await asyncio.gather(*unfinished, return_exceptions=True)
 
 
 async def mark_interrupted(session_factory: async_sessionmaker[AsyncSession]) -> int:
