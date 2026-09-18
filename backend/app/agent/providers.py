@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.agent.builtin import BuiltinToolProvider, ServerToolProvider
 from app.agent.registry import ToolProvider
 from app.config import Settings
+from app.kb import service as kb_service
 from app.mcp.provider import McpToolProvider, load_tool_prefs, sync_manager
 from app.services import settings as settings_service
 
@@ -67,7 +68,16 @@ async def build_tool_providers(
     and a server that cannot be reached contributes no tools rather than an error.
     """
     providers: list[ToolProvider] = [
-        BuiltinToolProvider(session_factory),
+        # The knowledge base is built here, from the request's session, so the two
+        # KB tools search the same way the Knowledge page does. Left to its own
+        # fallback the provider would build a keyword-only service and nothing
+        # would say so.
+        BuiltinToolProvider(
+            session_factory,
+            kb=await kb_service.for_request(
+                session_factory, session, getattr(request.app.state, "settings", None)
+            ),
+        ),
         await ServerToolProvider.from_settings(session),
     ]
 

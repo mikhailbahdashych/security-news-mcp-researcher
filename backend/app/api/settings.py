@@ -11,6 +11,8 @@ from typing import Any, cast
 from fastapi import APIRouter
 
 from app.api.deps import AnthropicClient, AppSettings, DbSession
+from app.kb.capture import log_activity
+from app.kb.embeddings import discard_vectors
 from app.kb.schema import (
     KB_SCHEMA_VERSION_KEY,
     current_schema_version,
@@ -131,7 +133,26 @@ async def update_settings(
         if key in changes:
             changes[key] = changes[key].strip()
 
+    # Read before the write: a PUT that re-sends the model it already holds is not
+    # a model change, and must not throw away a perfectly good index.
+    new_model = changes.get("kb_embedding_model")
+    old_model = await settings_service.get_str(session, "kb_embedding_model")
+
     await settings_service.set_many(session, changes)
+    if new_model and new_model != old_model:
+        # Same transaction as the settings write: the row saying which model the
+        # knowledge base embeds with and the vectors of the previous one must
+        # never be true at the same time (decision C1).
+        pending = await discard_vectors(session)
+        await log_activity(
+            session,
+            "reindex",
+            source="settings",
+            detail=(
+                f"embedding model changed from {old_model} to {new_model}; "
+                f"{pending} chunks marked pending"
+            ),
+        )
     await session.commit()
     return await _read(session, settings)
 

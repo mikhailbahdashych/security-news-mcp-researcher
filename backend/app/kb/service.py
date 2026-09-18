@@ -35,6 +35,7 @@ from sqlalchemy import Select, case, delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.config import Settings
 from app.db.engine import extension_status
 from app.db.models import Feed, FeedItem, utcnow
 from app.kb import capture as capture_module
@@ -45,7 +46,7 @@ from app.kb.capture import (
     capture_article,
     log_activity,
 )
-from app.kb.embeddings import Embedder, NullEmbedder
+from app.kb.embeddings import Embedder, NullEmbedder, build_embedder
 from app.kb.models import (
     KbActivity,
     KbChunk,
@@ -848,8 +849,30 @@ def parse_entity(raw: str | None) -> tuple[str, str] | None:
 
 
 def searchable(session_factory: async_sessionmaker[AsyncSession]) -> KbService:
-    """A service with the Phase 1 embedder. One place to change in Phase 2."""
+    """A keyword-only service, for callers that cannot await an embedder.
+
+    ``BuiltinToolProvider.__post_init__`` is one: a dataclass hook cannot await, so
+    it falls back to this when nobody handed it a service. Everything with a
+    session in hand uses :func:`for_request` instead and gets the vector leg.
+    """
     return KbService(session_factory=session_factory, embedder=NullEmbedder())
+
+
+async def for_request(
+    session_factory: async_sessionmaker[AsyncSession],
+    session: AsyncSession,
+    settings: Settings | None = None,
+) -> KbService:
+    """The service for one request: keyword-only, or hybrid if a key is configured.
+
+    The embedder is read per request rather than cached on the app, so entering a
+    Voyage key in Settings takes effect on the next call instead of on the next
+    restart.
+    """
+    return KbService(
+        session_factory=session_factory,
+        embedder=await build_embedder(session, settings),
+    )
 
 
 __all__ = [
@@ -867,6 +890,7 @@ __all__ = [
     "capture_note_if_enabled",
     "capture_star_if_enabled",
     "effective_at",
+    "for_request",
     "parse_entity",
     "searchable",
 ]

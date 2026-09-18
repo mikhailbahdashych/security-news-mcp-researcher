@@ -8,12 +8,15 @@ handed in at construction, and everything that only needs vectors uses
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import httpx2
 import pytest
 from fakes.embedder import FakeEmbedder
-from sqlalchemy import select
+from sqlalchemy import select, text
 
+from app.agent.providers import build_tool_providers
+from app.config import Settings
 from app.kb.capture import embed_pending
 from app.kb.chunking import estimate_tokens
 from app.kb.embeddings import (
@@ -23,11 +26,13 @@ from app.kb.embeddings import (
     EmbeddingError,
     NullEmbedder,
     VoyageEmbedder,
+    build_embedder,
     plan_batches,
 )
 from app.kb.models import KbActivity, KbChunk, KbEntry
 from app.kb.schema import VEC_DIMENSIONS
 from app.kb.service import KbService
+from app.services import settings as settings_service
 
 KEY = "pa-thisisthesecretvoyagekey-9999"
 
@@ -323,6 +328,100 @@ async def test_a_null_embedder_embeds_nothing_and_leaves_no_trail(
     await db_session.refresh(chunks[0])
     assert chunks[0].embedded_at is None
     assert await _activity(db_session, "embed") == []
+
+
+# --------------------------------------------------------------- the wiring
+
+
+@pytest.fixture(autouse=True)
+def isolated_voyage_key_env(monkeypatch):
+    """No ambient ``VOYAGE_API_KEY`` — ``conftest.py`` only clears the Anthropic one."""
+    monkeypatch.delenv(settings_service.VOYAGE_KEY_ENV_VAR, raising=False)
+
+
+@pytest.fixture
+def offline_voyage(monkeypatch):
+    """Whatever the app builds as a Voyage embedder, it embeds locally here."""
+    fake = FakeEmbedder(model="voyage-4")
+    monkeypatch.setattr("app.kb.embeddings.VoyageEmbedder", lambda *args, **kwargs: fake)
+    return fake
+
+
+async def test_build_embedder_follows_the_configured_key(db_session, offline_voyage) -> None:
+    assert isinstance(await build_embedder(db_session), NullEmbedder)
+
+    await settings_service.set_value(db_session, "voyage_api_key", "pa-stored-0001")
+    await db_session.commit()
+
+    assert await build_embedder(db_session) is offline_voyage
+    # A key that exists only in `.env` is just as configured.
+    await settings_service.set_value(db_session, "voyage_api_key", "")
+    await db_session.commit()
+    assert (
+        await build_embedder(db_session, Settings(voyage_api_key="pa-dotenv-0002"))
+        is offline_voyage
+    )
+
+
+async def test_a_configured_voyage_key_makes_the_service_hybrid(
+    client, db_session, offline_voyage
+) -> None:
+    """The dependency, not a test double: a stored key has to reach the routes."""
+    assert (await client.get("/api/kb/stats")).json()["embeddings_configured"] is False
+
+    await client.put("/api/settings", json={"voyage_api_key": "pa-stored-0001"})
+
+    assert (await client.get("/api/kb/stats")).json()["embeddings_configured"] is True
+    search = await client.post("/api/kb/search", json={"q": "liblzma"})
+    assert search.status_code == 200, search.text
+    assert search.json()["mode"] == "hybrid"
+    assert offline_voyage.queries == ["liblzma"]
+
+
+async def test_the_chat_tools_get_the_configured_embedder(
+    app, db_session, session_factory, offline_voyage
+) -> None:
+    """P2-9's other half: wiring only the routes leaves the two knowledge-base
+    tools on keyword-only search, with nothing to notice."""
+    request = SimpleNamespace(app=app)
+    await settings_service.set_value(db_session, "voyage_api_key", "pa-stored-0001")
+    await db_session.commit()
+
+    providers = await build_tool_providers(request, db_session, session_factory)
+
+    assert providers[0].kb.embedder is offline_voyage
+    assert providers[0].kb.search_mode == "hybrid"
+
+
+async def test_changing_the_embedding_model_discards_the_vectors_and_marks_chunks_pending(
+    client, session_factory, db_session
+) -> None:
+    """Decision C1: kb_chunk_vec has no ``embedding_model`` column, so two models
+    at the same width would be one indistinguishable KNN space."""
+    entry = await _entry(db_session)
+    chunks = await _chunks(db_session, entry, "the first passage", "the second passage")
+    await embed_pending(session_factory, FakeEmbedder(model="voyage-4"))
+    assert await db_session.scalar(text("SELECT count(*) FROM kb_chunk_vec")) == 2
+
+    response = await client.put("/api/settings", json={"kb_embedding_model": "voyage-4-lite"})
+
+    assert response.status_code == 200
+    assert response.json()["kb_embedding_model"] == "voyage-4-lite"
+    assert await db_session.scalar(text("SELECT count(*) FROM kb_chunk_vec")) == 0
+    for chunk in chunks:
+        await db_session.refresh(chunk)
+        assert chunk.embedded_at is None
+        assert chunk.embedding_model is None
+    [reindex] = await _activity(db_session, "reindex")
+    assert "voyage-4" in (reindex.detail or "")
+    assert "voyage-4-lite" in (reindex.detail or "")
+
+    # A PUT that re-sends the same model is not a change and wipes nothing.
+    await embed_pending(session_factory, FakeEmbedder(model="voyage-4-lite"))
+    assert await db_session.scalar(text("SELECT count(*) FROM kb_chunk_vec")) == 2
+    await client.put("/api/settings", json={"kb_embedding_model": "voyage-4-lite"})
+    assert await db_session.scalar(text("SELECT count(*) FROM kb_chunk_vec")) == 2
+    assert len(await _activity(db_session, "reindex")) == 1
 
 
 # ------------------------------------------------------------ the fake embedder
