@@ -3,6 +3,7 @@ import { useState } from 'react'
 
 import { conflictDetail } from '../../api/client'
 import {
+  deleteEntry,
   kbQueryKey,
   mergeEntry,
   patchEntry,
@@ -70,6 +71,11 @@ export default function NeedsAttention({
     mutationFn: (id: number) => refreshEntry(id),
     onSuccess: invalidate,
   })
+  // Soft: the row moves down the strip to the bin, where Undo is waiting.
+  const remove = useMutation({
+    mutationFn: (id: number) => deleteEntry(id),
+    onSuccess: invalidate,
+  })
   const purge = useMutation({
     mutationFn: (ids: number[]) => purgeEntries(ids),
     onSuccess: async () => {
@@ -91,7 +97,8 @@ export default function NeedsAttention({
     (undo.isError && conflictDetail(undo.error) === null) ||
     (merge.isError && conflictDetail(merge.error) === null) ||
     review.isError ||
-    retry.isError
+    retry.isError ||
+    remove.isError
 
   const deletedIds = deleted.map((entry) => entry.id)
 
@@ -113,12 +120,14 @@ export default function NeedsAttention({
                 review: review.isPending && review.variables === row.entryId,
                 retry: retry.isPending && retry.variables === row.entryId,
                 undo: undo.isPending && undo.variables === row.entryId,
+                remove: remove.isPending && remove.variables === row.entryId,
               }}
               onOpen={onOpen}
               onMerge={(id, into) => merge.mutate({ id, into })}
               onReview={(id) => review.mutate(id)}
               onRetry={(id) => retry.mutate(id)}
               onUndo={(id) => undo.mutate(id)}
+              onDelete={(id) => remove.mutate(id)}
             />
           </li>
         ))}
@@ -164,16 +173,26 @@ export default function NeedsAttention({
 
 interface ActionsProps {
   row: AttentionRow
-  busy: { merge: boolean; review: boolean; retry: boolean; undo: boolean }
+  busy: { merge: boolean; review: boolean; retry: boolean; undo: boolean; remove: boolean }
   onOpen: (id: number) => void
   onMerge: (id: number, into: number) => void
   onReview: (id: number) => void
   onRetry: (id: number) => void
   onUndo: (id: number) => void
+  onDelete: (id: number) => void
 }
 
 /** One row's actions. Each row gets what its own kind can actually be settled by. */
-function Actions({ row, busy, onOpen, onMerge, onReview, onRetry, onUndo }: ActionsProps) {
+function Actions({
+  row,
+  busy,
+  onOpen,
+  onMerge,
+  onReview,
+  onRetry,
+  onUndo,
+  onDelete,
+}: ActionsProps) {
   const open =
     row.entryId !== null ? (
       <Button size="sm" variant="ghost" onClick={() => onOpen(row.entryId as number)}>
@@ -205,6 +224,14 @@ function Actions({ row, busy, onOpen, onMerge, onReview, onRetry, onUndo }: Acti
         {open}
         <Button size="sm" loading={busy.review} onClick={() => onReview(row.entryId as number)}>
           Mark reviewed
+        </Button>
+        <Button
+          size="sm"
+          variant="ghost"
+          loading={busy.remove}
+          onClick={() => onDelete(row.entryId as number)}
+        >
+          Delete
         </Button>
       </>
     )

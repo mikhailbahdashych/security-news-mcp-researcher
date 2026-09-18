@@ -46,6 +46,7 @@ export default function SaveToKnowledge({ itemIds, onClose }: SaveToKnowledgePro
   const ids = itemIds.slice(0, KB_BULK_MAX_ITEMS)
   const [state, setState] = useState<BulkState | null>(null)
   const [failure, setFailure] = useState<string | null>(null)
+  const [stopping, setStopping] = useState(false)
 
   // Refs, because the reader's closure outlives the render that made it: the
   // frames arrive into this, and the two decisions afterwards (may I abort? may
@@ -54,26 +55,33 @@ export default function SaveToKnowledge({ itemIds, onClose }: SaveToKnowledgePro
   const abort = useRef<AbortController | null>(null)
   const alive = useRef(true)
 
+  /**
+   * Stop is the **cancel alone**, and deliberately not an abort.
+   *
+   * The job answers a cancel with its terminal `done`, which is the only thing
+   * that can say what was saved before you stopped — aborting the reader throws
+   * that ending away, exactly as it would on a chat turn (`ChatPage`'s Stop).
+   */
   const stop = useCallback(() => {
-    // Both halves: the abort stops the browser reading, the endpoint stops the
-    // server working. Never past `done` — the run is over and the request's
-    // tail is the server finishing its own bookkeeping.
-    if (latest.current && bulkDelivered(latest.current)) {
+    if (latest.current === null || bulkDelivered(latest.current)) {
       return
     }
-    abort.current?.abort()
-    const id = latest.current?.jobId
-    if (id) {
-      void cancelBulkCapture(id).catch(() => undefined)
-    }
+    setStopping(true)
+    void cancelBulkCapture(latest.current.jobId).catch(() => undefined)
   }, [])
 
   useEffect(
     () => () => {
+      // Leaving is different: there is no way back to this stream, so the reader
+      // is released — and the run is cancelled, because a disconnected bulk job
+      // is one nobody can see, stop or resume.
       alive.current = false
-      stop()
+      if (latest.current && !bulkDelivered(latest.current)) {
+        void cancelBulkCapture(latest.current.jobId).catch(() => undefined)
+        abort.current?.abort()
+      }
     },
-    [stop],
+    [],
   )
 
   const start = useCallback(async () => {
@@ -83,6 +91,7 @@ export default function SaveToKnowledge({ itemIds, onClose }: SaveToKnowledgePro
     latest.current = startBulk(jobId)
     setState(latest.current)
     setFailure(null)
+    setStopping(false)
 
     try {
       await streamSSE({
@@ -130,17 +139,18 @@ export default function SaveToKnowledge({ itemIds, onClose }: SaveToKnowledgePro
     <Dialog
       title="Save to knowledge base"
       description={`${ids.length} selected item${ids.length === 1 ? '' : 's'}.`}
-      onClose={() => {
-        stop()
-        onClose()
-      }}
+      // Closing is leaving, and the unmount cancels the run and releases the
+      // reader — so there is nothing extra to do here.
+      onClose={onClose}
       footer={
         finished ? (
           <Button variant="primary" onClick={onClose}>
             Done
           </Button>
         ) : running ? (
-          <Button onClick={stop}>Stop</Button>
+          <Button disabled={stopping} onClick={stop}>
+            {stopping ? 'Stopping…' : 'Stop'}
+          </Button>
         ) : (
           <>
             <Button onClick={onClose}>Cancel</Button>

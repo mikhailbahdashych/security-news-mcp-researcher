@@ -41,21 +41,24 @@ export default function CompileDialog({ entryIds, onClose, onOpen }: CompileDial
   const queryClient = useQueryClient()
   const ids = entryIds.slice(0, KB_COMPILE_BATCH_MAX)
 
-  const estimate = useQuery({
-    queryKey: ['kb', 'compile-estimate', ids],
-    queryFn: () => estimateCompile(ids),
-    // A price is worth asking for once per dialog, not once per refetch.
-    staleTime: Infinity,
-    retry: false,
-  })
-
-  const topics = useQuery({ queryKey: kbTopicsKey, queryFn: listTopics })
-
   const compile = useMutation({
     mutationFn: () => compileBatch(ids),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: kbQueryKey }),
     onError: () => queryClient.invalidateQueries({ queryKey: kbQueryKey }),
   })
+
+  const estimate = useQuery({
+    queryKey: ['kb', 'compile-estimate', ids],
+    queryFn: () => estimateCompile(ids),
+    // A price is worth asking for once per dialog, not once per refetch — and
+    // not at all once the batch has run, or the compile's own invalidation of
+    // the `kb` prefix would price a batch nobody is about to send.
+    enabled: compile.data === undefined,
+    staleTime: Infinity,
+    retry: false,
+  })
+
+  const topics = useQuery({ queryKey: kbTopicsKey, queryFn: listTopics })
 
   const priced = estimate.data
   const exhausted = priced ? priced.budget_remaining <= 0 : false
