@@ -1,5 +1,5 @@
 import { useQueryClient } from '@tanstack/react-query'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import {
   KB_BULK_MAX_ITEMS,
@@ -49,7 +49,9 @@ export interface SaveToKnowledgeProps {
  */
 export default function SaveToKnowledge({ itemIds, onClose }: SaveToKnowledgeProps) {
   const queryClient = useQueryClient()
-  const ids = itemIds.slice(0, KB_BULK_MAX_ITEMS)
+  // Memoised, or `start`'s `useCallback` memoises nothing: a fresh array every
+  // render is a fresh dependency every render.
+  const ids = useMemo(() => itemIds.slice(0, KB_BULK_MAX_ITEMS), [itemIds])
   const [state, setState] = useState<BulkState | null>(null)
   const [failure, setFailure] = useState<string | null>(null)
   const [stopping, setStopping] = useState(false)
