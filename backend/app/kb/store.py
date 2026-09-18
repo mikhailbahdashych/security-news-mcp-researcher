@@ -72,6 +72,10 @@ class SearchFilters:
     ``include_model_authored`` is set **only** by the Knowledge page, which shows
     the user everything they have captured. The chat tool and the notes generator
     never pass it, which is what makes the authorship gate unconditional for them.
+
+    ``exclude_entry_id`` is honoured by :meth:`SqliteKnowledgeStore.knn` alone —
+    ``entry_id`` is one of vec0's metadata columns, and the near-duplicate check
+    is the only leg that has to keep an entry from matching itself.
     """
 
     kinds: tuple[str, ...] | None = None
@@ -80,6 +84,7 @@ class SearchFilters:
     since: datetime | None = None
     reviewed_only: bool = False
     include_model_authored: bool = False
+    exclude_entry_id: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -218,6 +223,12 @@ class SqliteKnowledgeStore:
         }
         if filters.reviewed_only:
             shared.append("reviewed = 1")
+        if filters.exclude_entry_id is not None:
+            # Inside the MATCH, not after it: an entry with fourteen body chunks
+            # is fourteen of its own nearest neighbours, and filtering them out
+            # afterwards leaves k slots that never held a candidate.
+            shared.append("entry_id != :exclude_entry_id")
+            params["exclude_entry_id"] = filters.exclude_entry_id
         if filters.since is not None:
             # vec0 has no >=; for integers "> day - 1" is the same thing.
             # Whole days, because ``published_day`` is an integer column and the

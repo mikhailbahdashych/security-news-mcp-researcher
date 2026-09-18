@@ -1118,16 +1118,23 @@ async def _nearest_by_vector(
 ) -> DuplicateMatch | None:
     """The nearest older body chunk whose entry's title agrees as well.
 
-    ``k`` is one more than :data:`NEAR_DUPLICATE_K` because the entry being
-    captured is its own nearest neighbour and the ``id`` filter below drops it.
+    The entry is excluded **inside** the KNN (``exclude_entry_id``), not after
+    it: a long advisory contributes every one of its body chunks as a candidate —
+    fourteen of them for a 40 000-character article — and dropping them in Python
+    afterwards would leave a *k* that held nothing but the entry itself. The
+    ``id < entry_id`` rule below still applies, because it says something else:
+    the flag points backwards, at the copy that was already there.
+
     ``include_model_authored`` is set: this is the user's own knowledge base
     checking itself for duplicates, not the authorship gate that governs what the
     model is fed.
     """
     rows = await store.knn(
         list(vector),
-        NEAR_DUPLICATE_K + 1,
-        filters=SearchFilters(chunk_kinds=("body",), include_model_authored=True),
+        NEAR_DUPLICATE_K,
+        filters=SearchFilters(
+            chunk_kinds=("body",), include_model_authored=True, exclude_entry_id=entry_id
+        ),
     )
     chunk_ids = [chunk_id for chunk_id, _ in rows]
     if not chunk_ids:

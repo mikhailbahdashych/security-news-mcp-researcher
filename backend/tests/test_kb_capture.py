@@ -1226,6 +1226,42 @@ class AngledEmbedder:
         return vector
 
 
+async def test_a_long_entrys_own_chunks_do_not_crowd_the_duplicate_out_of_the_knn(
+    session_factory, db_session
+):
+    """A fourteen-chunk article still finds the copy that was already there.
+
+    Every one of the new entry's own body chunks is a candidate the KNN returns
+    and the ``id < entry_id`` rule then throws away, so asking for
+    ``NEAR_DUPLICATE_K + 1`` neighbours and filtering afterwards means a long
+    advisory fills all six slots with itself and the syndicated re-publication is
+    never seen. The exclusion belongs inside the KNN.
+    """
+    older = await capture_article(
+        session_factory,
+        AngledEmbedder(),
+        url="https://example.test/advisory-first",
+        title=HEADLINE,
+        text=f"@@near@@ {ARTICLE}",
+        duplicate_threshold=0.7,
+    )
+    long_body = "\n\n".join(f"## Section {index}\n\n{ARTICLE}" for index in range(60))
+    newer = await capture_article(
+        session_factory,
+        AngledEmbedder(),
+        url="https://example.test/advisory-syndicated",
+        title=HEADLINE_RETITLED,
+        text=long_body,
+        duplicate_threshold=0.7,
+    )
+
+    chunks = await db_session.scalar(
+        select(func.count()).select_from(KbChunk).where(KbChunk.entry_id == newer.entry_id)
+    )
+    assert chunks >= 14, "the scenario needs an entry with more chunks than the KNN asks for"
+    assert newer.possible_duplicate_of == older.entry_id
+
+
 @pytest.mark.parametrize(("threshold", "flagged"), [("0.92", False), ("0.70", True)])
 async def test_the_duplicate_threshold_setting_decides_what_a_single_capture_flags(
     session_factory, db_session, threshold, flagged
