@@ -1,11 +1,11 @@
 import { Component, type ReactNode } from 'react'
 
+import { type BoundaryState, nextBoundaryState } from './errorBoundaryState'
+
 interface ErrorBoundaryProps {
   children: ReactNode
-}
-
-interface ErrorBoundaryState {
-  failed: boolean
+  /** Changing this clears a caught error **without** remounting the children. */
+  resetKey?: string
 }
 
 /**
@@ -24,13 +24,24 @@ interface ErrorBoundaryState {
  * middle of Settings is not something the reader can act on).
  *
  * It does **not** reset itself. A caller whose content changes underneath it —
- * one entry to another — passes a `key`, which remounts it.
+ * one entry to another — passes a `key`, which remounts it. A caller whose
+ * children must **survive** that change passes `resetKey` instead: the routed
+ * pane, where `/chat` → `/chat/12` is the same mounted page with a live turn in
+ * its reducer, and `/knowledge/7` → `/knowledge` must come back to the filters
+ * it left. A `key` there would throw both away on every click.
  */
-export default class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
-  state: ErrorBoundaryState = { failed: false }
+export default class ErrorBoundary extends Component<ErrorBoundaryProps, BoundaryState> {
+  state: BoundaryState = { failed: false, resetKey: this.props.resetKey }
 
-  static getDerivedStateFromError(): ErrorBoundaryState {
+  static getDerivedStateFromError(): Partial<BoundaryState> {
     return { failed: true }
+  }
+
+  static getDerivedStateFromProps(
+    props: ErrorBoundaryProps,
+    state: BoundaryState,
+  ): BoundaryState | null {
+    return nextBoundaryState(state, props.resetKey)
   }
 
   render() {

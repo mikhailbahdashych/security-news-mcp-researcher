@@ -87,10 +87,13 @@ export default function App() {
         >
           {/* One boundary per pane, so a page that cannot render costs its own
               pane and not the rail, the other pane and the ⌘K overlay with it.
-              Keyed on what the pane is showing: a boundary that has caught stays
-              caught, and navigating somewhere else has to be a fresh attempt —
-              otherwise one bad payload wedges the app until a reload. */}
-          <ErrorBoundary key={location.pathname}>
+              A boundary that has caught stays caught, and navigating somewhere
+              else has to be a fresh attempt — otherwise one bad payload wedges
+              the app until a reload. The routed pane gets that from `resetKey`,
+              NOT from `key`: a key on the pathname remounts the page on every
+              in-page navigation, which drops the Knowledge filters and the
+              first question of a new chat. */}
+          <ErrorBoundary resetKey={location.pathname}>
             <Routes>
               <Route path="/" element={<InboxPage />} />
               <Route path="/chat" element={<ChatPage />} />

@@ -34,9 +34,12 @@ is on screen in either pane, because the rail carries the chat history now.
 | `/settings` | `pages/Settings.tsx` | Layout, archived chats, API key, model, toggles, MCP panel |
 
 `components/ui/ErrorBoundary.tsx` is the **only class component** in the app — catching
-a render error is the one thing hooks cannot do. `App` wraps **each pane** in one (keyed
-on `location.pathname` and on `paneB`, so navigating away is a fresh attempt and one bad
-payload cannot wedge the app until a reload), `SettingsSection` wraps every section's
+a render error is the one thing hooks cannot do. `App` wraps **each pane** in one (the routed
+pane with `resetKey={location.pathname}`, pane B keyed on `paneB`, so navigating away is
+a fresh attempt and one bad payload cannot wedge the app until a reload — `resetKey`
+clears a caught error **without remounting**, because a `key` on the pathname would
+remount the page on `/chat` → `/chat/12` and `/knowledge/7` → `/knowledge`, losing the
+live turn's optimistic state and the list filters), `SettingsSection` wraps every section's
 body, `Settings`' shell wraps the sections together, and the Knowledge page wraps
 each of its two modes (keyed, so opening another entry is a fresh attempt). The reason is
 version skew: this bundle and the backend it talks to need not agree, and one unguarded
@@ -663,7 +666,7 @@ hand-rolled `.prose-chat` block in `src/index.css`, deliberately instead of
 
 ## Tests
 
-`npx vitest run` — **15 files, 259 tests**, `environment: 'node'` with
+`npx vitest run` — **16 files, 263 tests**, `environment: 'node'` with
 **`TZ` pinned to `UTC`** (`test.env` in `vite.config.ts`: the backend sends naive UTC and
 the app renders the viewer's *local* day of it, so a test that asserts an instant would
 otherwise assert the machine's offset, and UTC+13/+14 roll a midday stamp over to the next
