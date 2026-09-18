@@ -11,7 +11,6 @@ import {
   generateUrl,
   notesQueryKey,
   type GenerateNotesBody,
-  type NoteDonePayload,
 } from '../../api/notes'
 import { fetchSettings, settingsQueryKey } from '../../api/settings'
 import { generationId as newGenerationId } from '../../lib/ids'
@@ -25,6 +24,7 @@ import Input from '../ui/Input'
 import Select from '../ui/Select'
 import Textarea from '../ui/Textarea'
 import { FIELD_HINT, FIELD_LABEL, cx } from '../ui/classes'
+import { noteIdOnDone, ownsStream, type GenerationPhase } from './generationPhase'
 
 export interface GenerateNotesDialogProps {
   /** Items the caller already has in hand (the Inbox selection), pinned at the top. */
@@ -80,6 +80,10 @@ export default function GenerateNotesDialog({
 
   const abort = useRef<AbortController | null>(null)
   const generationId = useRef<string | null>(null)
+  // A ref, not state: `onEvent` reads it as frames arrive, and the two places
+  // that consult it afterwards run in a closure that a re-render would not
+  // refresh. Nothing renders off it.
+  const phase = useRef<GenerationPhase>('idle')
 
   const debouncedSearch = useDebouncedValue(search)
 
@@ -144,13 +148,13 @@ export default function GenerateNotesDialog({
     generationId.current = body.generation_id
     const controller = new AbortController()
     abort.current = controller
+    phase.current = 'streaming'
 
     setStreaming(true)
     setPreview('')
     setActivity(null)
     setError(null)
 
-    let savedNoteId: number | null = null
     let failure: ErrorPayload | null = null
 
     try {
@@ -191,9 +195,29 @@ export default function GenerateNotesDialog({
             case 'error':
               failure = payload as ErrorPayload
               return
-            case 'done':
-              savedNoteId = (payload as NoteDonePayload).note_id
+            case 'done': {
+              const noteId = noteIdOnDone(phase.current, payload)
+              if (noteId === null) {
+                return
+              }
+              // On the frame, not at the end of the body. The route saves the
+              // note, sends this, and *then* captures it into the knowledge
+              // base — so waiting for the stream to close would put that
+              // embedding call back in front of the user, which is the whole
+              // thing the server-side reorder was for. The rest of the stream
+              // runs on without this component; see `generationPhase.ts`.
+              phase.current = 'delivered'
+              setStreaming(false)
+              setActivity(null)
+              void queryClient.invalidateQueries({ queryKey: notesQueryKey })
+              if (onGenerated) {
+                onGenerated(noteId)
+              } else {
+                navigate(`/notes/${noteId}`)
+              }
+              onClose()
               return
+            }
             default:
           }
         },
@@ -208,22 +232,20 @@ export default function GenerateNotesDialog({
           }
     } finally {
       abort.current = null
-      setStreaming(false)
-      setActivity(null)
+      if (ownsStream(phase.current)) {
+        setStreaming(false)
+        setActivity(null)
+      }
     }
 
-    if (savedNoteId !== null) {
-      await queryClient.invalidateQueries({ queryKey: notesQueryKey })
-      // The generate route captures the note into the knowledge base inside the
-      // same request, so an entry exists by the time `done` arrives — and the
-      // Knowledge pane can be the one on screen beside this dialog.
+    // Nothing left to own means the `done` frame already handed the note over.
+    if (!ownsStream(phase.current)) {
+      // Here, and not beside the `notesQueryKey` invalidation above: the
+      // generate route captures the note into the knowledge base *after* the
+      // `done` frame, and the end of the body is the only signal that the
+      // capture has finished. The dialog is gone by now — this, and the reader
+      // the stream has just released, is all that is left of the turn.
       await queryClient.invalidateQueries({ queryKey: kbQueryKey })
-      if (onGenerated) {
-        onGenerated(savedNoteId)
-      } else {
-        navigate(`/notes/${savedNoteId}`)
-      }
-      onClose()
       return
     }
     // The selection is deliberately left intact so the user can retry, adjust
@@ -248,9 +270,14 @@ export default function GenerateNotesDialog({
   }, [])
 
   // Every way out of the dialog — ✕, Escape, the backdrop, Cancel — also stops a
-  // generation that is still running, so closing never leaves one billing.
+  // generation that is still running, so closing never leaves one billing. Only
+  // while it is still *ours*, though: past `done` the note is saved and the open
+  // body is the knowledge-base capture finishing, which an abort would kill
+  // silently (`generationPhase.ts`).
   const close = useCallback(() => {
-    stop()
+    if (ownsStream(phase.current)) {
+      stop()
+    }
     onClose()
   }, [onClose, stop])
 
