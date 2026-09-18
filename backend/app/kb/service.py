@@ -257,6 +257,7 @@ class KbService:
             min_chars=min_chars,
             trigger=trigger,
             defer_embedding=defer_embedding,
+            duplicate_threshold=await self.duplicate_threshold(),
         )
 
     async def capture_url(
@@ -280,6 +281,7 @@ class KbService:
             timeout_s=timeout_s,
             trigger=trigger,
             transport=transport or self.transport,
+            duplicate_threshold=await self.duplicate_threshold(),
         )
 
     async def capture_note(self, note_id: int, *, trigger: str = "note") -> CaptureResult:
@@ -290,6 +292,7 @@ class KbService:
             note_id,
             min_chars=await self.min_snapshot_chars(),
             trigger=trigger,
+            duplicate_threshold=await self.duplicate_threshold(),
         )
 
     async def refresh(
@@ -862,8 +865,8 @@ class KbService:
     async def duplicate_threshold(self) -> float:
         """``kb_duplicate_threshold`` — the cosine a near-duplicate needs.
 
-        Read once per bulk run by the route, before the stream opens, and handed
-        down: ``capture_article`` takes it as an argument the way it takes
+        Read once per capture here, and once per bulk run by the route before the
+        stream opens: ``capture_article`` takes it as an argument the way it takes
         ``min_chars``, so a two-hundred-item run reads the row once rather than
         two hundred times.
         """

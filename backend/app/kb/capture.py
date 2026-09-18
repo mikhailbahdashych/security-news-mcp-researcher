@@ -386,6 +386,7 @@ async def capture_note(
     *,
     min_chars: int = DEFAULT_MIN_SNAPSHOT_CHARS,
     trigger: str = "note",
+    duplicate_threshold: float = DEFAULT_DUPLICATE_THRESHOLD,
 ) -> CaptureResult:
     """Capture a note's body, or bring its existing entry up to date.
 
@@ -428,6 +429,7 @@ async def capture_note(
         captured_by="auto",
         min_chars=min_chars,
         trigger=trigger,
+        duplicate_threshold=duplicate_threshold,
     )
 
 
@@ -443,6 +445,7 @@ async def capture_url(
     timeout_s: int = 15,
     trigger: str = "url",
     transport: httpx2.AsyncBaseTransport | None = None,
+    duplicate_threshold: float = DEFAULT_DUPLICATE_THRESHOLD,
 ) -> CaptureResult:
     """Fetch *url* and capture what the extractor makes of it.
 
@@ -491,6 +494,7 @@ async def capture_url(
         kind=kind,
         min_chars=min_chars,
         trigger=trigger,
+        duplicate_threshold=duplicate_threshold,
     )
 
 

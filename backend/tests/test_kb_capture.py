@@ -53,6 +53,7 @@ from app.kb.schema import VEC_DIMENSIONS
 from app.kb.service import KbService
 from app.kb.store import SqliteKnowledgeStore
 from app.kb.urls import canonical_url
+from app.services import settings as settings_service
 
 ARTICLE = (
     "# The xz backdoor\n\n"
@@ -1196,3 +1197,70 @@ async def test_a_failed_embed_leaves_the_entry_unflagged_rather_than_title_match
     )
 
     assert second.possible_duplicate_of is None
+
+
+class AngledEmbedder:
+    """Two unit vectors a **known** cosine apart: 0.8 for a ``@@near@@`` text.
+
+    ``MarkerEmbedder`` only produces 1.0 and 0.0, which no threshold between them
+    can tell apart. A pair sitting at exactly 0.8 is what makes the setting the
+    only thing deciding the outcome.
+    """
+
+    model = "angled-embed-1"
+    dimensions = VEC_DIMENSIONS
+
+    async def embed_documents(self, texts):
+        return [self._vector(text) for text in texts]
+
+    async def embed_query(self, text):
+        return self._vector(text)
+
+    @staticmethod
+    def _vector(text: str) -> list[float]:
+        vector = [0.0] * VEC_DIMENSIONS
+        if "@@near@@" in text:
+            vector[0], vector[1] = 0.8, 0.6
+        else:
+            vector[0] = 1.0
+        return vector
+
+
+@pytest.mark.parametrize(("threshold", "flagged"), [("0.92", False), ("0.70", True)])
+async def test_the_duplicate_threshold_setting_decides_what_a_single_capture_flags(
+    session_factory, db_session, threshold, flagged
+):
+    """A star, a pasted URL or a note reads ``kb_duplicate_threshold`` too.
+
+    Only the bulk route used to: every other path took ``capture_article``'s 0.92
+    default, so the setting in Settings → Knowledge moved nothing that was not
+    captured two hundred at a time.
+    """
+    async with session_factory() as session:
+        await settings_service.set_many(session, {"kb_duplicate_threshold": threshold})
+        await session.commit()
+    feed = Feed(url="https://example.test/feed.xml", title="Example")
+    db_session.add(feed)
+    await db_session.flush()
+    first = FeedItem(
+        feed_id=feed.id,
+        guid="xz-1",
+        title=HEADLINE,
+        url="https://example.test/one",
+        content_text=ARTICLE,
+    )
+    second = FeedItem(
+        feed_id=feed.id,
+        guid="xz-2",
+        title=HEADLINE_RETITLED,
+        url="https://example.test/two",
+        content_text=f"@@near@@ {ARTICLE}",
+    )
+    db_session.add_all([first, second])
+    await db_session.commit()
+    service = KbService(session_factory=session_factory, embedder=AngledEmbedder())
+
+    older = await service.capture_feed_item(first.id)
+    newer = await service.capture_feed_item(second.id)
+
+    assert (newer.possible_duplicate_of == older.entry_id) is flagged
