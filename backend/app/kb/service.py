@@ -403,6 +403,10 @@ class KbService:
     async def merge(self, keep_id: int, drop_id: int) -> int:
         return await capture_module.merge_entries(self.session_factory, keep_id, drop_id)
 
+    async def dismiss_duplicate(self, entry_id: int) -> bool:
+        """Dismiss a near-duplicate flag. Idempotent; ``LookupError`` on an unknown id."""
+        return await capture_module.dismiss_duplicate(self.session_factory, entry_id)
+
     # -- retrieval -------------------------------------------------------
 
     async def search_for_model(

@@ -424,6 +424,68 @@ async def test_merge_keeps_the_older_entry(client, kb):
     assert response.json()["deleted_at"] is None
 
 
+async def _flagged(kb, db_session):
+    """Two entries, the newer one flagged as a possible duplicate of the older."""
+    older = await _seed(kb, title="Older", url="https://example.test/older", text=BODY)
+    newer = await _seed(kb, title="Older", url="https://example.test/newer", text=BODY)
+    entry = await db_session.get(KbEntry, newer.entry_id)
+    entry.possible_duplicate_of = older.entry_id
+    await db_session.commit()
+    return older, newer
+
+
+async def test_not_a_duplicate_clears_the_flag_and_records_it(client, kb, db_session):
+    older, newer = await _flagged(kb, db_session)
+
+    response = await client.post(f"/api/kb/entries/{newer.entry_id}/not-a-duplicate")
+
+    assert response.status_code == 200
+    assert response.json()["id"] == newer.entry_id
+    assert response.json()["possible_duplicate_of"] is None
+    # The strip's own "why did this go away" trail must not have a hole in it.
+    rows = (
+        (
+            await db_session.execute(
+                select(KbActivity).where(KbActivity.entry_id == newer.entry_id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    dismissals = [row for row in rows if "possible-duplicate" in (row.detail or "")]
+    assert len(dismissals) == 1
+    assert str(older.entry_id) in dismissals[0].detail
+
+
+async def test_not_a_duplicate_is_idempotent(client, kb, db_session):
+    _, newer = await _flagged(kb, db_session)
+    await client.post(f"/api/kb/entries/{newer.entry_id}/not-a-duplicate")
+
+    # Both the strip and the entry page offer this, and both invalidate `kb`:
+    # the second press must not be an error the user has to read.
+    response = await client.post(f"/api/kb/entries/{newer.entry_id}/not-a-duplicate")
+
+    assert response.status_code == 200
+    assert response.json()["possible_duplicate_of"] is None
+    rows = (
+        (
+            await db_session.execute(
+                select(KbActivity).where(KbActivity.entry_id == newer.entry_id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    # Dismissing nothing is not an event, so the trail gains no second row.
+    assert len([row for row in rows if "possible-duplicate" in (row.detail or "")]) == 1
+
+
+async def test_not_a_duplicate_on_an_unknown_id_is_a_404(client, kb):
+    response = await client.post("/api/kb/entries/9999/not-a-duplicate")
+
+    assert response.status_code == 404
+
+
 # --------------------------------------------------- search, stats, activity
 
 

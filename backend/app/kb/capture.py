@@ -788,6 +788,47 @@ async def merge_entries(
         return kept.id
 
 
+async def dismiss_duplicate(
+    session_factory: async_sessionmaker[AsyncSession], entry_id: int
+) -> bool:
+    """Clear one entry's near-duplicate flag; ``True`` when there was one to clear.
+
+    Beside :func:`merge_entries` because until this existed a merge was the only
+    thing that cleared ``possible_duplicate_of`` — and with no Voyage key the flag
+    is raised on the title trigram alone, so the first thing a new user met was a
+    false positive whose only exits were folding two unrelated entries together or
+    deleting one of them (plan decision P2-23).
+
+    Idempotent: an entry that carries no flag is a success with nothing to do, and
+    writes no trail row — a dismissal that did not dismiss anything is not an event.
+    ``updated_at`` is deliberately **not** bumped: nothing the entry *says* changed,
+    and moving it past ``compiled_at`` would make a perfectly current summary
+    announce itself as stale.
+
+    The row is filed under ``merge`` because that is the family it belongs to and
+    ``kb_activity.action`` is a CHECK constraint on a database this application
+    never migrates: a new value would be rejected outright on every install that
+    predates it.
+    """
+    async with session_factory() as session:
+        entry = await session.get(KbEntry, entry_id)
+        if entry is None:
+            raise LookupError(f"No knowledge-base entry with id {entry_id}")
+        flagged = entry.possible_duplicate_of
+        if flagged is None:
+            return False
+        entry.possible_duplicate_of = None
+        await log_activity(
+            session,
+            "merge",
+            entry_id=entry.id,
+            source="user",
+            detail=f"dismissed the possible-duplicate flag against entry {flagged}",
+        )
+        await session.commit()
+        return True
+
+
 async def _union_entities(session: AsyncSession, keep_id: int, drop_id: int) -> None:
     held = {
         (kind, value)
@@ -1551,6 +1592,7 @@ __all__ = [
     "capture_url",
     "content_hash",
     "cosine_from_distance",
+    "dismiss_duplicate",
     "embed_pending",
     "entry_ids",
     "flag_near_duplicate",

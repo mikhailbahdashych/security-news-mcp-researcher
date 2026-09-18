@@ -329,6 +329,23 @@ async def merge_entry(entry_id: int, payload: MergeRequest, kb: KbServiceDep) ->
     return await _read(kb, await _load(kb, kept_id))
 
 
+@router.post("/entries/{entry_id}/not-a-duplicate", response_model=EntryRead)
+async def not_a_duplicate(entry_id: int, kb: KbServiceDep) -> EntryRead:
+    """Dismiss a possible-duplicate flag (plan decision P2-23).
+
+    Idempotent, because the strip and the entry page both offer it and both
+    invalidate the same cache: an entry that carries no flag is a 200 with
+    nothing done. A merge used to be the only thing that cleared the flag, and
+    with no Voyage key the flag comes from the title trigram alone — so the
+    answer to a false positive was folding two unrelated entries together.
+    """
+    try:
+        await kb.dismiss_duplicate(entry_id)
+    except LookupError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Entry not found") from exc
+    return await _read(kb, await _load(kb, entry_id))
+
+
 @router.post("/entries/{entry_id}/topics", response_model=EntryRead)
 async def set_entry_topics(
     entry_id: int, payload: EntryTopicsRequest, kb: KbServiceDep
