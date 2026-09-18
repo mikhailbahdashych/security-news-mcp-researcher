@@ -12,7 +12,9 @@ import json
 import httpx2
 import pytest
 from fakes.embedder import FakeEmbedder
+from sqlalchemy import select
 
+from app.kb.capture import embed_pending
 from app.kb.chunking import estimate_tokens
 from app.kb.embeddings import (
     MAX_TEXTS_PER_REQUEST,
@@ -23,7 +25,9 @@ from app.kb.embeddings import (
     VoyageEmbedder,
     plan_batches,
 )
+from app.kb.models import KbActivity, KbChunk, KbEntry
 from app.kb.schema import VEC_DIMENSIONS
+from app.kb.service import KbService
 
 KEY = "pa-thisisthesecretvoyagekey-9999"
 
@@ -215,6 +219,110 @@ async def test_a_short_answer_is_an_error_rather_than_a_silent_mismatch() -> Non
 
     with pytest.raises(EmbeddingError):
         await embedder.embed_documents(["a", "b"])
+
+
+# ------------------------------------------------------- per-chunk state
+
+#: 32 000 tokens of text: eight of these fill one request exactly (256 000), so a
+#: list of eleven is batched 8 + 3 under the real, unmocked ceilings.
+BIG_TEXT = ("liblzma backdoor advisory " * 5_000)[: int(32_000 * 3.6)]
+
+
+async def _entry(db_session, **overrides) -> KbEntry:
+    values = {"kind": "article", "title": "Advisory", "authorship": "source"}
+    values.update(overrides)
+    entry = KbEntry(**values)
+    db_session.add(entry)
+    await db_session.flush()
+    return entry
+
+
+async def _chunks(db_session, entry: KbEntry, *texts: str) -> list[KbChunk]:
+    chunks = [
+        KbChunk(entry_id=entry.id, ord=n, text=body, token_estimate=estimate_tokens(body))
+        for n, body in enumerate(texts)
+    ]
+    db_session.add_all(chunks)
+    await db_session.commit()
+    return chunks
+
+
+async def _activity(db_session, action: str) -> list[KbActivity]:
+    rows = await db_session.execute(
+        select(KbActivity).where(KbActivity.action == action).order_by(KbActivity.id)
+    )
+    return list(rows.scalars().all())
+
+
+async def test_a_failure_on_the_second_batch_leaves_the_unreached_chunks_pending(
+    session_factory, db_session
+) -> None:
+    """The per-chunk state is the truth and the entry status is derived from it:
+    11 chunks, a provider that fails on the second request, 8 embedded."""
+    entry = await _entry(db_session)
+    chunks = await _chunks(db_session, entry, *[BIG_TEXT] * 11)
+    embedder = FakeEmbedder(model="voyage-4", fail_after_batch=1)
+
+    with pytest.raises(EmbeddingError):
+        await embed_pending(session_factory, embedder)
+
+    assert embedder.calls == 2
+    for chunk in chunks[:8]:
+        await db_session.refresh(chunk)
+        assert chunk.embedded_at is not None
+        assert chunk.embedding_model == "voyage-4"
+    for chunk in chunks[8:]:
+        await db_session.refresh(chunk)
+        assert chunk.embedded_at is None
+
+    facts = (await KbService(session_factory=session_factory).facts([entry]))[entry.id]
+    assert facts.chunks == 11
+    assert facts.chunks - facts.pending_chunks == 8
+
+    # What it did manage is still counted: the tokens of the batch that landed.
+    [row] = await _activity(db_session, "embed")
+    assert row.model == "voyage-4"
+    assert row.input_tokens == 8 * estimate_tokens(BIG_TEXT) == 256_000
+
+
+async def test_an_embed_writes_an_activity_row_with_the_voyage_token_count(
+    session_factory, db_session
+) -> None:
+    entry = await _entry(db_session)
+    texts = ["the first passage", "the second passage", "the third one"]
+    await _chunks(db_session, entry, *texts)
+
+    embedded = await embed_pending(session_factory, FakeEmbedder(model="voyage-4"), limit=10)
+
+    assert embedded == 3
+    [row] = await _activity(db_session, "embed")
+    assert row.action == "embed"
+    assert row.model == "voyage-4"
+    assert row.entry_id is None
+    assert row.input_tokens == sum(estimate_tokens(text) for text in texts)
+
+
+async def test_nothing_pending_writes_no_activity_row(session_factory, db_session) -> None:
+    entry = await _entry(db_session)
+    await _chunks(db_session, entry, "one passage")
+    await embed_pending(session_factory, FakeEmbedder())
+
+    assert await embed_pending(session_factory, FakeEmbedder()) == 0
+    assert len(await _activity(db_session, "embed")) == 1
+
+
+async def test_a_null_embedder_embeds_nothing_and_leaves_no_trail(
+    session_factory, db_session
+) -> None:
+    """"No key configured" is a normal state, not an event worth a row."""
+    entry = await _entry(db_session)
+    chunks = await _chunks(db_session, entry, "one passage")
+
+    assert await embed_pending(session_factory, NullEmbedder()) == 0
+
+    await db_session.refresh(chunks[0])
+    assert chunks[0].embedded_at is None
+    assert await _activity(db_session, "embed") == []
 
 
 # ------------------------------------------------------------ the fake embedder

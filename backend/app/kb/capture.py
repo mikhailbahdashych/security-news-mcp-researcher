@@ -37,8 +37,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db.models import Note, utcnow
-from app.kb.chunking import split_markdown
-from app.kb.embeddings import Embedder
+from app.kb.chunking import estimate_tokens, split_markdown
+from app.kb.embeddings import Embedder, plan_batches
 from app.kb.entities import extract_entities
 from app.kb.models import (
     KbActivity,
@@ -816,14 +816,29 @@ async def embed_pending(
     *,
     entry_id: int | None = None,
     limit: int = 500,
+    source: str = "",
 ) -> int:
     """Embed chunks that have no vector yet, and return how many were embedded.
 
     ``embedded_at IS NULL`` is the one definition of "pending", so this is also
     what Re-index resumes from. With an embedder that cannot embed —
-    :class:`~app.kb.embeddings.NullEmbedder`, the only one in Phase 1 — it is a
-    no-op and the chunks stay pending, which is a normal state of the knowledge
-    base rather than a failure.
+    :class:`~app.kb.embeddings.NullEmbedder`, used whenever no Voyage key is
+    configured — it is a no-op and the chunks stay pending, which is a normal
+    state of the knowledge base rather than a failure.
+
+    **Written per batch, not once at the end.** The selection is grouped by
+    :func:`~app.kb.embeddings.plan_batches` — the same grouping the embedder would
+    apply to one request — and each group's vectors, ``embedded_at`` and
+    ``embedding_model`` are committed before the next group is sent. So a provider
+    that 429s on the fifth request leaves exactly the chunks it never reached
+    pending, the entry's "8 of 11" is derived from counting them, and the next run
+    resumes from there instead of re-embedding what was already paid for.
+
+    Whatever it did manage is counted: one ``kb_activity`` row per call, with the
+    model and the estimated token count of the batches that landed, written even
+    when a later batch raised. The estimate is ``ceil(chars / 3.6)`` — the same one
+    the batcher packs with — because the count has to be attributable to the chunks
+    it was spent on, which a provider's reply about one request is not.
     """
     if embedder is None or embedder.dimensions <= 0:
         return 0
@@ -853,36 +868,54 @@ async def embed_pending(
     if not rows:
         return 0
 
-    # No session is open here: an embedder call is a network round trip, and
-    # SQLite has exactly one writer.
-    vectors = await embedder.embed_documents([row[1] for row in rows])
-
     store = SqliteKnowledgeStore(session_factory)
-    await store.upsert_vectors(
-        [
-            VectorRow(
-                chunk_id=row[0],
-                entry_id=row[3],
-                entry_kind=row[4],
-                chunk_kind=row[2],
-                reviewed=row[5] == "reviewed",
-                authorship=row[6],
-                published_day=published_day(row[7] or row[8]),
-                embedding=vector,
-            )
-            for row, vector in zip(rows, vectors, strict=True)
-        ]
-    )
+    embedded = 0
+    tokens = 0
+    try:
+        for group in plan_batches([row[1] for row in rows]):
+            batch = [rows[index] for index in group]
+            # No session is open here: an embedder call is a network round trip,
+            # and SQLite has exactly one writer.
+            vectors = await embedder.embed_documents([row[1] for row in batch])
 
-    embedded_at = utcnow()
-    async with session_factory() as session:
-        for row in rows:
-            chunk = await session.get(KbChunk, row[0])
-            if chunk is not None:
-                chunk.embedded_at = embedded_at
-                chunk.embedding_model = embedder.model
-        await session.commit()
-    return len(rows)
+            await store.upsert_vectors(
+                [
+                    VectorRow(
+                        chunk_id=row[0],
+                        entry_id=row[3],
+                        entry_kind=row[4],
+                        chunk_kind=row[2],
+                        reviewed=row[5] == "reviewed",
+                        authorship=row[6],
+                        published_day=published_day(row[7] or row[8]),
+                        embedding=vector,
+                    )
+                    for row, vector in zip(batch, vectors, strict=True)
+                ]
+            )
+
+            embedded_at = utcnow()
+            async with session_factory() as session:
+                for row in batch:
+                    chunk = await session.get(KbChunk, row[0])
+                    if chunk is not None:
+                        chunk.embedded_at = embedded_at
+                        chunk.embedding_model = embedder.model
+                await session.commit()
+            embedded += len(batch)
+            tokens += sum(estimate_tokens(row[1]) for row in batch)
+    finally:
+        if embedded:
+            await _log_in_new_session(
+                session_factory,
+                "embed",
+                entry_id=entry_id,
+                source=source,
+                model=embedder.model,
+                input_tokens=tokens,
+                detail=f"{embedded} chunks",
+            )
+    return embedded
 
 
 async def _embed_pending_quietly(
@@ -901,7 +934,9 @@ async def _embed_pending_quietly(
     with a 500, and ``embedded_at IS NULL`` is exactly what Re-index resumes from.
     """
     try:
-        return await embed_pending(session_factory, embedder, entry_id=entry_id)
+        return await embed_pending(
+            session_factory, embedder, entry_id=entry_id, source=trigger
+        )
     except Exception as exc:  # noqa: BLE001 - the capture already committed
         logger.exception("Embedding entry %s failed", entry_id)
         await _log_in_new_session(
