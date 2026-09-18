@@ -12,6 +12,7 @@ import {
   updateSettings,
   type AppSettings,
   type Effort,
+  type NotWritable,
   type SettingsUpdate,
   type ThinkingDisplay,
 } from '../api/settings'
@@ -44,19 +45,12 @@ import type { EmbeddablePageProps } from '../components/ui/PageHost'
 import Page from './Page'
 
 /** Everything this form edits: not the two write-only API keys, not the
- *  read-only `*_key_source` fields that describe where they came from, and not
- *  the KB schema version the index reports about itself. `SettingsUpdate` omits
- *  exactly the same ones, because `PUT /api/settings` forbids extra fields. */
-type Draft = Omit<
-  AppSettings,
-  | 'has_api_key'
-  | 'api_key_masked'
-  | 'key_source'
-  | 'kb_schema_version'
-  | 'has_voyage_key'
-  | 'voyage_api_key_masked'
-  | 'voyage_key_source'
->
+ *  read-only fields that describe where they came from, not the KB schema
+ *  version the index reports about itself and not the shipped compile prompt.
+ *  `NotWritable` is the one list, shared with `SettingsUpdate` — a second copy
+ *  here is how a read-only field ends up in a PUT that then 422s the whole
+ *  form, because `SettingsUpdate` forbids extra fields. */
+type Draft = Omit<AppSettings, NotWritable>
 
 /** Listed field by field so that adding a setting to the API is a type error here
  *  until the form handles it. */
@@ -170,9 +164,9 @@ function SettingsForm({ settings }: { settings: AppSettings }) {
   // Every value in a draft is a primitive, so key-by-key identity is the whole
   // comparison — no deep equality, and no false positives from a re-render.
   const dirty = (Object.keys(draft) as (keyof Draft)[]).some((key) => draft[key] !== saved[key])
-  // The one field a save must not be allowed to empty: the API accepts an empty
-  // prompt and would then compile with no instructions at all, and the shipped
-  // default is not on the wire anywhere to put back.
+  // The one field a save must not be allowed to empty. The API refuses it too
+  // (a 422 since P2-24); this is the half that keeps the user from meeting that
+  // refusal as "could not save" over a form they cannot see the fault in.
   const invalid = draft.kb_compile_prompt.trim() === ''
   const models = modelsQuery.data ?? []
 

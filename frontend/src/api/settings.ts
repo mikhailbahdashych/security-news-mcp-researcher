@@ -62,6 +62,9 @@ export interface AppSettings {
   kb_compile_model: string
   kb_compile_effort: Effort
   kb_compile_prompt: string
+  /** What the build **ships** with — read-only, and what "Reset to default"
+   *  restores. It is on the wire nowhere else and cannot be reconstructed. */
+  kb_compile_prompt_default: string
   kb_compile_max_chars: number
   /** Compile tokens per calendar month. **Chat spend is not counted here.** */
   kb_compile_monthly_token_budget: number
@@ -73,8 +76,14 @@ export interface AppSettings {
   kb_duplicate_threshold: number
 }
 
-/** The fields `PUT /api/settings` will not take: read-only, or write-only. */
-type NotWritable =
+/**
+ * The fields `PUT /api/settings` will not take: read-only, or write-only.
+ *
+ * Exported, because the Settings page's own `Draft` omits exactly these and a
+ * second hand-kept copy of the list is how a read-only field ends up being PUT
+ * back — `SettingsUpdate` forbids extra fields, so the whole form would 422.
+ */
+export type NotWritable =
   | 'has_api_key'
   | 'api_key_masked'
   | 'key_source'
@@ -82,6 +91,7 @@ type NotWritable =
   | 'has_voyage_key'
   | 'voyage_api_key_masked'
   | 'voyage_key_source'
+  | 'kb_compile_prompt_default'
 
 /** Everything a `PUT` may change. All fields optional: unsent fields are left alone. */
 export type SettingsUpdate = Partial<

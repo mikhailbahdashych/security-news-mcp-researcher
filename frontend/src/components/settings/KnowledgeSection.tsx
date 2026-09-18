@@ -240,6 +240,9 @@ function Compile({
   onEdit: (patch: Partial<KnowledgeDraft>) => void
 }) {
   const stored = settings.kb_compile_prompt
+  // Guarded: a backend older than P2-24 does not send it, and a Reset button
+  // that emptied the prompt would be worse than one that is disabled.
+  const shipped = settings.kb_compile_prompt_default || stored
 
   return (
     <div className="flex flex-col gap-3 border-t border-line pt-3">
@@ -292,7 +295,7 @@ function Compile({
       <Field
         label="Compile prompt"
         htmlFor={`${uid}-kb-compile-prompt`}
-        hint="The instructions every compile is given. Reset puts back the prompt that is stored, which is the shipped default until you save one of your own."
+        hint="The instructions every compile is given. “Reset to default” puts back the prompt this build ships with; “Revert changes” puts back the one you last saved."
       >
         <Textarea
           id={`${uid}-kb-compile-prompt`}
@@ -304,16 +307,28 @@ function Compile({
         />
       </Field>
       <div className="flex flex-wrap items-center gap-2">
+        {/* Two different things, and the button used to claim to be both: the
+            shipped prompt is `kb_compile_prompt_default` and arrives read-only
+            on every GET, because it is nowhere else the client can reach. */}
         <Button
           size="sm"
-          disabled={draft.kb_compile_prompt === stored}
-          onClick={() => onEdit({ kb_compile_prompt: stored })}
+          disabled={draft.kb_compile_prompt === shipped}
+          onClick={() => onEdit({ kb_compile_prompt: shipped })}
         >
           Reset to default
         </Button>
+        <Button
+          size="sm"
+          variant="ghost"
+          disabled={draft.kb_compile_prompt === stored}
+          onClick={() => onEdit({ kb_compile_prompt: stored })}
+        >
+          Revert changes
+        </Button>
         {draft.kb_compile_prompt.trim() === '' ? (
           <span className="text-[11.5px] text-red">
-            The prompt cannot be empty — the compile would go out with no instructions.
+            The prompt cannot be empty — the compile would go out with no instructions, so the API
+            refuses it too.
           </span>
         ) : null}
       </div>
