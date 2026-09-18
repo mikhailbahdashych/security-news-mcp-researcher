@@ -33,6 +33,24 @@ export interface AttentionRow {
   text: string
   /** The trail row's timestamp, for a failure. */
   at: string | null
+  /** What would actually undo this failure — `null` on the other three kinds. */
+  retry: RetryAction | null
+}
+
+/**
+ * The one action that can settle a failure row.
+ *
+ * `refresh` re-reads the source over the network, which is the answer to a
+ * capture that did not get the page. It is **not** the answer to a compile that
+ * the model refused, that ran out of budget or that had no key: those need the
+ * entry compiled, and re-fetching the article only rewrites a snapshot that was
+ * never the problem — and on an entry with no `url` (a note, a finding) it does
+ * nothing at all.
+ */
+export type RetryAction = 'refresh' | 'compile'
+
+export function retryAction(row: KbActivity): RetryAction {
+  return row.action === 'skip' ? 'refresh' : 'compile'
 }
 
 export interface AttentionOptions {
@@ -129,6 +147,7 @@ export function needsAttention(
         mergeInto: entry.possible_duplicate_of,
         text: duplicateLabel(entry, byId.get(entry.possible_duplicate_of), embeddingsConfigured),
         at: null,
+        retry: null,
       })
     }
   }
@@ -150,6 +169,7 @@ export function needsAttention(
         mergeInto: null,
         text: `Written by the model, not reviewed yet — ${entry.title}`,
         at: null,
+        retry: null,
       })
     }
   }
@@ -170,6 +190,7 @@ export function needsAttention(
       mergeInto: null,
       text: failureText(row),
       at: row.at,
+      retry: retryAction(row),
     })
   }
 
@@ -181,6 +202,7 @@ export function needsAttention(
       mergeInto: null,
       text: `Deleted — ${entry.title}`,
       at: entry.deleted_at,
+      retry: null,
     })
   }
 

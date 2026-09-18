@@ -3,6 +3,8 @@ import { useState } from 'react'
 
 import { conflictDetail } from '../../api/client'
 import {
+  compileEntry,
+  compileOutcome,
   deleteEntry,
   kbQueryKey,
   mergeEntry,
@@ -53,6 +55,7 @@ export default function NeedsAttention({
 }: NeedsAttentionProps) {
   const queryClient = useQueryClient()
   const [confirmPurge, setConfirmPurge] = useState(false)
+  const [compiled, setCompiled] = useState<string | null>(null)
   const invalidate = () => queryClient.invalidateQueries({ queryKey: kbQueryKey })
 
   const undo = useMutation({
@@ -70,6 +73,16 @@ export default function NeedsAttention({
   const retry = useMutation({
     mutationFn: (id: number) => refreshEntry(id),
     onSuccess: invalidate,
+  })
+  // Every compile outcome is an HTTP 200 — a refusal, a spent budget and a
+  // missing key are all `compiled: false` — so the sentence is shown here
+  // rather than thrown, exactly as the entry page does it.
+  const compile = useMutation({
+    mutationFn: (id: number) => compileEntry(id),
+    onSuccess: async (result) => {
+      setCompiled(result.compiled ? null : compileOutcome(result))
+      await invalidate()
+    },
   })
   // Soft: the row moves down the strip to the bin, where Undo is waiting.
   const remove = useMutation({
@@ -98,6 +111,7 @@ export default function NeedsAttention({
     (merge.isError && conflictDetail(merge.error) === null) ||
     review.isError ||
     retry.isError ||
+    compile.isError ||
     remove.isError
 
   const deletedIds = deleted.map((entry) => entry.id)
@@ -119,6 +133,7 @@ export default function NeedsAttention({
                 merge: merge.isPending && merge.variables?.id === row.entryId,
                 review: review.isPending && review.variables === row.entryId,
                 retry: retry.isPending && retry.variables === row.entryId,
+                compile: compile.isPending && compile.variables === row.entryId,
                 undo: undo.isPending && undo.variables === row.entryId,
                 remove: remove.isPending && remove.variables === row.entryId,
               }}
@@ -126,6 +141,10 @@ export default function NeedsAttention({
               onMerge={(id, into) => merge.mutate({ id, into })}
               onReview={(id) => review.mutate(id)}
               onRetry={(id) => retry.mutate(id)}
+              onCompile={(id) => {
+                setCompiled(null)
+                compile.mutate(id)
+              }}
               onUndo={(id) => undo.mutate(id)}
               onDelete={(id) => remove.mutate(id)}
             />
@@ -144,6 +163,7 @@ export default function NeedsAttention({
         </div>
       ) : null}
 
+      {compiled ? <p className="mt-2 text-[11.5px] text-amber">{compiled}</p> : null}
       {conflict ? <p className="mt-2 text-[11.5px] text-red">{conflict}</p> : null}
       {failed && conflict === null ? (
         <p className="mt-2 text-[11.5px] text-red">That did not go through.</p>
@@ -173,11 +193,19 @@ export default function NeedsAttention({
 
 interface ActionsProps {
   row: AttentionRow
-  busy: { merge: boolean; review: boolean; retry: boolean; undo: boolean; remove: boolean }
+  busy: {
+    merge: boolean
+    review: boolean
+    retry: boolean
+    compile: boolean
+    undo: boolean
+    remove: boolean
+  }
   onOpen: (id: number) => void
   onMerge: (id: number, into: number) => void
   onReview: (id: number) => void
   onRetry: (id: number) => void
+  onCompile: (id: number) => void
   onUndo: (id: number) => void
   onDelete: (id: number) => void
 }
@@ -190,6 +218,7 @@ function Actions({
   onMerge,
   onReview,
   onRetry,
+  onCompile,
   onUndo,
   onDelete,
 }: ActionsProps) {
@@ -238,17 +267,24 @@ function Actions({
   }
 
   if (row.kind === 'failure') {
+    // What the failure actually was decides the button. A compile the model
+    // refused, or one that ran out of budget or had no key, is not fixed by
+    // fetching the article again — and on a note or a finding there is no
+    // source to fetch. `attention.ts::retryAction` is that rule, tested.
+    const compiling = row.retry === 'compile'
     return (
       <>
         {open}
         {row.entryId !== null ? (
           <Button
             size="sm"
-            loading={busy.retry}
-            title="Read the source again"
-            onClick={() => onRetry(row.entryId as number)}
+            loading={compiling ? busy.compile : busy.retry}
+            title={compiling ? 'Summarise this entry again' : 'Read the source again'}
+            onClick={() =>
+              compiling ? onCompile(row.entryId as number) : onRetry(row.entryId as number)
+            }
           >
-            Retry
+            {compiling ? 'Compile' : 'Retry'}
           </Button>
         ) : null}
       </>

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import type { KbActivity, KbEntry } from '../../api/kb'
-import { needsAttention } from './attention'
+import { needsAttention, retryAction } from './attention'
 
 function entry(overrides: Partial<KbEntry> = {}): KbEntry {
   return {
@@ -187,5 +187,32 @@ describe('needsAttention', () => {
     const deleted = entry({ id: 8, deleted_at: '2026-09-17T09:00:00', possible_duplicate_of: 4 })
     const rows = needsAttention([deleted], [], { deleted: [deleted] })
     expect(rows.map((row) => row.kind)).toEqual(['deleted'])
+  })
+
+  it('carries the action that would settle each failure, and none on the rest', () => {
+    const rows = needsAttention(
+      [entry({ id: 1, possible_duplicate_of: 2 }), entry({ id: 2 })],
+      [
+        activity({ id: 70, action: 'skip', entry_id: 3, detail: 'HTTP 403' }),
+        activity({ id: 71, action: 'compile', entry_id: 4, detail: 'refused (cyber)' }),
+      ],
+      { deleted: [entry({ id: 9, deleted_at: '2026-09-17T09:00:00' })] },
+    )
+    expect(rows.map((row) => row.retry)).toEqual([null, 'refresh', 'compile', null])
+  })
+})
+
+describe('retryAction', () => {
+  it('re-reads the source only for a capture that did not get the page', () => {
+    expect(retryAction(activity({ action: 'skip' }))).toBe('refresh')
+  })
+
+  it('compiles for every compile failure, including a spent budget', () => {
+    // Refreshing these fetches the article again and leaves the entry exactly
+    // as uncompiled as it was — and on a note or a finding there is no URL to
+    // fetch at all.
+    expect(retryAction(activity({ action: 'compile' }))).toBe('compile')
+    expect(retryAction(activity({ action: 'recompile' }))).toBe('compile')
+    expect(retryAction(activity({ action: 'budget_hit' }))).toBe('compile')
   })
 })
