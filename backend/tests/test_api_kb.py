@@ -436,12 +436,22 @@ async def _flagged(kb, db_session):
 
 async def test_not_a_duplicate_clears_the_flag_and_records_it(client, kb, db_session):
     older, newer = await _flagged(kb, db_session)
+    before = await db_session.scalar(
+        select(KbEntry.updated_at).where(KbEntry.id == newer.entry_id)
+    )
 
     response = await client.post(f"/api/kb/entries/{newer.entry_id}/not-a-duplicate")
 
     assert response.status_code == 200
     assert response.json()["id"] == newer.entry_id
     assert response.json()["possible_duplicate_of"] is None
+    # Nothing the entry *says* changed. `updated_at` is `onupdate=utcnow`, so an ORM
+    # write would move it past `compiled_at` and a current summary would call itself
+    # stale — a nudge to pay for a recompile, for dismissing a false positive.
+    after = await db_session.scalar(
+        select(KbEntry.updated_at).where(KbEntry.id == newer.entry_id)
+    )
+    assert after == before
     # The strip's own "why did this go away" trail must not have a hole in it.
     rows = (
         (

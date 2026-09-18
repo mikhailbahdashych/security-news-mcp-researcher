@@ -33,7 +33,7 @@ from datetime import datetime, timedelta
 from typing import Literal
 
 import httpx2
-from sqlalchemy import delete, func, or_, select, text
+from sqlalchemy import delete, func, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -817,11 +817,20 @@ async def dismiss_duplicate(
         flagged = entry.possible_duplicate_of
         if flagged is None:
             return False
-        entry.possible_duplicate_of = None
+        # A Core UPDATE that pins ``updated_at`` to itself, not an attribute write:
+        # the column is ``onupdate=utcnow``, which fires for any ORM flush of this
+        # row — and re-assigning the old value does not help, because an unchanged
+        # attribute stays out of the SET clause. ``turns.mark_interrupted`` does
+        # the same for the same reason.
+        await session.execute(
+            update(KbEntry)
+            .where(KbEntry.id == entry_id)
+            .values(possible_duplicate_of=None, updated_at=KbEntry.updated_at)
+        )
         await log_activity(
             session,
             "merge",
-            entry_id=entry.id,
+            entry_id=entry_id,
             source="user",
             detail=f"dismissed the possible-duplicate flag against entry {flagged}",
         )
