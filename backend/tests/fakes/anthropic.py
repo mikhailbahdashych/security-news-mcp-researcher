@@ -325,6 +325,48 @@ def turn_refusal(category: str | None = "cyber", explanation: str = "declined") 
     )
 
 
+def turn_text_after_fallback(before: str, after: str) -> ScriptedTurn:
+    """Text, a mid-output ``fallback`` block, then the answering model's text.
+
+    What a ``fallbacks`` switch looks like when the first model had already
+    started writing: both halves are in ``content`` and only the half **after**
+    the boundary is the answer. ``message.model`` is the model that answered.
+    """
+    from anthropic.types.beta import (
+        BetaFallbackBlock,
+        BetaFallbackInfo,
+        BetaFallbackRefusalTrigger,
+    )
+
+    block = BetaFallbackBlock(
+        type="fallback",
+        **{"from": BetaFallbackInfo(model="claude-opus-5")},
+        to=BetaFallbackInfo(model="claude-opus-4-8"),
+        trigger=BetaFallbackRefusalTrigger(type="refusal", category="cyber"),
+    )
+    message = _message(
+        [
+            BetaTextBlock(type="text", text=before),
+            block,
+            BetaTextBlock(type="text", text=after),
+        ],
+        "end_turn",
+    )
+    message.model = "claude-opus-4-8"
+    return ScriptedTurn(
+        events=[
+            *_text_events(before, 0),
+            BetaRawContentBlockStartEvent(
+                type="content_block_start", index=1, content_block=block
+            ),
+            BetaRawContentBlockStopEvent(type="content_block_stop", index=1),
+            *_text_events(after, 2),
+            BetaRawMessageStopEvent(type="message_stop"),
+        ],
+        message=message,
+    )
+
+
 def turn_pause(text: str = "searching") -> ScriptedTurn:
     """A ``pause_turn``: the server hit its own tool-iteration cap."""
     return ScriptedTurn(

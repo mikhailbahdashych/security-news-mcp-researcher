@@ -319,7 +319,15 @@ anything else → `OneshotError`; a body that is not a JSON *object* →
   prompt-cache prefix and nothing here has to stay byte-stable.
 - A `fallbacks` switch is a plain 200 whose `model` differs from the one asked
   for. `StructuredResult.model` records the model that answered; it is never
-  compared to the requested one.
+  compared to the requested one. When the switch happened **mid-output** the
+  turn also carries a `fallback` content block, and only the text blocks
+  **after the last one** are the answer — the abandoned model's half-written
+  JSON sits ahead of the boundary and joining both halves is a parse error out
+  of a good 200. `runner.fallback_boundary()` is the one place that boundary is
+  found; `sanitize_for_replay` uses the same helper.
+- Callers catch **two** families: `OneshotError` and `anthropic.APIStatusError`.
+  The SDK's exceptions are deliberately not wrapped, so a 429 is still a 429 to
+  whoever decides whether to retry.
 
 ## Turn ownership (`turns.py`, `turnlog.py`)
 

@@ -25,6 +25,7 @@ from tests.fakes.anthropic import (
     turn_pause,
     turn_refusal,
     turn_text,
+    turn_text_after_fallback,
     turn_text_with_usage,
 )
 
@@ -142,6 +143,20 @@ async def test_a_fallback_answer_is_a_normal_success():
     assert result.data == {"summary_md": "A router bug.", "tags": ["network"]}
     assert result.model == "claude-opus-4-8"
     assert result.stop_reason == "end_turn"
+
+
+async def test_a_mid_output_fallback_keeps_only_the_answering_models_text():
+    # The safeguards that refuse security content also switch models mid-output,
+    # so the abandoned model's half-written JSON is still in `content` ahead of
+    # the fallback block. Joining both halves is invalid JSON out of a good 200.
+    client = ScriptedAnthropic([turn_text_after_fallback('{"summary_md": "A rout', BODY)])
+
+    result = await structured_call_result(
+        client, model="claude-opus-5", effort="low", system="s", user="u", schema=SCHEMA
+    )
+
+    assert result.data == {"summary_md": "A router bug.", "tags": ["network"]}
+    assert result.model == "claude-opus-4-8"
 
 
 async def test_malformed_json_raises_a_typed_parse_error():

@@ -9,7 +9,7 @@ makes (same betas, same ``fallbacks``, the same
 ``cache_control``, plus ``output_config.format``. Nothing else in the app may
 call ``messages.create``/``stream`` directly.
 
-Three rules that are easy to get wrong:
+Four rules that are easy to get wrong:
 
 * **Never enable citations on a structured call.** ``citations: {"enabled":
   true}`` on a ``document`` or ``search_result`` block *together with* an
@@ -20,10 +20,19 @@ Three rules that are easy to get wrong:
 * **Read ``stop_reason`` before ``content``.** A refusal is an HTTP 200 whose
   ``content`` can be ``[]``, and this app compiles *security* content, so a
   refusal is a first-class state rather than an edge case.
+* **Only the text after the last ``fallback`` block is the answer.** The same
+  safeguards that produce a refusal also produce a mid-output model switch, and
+  the abandoned model's half-written JSON stays in ``content`` ahead of the
+  boundary. :func:`app.agent.runner.fallback_boundary` finds it.
 
 ``thinking`` is deliberately absent: omitting it runs adaptive thinking with the
 display defaulted to ``"omitted"``, which is what a call whose output nobody
 watches stream wants. ``budget_tokens`` would be a 400 anyway.
+
+Callers catch **two** families: :class:`OneshotError` for an answer that did not
+come back as an object, and ``anthropic.APIStatusError`` for the transport — the
+SDK's exceptions are deliberately let through rather than wrapped, so a 429 is
+still a 429 to whoever decides whether to retry.
 """
 
 from __future__ import annotations
@@ -36,8 +45,15 @@ from anthropic import AsyncAnthropic
 
 # _usage_dict is the runner's; the budget accounting downstream has to agree
 # with the chat path's counters byte for byte, so it is imported rather than
-# re-derived.
-from app.agent.runner import FALLBACK_BETA, FALLBACKS, MAX_TOKENS, _usage_dict
+# re-derived. fallback_boundary is the runner's for the same reason: "where did
+# the model switch" is one rule, not two.
+from app.agent.runner import (
+    FALLBACK_BETA,
+    FALLBACKS,
+    MAX_TOKENS,
+    _usage_dict,
+    fallback_boundary,
+)
 
 #: How much of an unparseable answer travels in the error. Never the whole body:
 #: the caller logs it.
@@ -125,9 +141,15 @@ async def structured_call_result(
         # pause_turn and tool_use are as unexpected as an unknown reason.
         raise OneshotError(f"Unexpected stop_reason: {stop_reason!r}")
 
+    # Only the blocks after the last ``fallback`` are the answer. A turn can
+    # switch models mid-output — the whole point of the beta on a module that
+    # compiles security articles — and the abandoned model's half-written JSON
+    # is still in ``content`` ahead of the boundary. Joining both sides yields
+    # invalid JSON out of a perfectly good 200.
+    blocks = list(getattr(final, "content", None) or [])
     text = "".join(
         getattr(block, "text", "") or ""
-        for block in (getattr(final, "content", None) or [])
+        for block in blocks[fallback_boundary(blocks) + 1 :]
         if getattr(block, "type", None) == "text"
     )
     try:
@@ -163,3 +185,14 @@ async def structured_call(
         client, model=model, effort=effort, system=system, user=user, schema=schema
     )
     return result.data
+
+
+__all__ = [
+    "PARSE_PREVIEW_CHARS",
+    "OneshotError",
+    "RefusalError",
+    "StructuredParseError",
+    "StructuredResult",
+    "structured_call",
+    "structured_call_result",
+]

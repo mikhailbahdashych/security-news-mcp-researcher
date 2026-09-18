@@ -128,6 +128,22 @@ def _to_dict(block: Any) -> Any:
     return block
 
 
+def fallback_boundary(content: Any) -> int:
+    """Index of the **last** ``fallback`` block in *content*, or ``-1``.
+
+    The one place "where did the model switch" is decided. Everything before it
+    was written by the model that gave up; everything after it is the answering
+    model's. :func:`sanitize_for_replay` uses it to decide what may be echoed
+    back, and ``oneshot`` uses it to decide which text blocks are the answer.
+    """
+    if not isinstance(content, list):
+        return -1
+    return max(
+        (index for index, block in enumerate(content) if _block_type(block) == "fallback"),
+        default=-1,
+    )
+
+
 def sanitize_for_replay(content: Any) -> list[Any]:
     """Strip the blocks that must not be echoed back after a mid-output fallback.
 
@@ -146,10 +162,7 @@ def sanitize_for_replay(content: Any) -> list[Any]:
     if not isinstance(content, list):
         return content
 
-    boundary = -1
-    for index, block in enumerate(content):
-        if _block_type(block) == "fallback":
-            boundary = index
+    boundary = fallback_boundary(content)
     if boundary < 0:
         return list(content)
 
@@ -782,6 +795,7 @@ __all__ = [
     "FALLBACK_BETA",
     "MAX_TOKENS",
     "PREVIEW_CHARS",
+    "fallback_boundary",
     "parse_tool_input",
     "run",
     "sanitize_for_replay",
