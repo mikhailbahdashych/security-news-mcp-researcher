@@ -70,6 +70,14 @@ because `KbService.embedder.dimensions > 0` once a Voyage key is configured
 `embeddings_configured: bool` already exists and now flips to `true` with a key configured.
 `pending_chunks` is the count the UI's "waiting for an embedding" line reads. No shape change.
 
+### `POST /api/kb/entries/{id}/not-a-duplicate` → `200 EntryRead` *(plan decision P2-23)*
+
+Clears `possible_duplicate_of` on that entry. Idempotent: an entry with no flag is a `200` too; an
+unknown id is a `404`. Writes one `kb_activity` row. Until this existed a flag could only be cleared
+by a merge — and with no Voyage key a flag is raised on the title alone, so a false positive had no
+exit but merging two unrelated entries or deleting one. The "Needs attention" strip and the entry's
+duplicate banner both offer it as a one-click **Dismiss**.
+
 ### `POST /api/kb/embed-pending` → `200` *(2.1, plan decision P2-15)*
 
 ```
@@ -129,6 +137,12 @@ to the DB. `voyage_key_source === 'env'` with `has_voyage_key === false` is a no
 | `kb_recency_boost` | boolean | `true` | — | 2.2 |
 | `kb_rerank` | boolean | `true` | — | **nobody in Phase 2** (Task 3.6) |
 | `kb_duplicate_threshold` | number (float) | `0.92` | 0.0–1.0 | 2.3 |
+
+### The shipped compile prompt *(plan decision P2-24)*
+
+`SettingsRead.kb_compile_prompt_default: string` — read-only, the prompt the app ships with, so
+"Reset to default" restores *that* and not whatever was saved last. An empty or whitespace-only
+`kb_compile_prompt` is a `422` on write: it used to be stored, which silently destroyed the default.
 
 ### New write-only field on `SettingsUpdate`
 

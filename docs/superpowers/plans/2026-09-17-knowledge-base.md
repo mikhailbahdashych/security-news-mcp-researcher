@@ -379,6 +379,16 @@ a gap is an entry folded into a neighbour.
   descriptions; a test walks the schema for the forbidden keywords. **Still owed: one live compile in
   the Phase 2 browser pass**, because no test can prove the API accepts the schema. — Cost if wrong:
   none; the keywords were never the load-bearing cap.
+- **P2-23. A duplicate flag is dismissable.** `possible_duplicate_of` was cleared only by a merge. With
+  no Voyage key the flag comes from the title trigram alone, so the first thing a new user met was a
+  false positive whose only exits were merging two unrelated entries or deleting one.
+  `POST /api/kb/entries/{id}/not-a-duplicate` clears it (idempotent, one activity row), and the strip
+  and the entry banner offer a one-click Dismiss. A model-authored finding neither flags nor is
+  flagged, in either direction: merging keeps the *older* entry, so a suggested merge could otherwise
+  delete the user's research and keep the article it quotes. — Cost if wrong: one small route.
+- **P2-24. `SettingsRead` exposes the shipped compile prompt, and an empty prompt is refused.** "Reset
+  to default" could only restore the last *saved* prompt, and saving a blank one destroyed the default
+  for good (the getter falls back only when the row is absent).
 
 ---
 
