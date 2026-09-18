@@ -70,6 +70,12 @@ async def set_item_status(
     Starring is also the knowledge base's main capture trigger. It runs **after**
     the status has committed and swallows its own failures into a ``kb_activity``
     row, so a paywall or a 403 can never cost the user the star they pressed.
+
+    **In ``kb_compile_mode: auto`` this response waits for an Anthropic call.**
+    The capture compiles the new entry inline (spec §4.5 sanctions it: one
+    capture, one click, one call), so a star that normally answers in
+    milliseconds takes seconds instead — longer at ``kb_compile_effort: high``.
+    The default mode is ``manual``, where nothing here calls out at all.
     """
     item = await _load_item(session, item_id)
     item.status = payload.status

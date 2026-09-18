@@ -134,6 +134,12 @@ async def create_entry(payload: EntryCreate, response: Response, kb: KbServiceDe
     A save of something that is in the trash revives it, so the 200 always
     describes an entry the user can now see — reporting "Saved" for a row that
     stays hidden is the one answer that is not true.
+
+    **In ``kb_compile_mode: auto`` this response waits for an Anthropic call**
+    and the 201 already carries ``summary_md`` and ``compile_model``. One capture
+    compiles inline by design (spec §4.5), so Save takes seconds rather than
+    milliseconds and needs a pending state in the UI. The default mode is
+    ``manual``; a bulk run opts out entirely.
     """
     try:
         if payload.feed_item_id is not None:

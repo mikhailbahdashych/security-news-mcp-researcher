@@ -212,6 +212,16 @@ class KbService:
         user clicked twice is exactly the surprise the budget exists to prevent.
         A skipped capture has nothing to compile.
 
+        **The caller waits for it.** A single capture runs inline in the request
+        that triggered it, so in ``auto`` mode ``PATCH /api/items/{id}`` and
+        ``POST /api/kb/entries`` both hold their response open for a full
+        Anthropic round trip — a star goes from about 200 ms to several seconds,
+        more at ``kb_compile_effort: high``. That is spec §4.5's rule ("a single
+        capture runs inline … then compile if the compile mode says so") and not
+        an oversight; ``kb_compile_mode`` defaults to ``manual``, so it is off
+        until the user turns it on, and the bulk job opts out because two hundred
+        articles is not one click's worth of calls.
+
         Inside ``guarded``, and after the capture's own commit, because a compile
         is a *consequence* of the capture and not part of it — a refusal, a spent
         budget, a 429 or a missing key must never turn a saved entry into a failed
