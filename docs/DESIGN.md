@@ -373,6 +373,35 @@ Implementation notes for the SPA half (the backend half is `backend/CLAUDE.md`):
   splitting `GlobalSearch` used to do inline.
 - `.env.example` gains a **commented** `VOYAGE_API_KEY`: nothing reads it until Phase 2.
 
+> **Implementation notes — Phase 2 (embeddings, compile, findings).** The vector half
+> landed: Voyage embeddings behind the same key precedence as the Anthropic one (process
+> environment → `.env` → the stored row, read back masked, reported as
+> `voyage_key_source`), `VOYAGE_API_KEY` now live in `.env.example` rather than commented
+> out, and **search is hybrid the moment a key exists** — entries captured before it stay
+> keyword-only until Settings → Knowledge → **Embed now** works through the backlog
+> (`POST /api/kb/embed-pending`, a user-driven loop, still no poller). Measured on 20 000
+> chunks the KNN is p50 14.4 ms and filtering it is free, against the keyword leg's
+> p50 24.5 ms (spec §9). Four things changed shape from the Phase 1 sketch:
+>
+> - **The retrieval priors are ours, not a library's.** Every filter a vec0 KNN can
+>   express lives *inside* the `MATCH`; topics cannot, so the vector leg widens `k`
+>   instead of narrowing its answer. A 90-day recency multiplier of 1.25 is applied last,
+>   and it is bounded so an exact identifier match is never displaced.
+> - **Capture grew two triggers and a warning.** An inbox selection is a cancellable SSE
+>   job (`POST /api/kb/bulk`, eight extractions at a time, one embed at the end), and a
+>   finished chat turn can be kept as a `kind='finding'` entry — **off by default**,
+>   model-authored, and never returned to a model until a human has reviewed it. A new
+>   entry that looks like an older one is **flagged, never merged**, and the flag is
+>   dismissable.
+> - **Compile is one Anthropic call per entry, priced first.** `POST /api/kb/compile`
+>   estimates a batch for free, every non-fatal outcome is a 200 with a `reason_code`
+>   (a refusal is an ordinary result when the subject is security writing), and a monthly
+>   token budget derived from the activity trail stops it. `kb_compile_mode: auto` exists
+>   and is off; when it is on, a star waits for the model.
+> - **The Knowledge page's "Needs attention" strip now has something to say** — flagged
+>   duplicates, unreviewed model-authored entries and compile failures, as well as the
+>   bin — and it is still derived on the client from data the page already holds.
+
 ### Docker
 
 Multi-stage: node:22-bookworm-slim builds SPA → python:3.13-slim-bookworm runtime; copy Node binary + npm/npx from the node stage (same Debian release — required) so **stdio MCP servers via npx work in-container**; `pip install uv` for uvx servers. **Named volume** for /data (bind mounts on macOS Docker break SQLite locking). Document: stdio MCP servers run inside the container's namespace; for host-access MCP servers run backend on host (`make dev-api`) or use url-transport servers.

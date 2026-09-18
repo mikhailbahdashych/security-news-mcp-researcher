@@ -861,16 +861,23 @@ string in `kb_activity.detail`; the global-search contract grows a fourth key.
 - **sqlite-vec is pre-1.0 and brute-force.** There is no ANN index — every KNN is a
   full scan of the vector column. At 1024 float32 dims that is 4 KB per vector, so
   ~14 000 chunks is ~56 MB read per query. It is fast enough for one user well past
-  the sizes this KB will reach, and the design accepts it to ~100 000 chunks. **The
-  measured ceiling is recorded by the Phase 2 store task**, which benchmarks 20 000
-  synthetic chunks and writes the milliseconds into the PR body and back into this
-  section. The v1 acceptance criterion ("200 chunks, under 100 ms") measured nothing.
+  the sizes this KB will reach, and the design accepts it to ~100 000 chunks. The v1
+  acceptance criterion ("200 chunks, under 100 ms") measured nothing.
 
   **Measured, Phase 1 (keyword leg, FTS5).** 20 000 chunks across 2 000 entries,
   macOS arm64, CPython 3.13 / SQLite 3.47.1, a real on-disk WAL database: insert
   **3.8 s**, `MATCH` + `bm25()` + the filter join, top 50 — **p50 24.5 ms, p95
   26.3 ms** over 100 queries. Reproduce with
   `KB_BENCHMARK=1 uv run pytest tests/test_kb_benchmark.py -s`.
+
+  **Measured, Phase 2 (vector leg, vec0).** Same machine and corpus — 20 000
+  synthetic 1024-dim vectors, 100 queries at k = 50: **p50 14.4 ms / p95 15.3 ms**
+  unfiltered, and **p50 14.2 ms / p95 14.8 ms** with `entry_kind`, `chunk_kind`,
+  `reviewed` and `published_day` all applied inside the `MATCH`. **Filtering is
+  free** because the scan is brute force either way: the predicates only shrink the
+  result heap. So the two legs together are ~40 ms of index work before fusion, and
+  the adaptive `k` can multiply the vector half by up to four when a topic filter is
+  narrow (`TOPIC_K_CAP = 512`).
 - **No ANN, and no plan to add one.** If the KB ever outgrows brute force, the exit
   is the `KnowledgeStore` interface: `kb_entries`, `kb_snapshots`, `kb_chunks`,
   `kb_entry_entities` and the topic tables are ordinary SQLite tables that survive
@@ -889,6 +896,11 @@ string in `kb_activity.detail`; the global-search contract grows a fourth key.
   is inspectable and deletable, and that `kb_activity` records which entry a turn
   read.
 - **`kb_duplicate_threshold = 0.92` is unvalidated.** It is a starting point to be
-  calibrated on the first 200 entries, and it is a setting for that reason.
+  calibrated on the first 200 entries, and it is a setting for that reason. As built
+  (P2-21) the title-trigram floor of 0.8 is the other half of the same guess and is a
+  constant, not a setting: "The xz backdoor" against "The xz backdoor, explained" scores
+  0.698 and does not flag, while with no Voyage key — the trigram leg alone —
+  near-identical headlines over different stories do. It only ever flags, and the flag is
+  dismissable.
 - **The compile budget is not a spend meter.** It counts compile tokens only. Chat is
   where the money is, and the Settings page says so rather than implying otherwise.
