@@ -298,6 +298,40 @@ async def test_patching_an_entry_stores_the_notes_and_the_review_status(client, 
     assert reread.json()["notes_md"] == "Ask the platform team."
 
 
+async def test_a_patch_that_would_change_nothing_is_refused(client, kb, item):
+    """``{"title": null}`` is ``{}`` with extra steps.
+
+    ``None`` means "leave it alone" everywhere below this schema, so an
+    explicitly sent ``null`` passed the "at least one field" guard — it *is*
+    set — and then skipped every write. The client got a 200 it could not tell
+    from a save.
+    """
+    created = await _entry_from_item(client, kb, item)
+
+    empty = await client.patch(f"/api/kb/entries/{created['id']}", json={})
+    nulled = await client.patch(f"/api/kb/entries/{created['id']}", json={"title": None})
+    both = await client.patch(
+        f"/api/kb/entries/{created['id']}", json={"title": None, "review_status": None}
+    )
+
+    assert empty.status_code == 422
+    assert nulled.status_code == 422, nulled.text
+    assert both.status_code == 422, both.text
+
+
+async def test_a_null_beside_a_real_field_is_still_that_field(client, kb, item):
+    """Only the request that changes *nothing* is refused."""
+    created = await _entry_from_item(client, kb, item)
+
+    response = await client.patch(
+        f"/api/kb/entries/{created['id']}", json={"notes_md": "Ask Ops.", "title": None}
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["notes_md"] == "Ask Ops."
+    assert response.json()["title"] == created["title"]
+
+
 async def test_delete_and_undelete_round_trip(client, kb, item):
     created = await _entry_from_item(client, kb, item)
 

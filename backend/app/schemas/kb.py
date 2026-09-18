@@ -301,7 +301,14 @@ class EntryCreate(BaseModel):
 
 
 class EntryUpdate(BaseModel):
-    """A hand edit from the entry page. Only what is sent changes."""
+    """A hand edit from the entry page. Only what is sent changes.
+
+    ``None`` means **"leave it alone"**, not "clear it": ``update_entry`` skips
+    every field that is ``None``, so nothing here can be emptied by sending
+    ``null`` — an empty string is how the notes are cleared. A field that ever
+    does need clearing has to say so with a sentinel of its own rather than by
+    quietly giving ``null`` a second meaning.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -312,7 +319,12 @@ class EntryUpdate(BaseModel):
 
     @model_validator(mode="after")
     def _at_least_one_field(self) -> EntryUpdate:
-        if not self.model_dump(exclude_unset=True):
+        # ``exclude_none`` as well as ``exclude_unset``: an explicitly sent
+        # ``null`` *is* set, so ``{"title": null}`` passed this guard and then
+        # skipped every write — a 200 that changed nothing, which is the one
+        # answer a client cannot tell from a successful save. ``{}`` was already
+        # refused; these are the same request.
+        if not self.model_dump(exclude_unset=True, exclude_none=True):
             raise ValueError("provide at least one field to change")
         return self
 
