@@ -342,6 +342,15 @@ a gap is an entry folded into a neighbour.
   fed — the two chat tools and the notes generator, through `search_for_model` — not what the user
   sees of their own knowledge base. The Phase 2 contract first said otherwise; it is amended in the
   same commit. — Cost if wrong: one filter flag on one route.
+- **P2-18. Known gap, owned by Task 4.4: an embed that straddles an embedding-model change.** A
+  `PUT /api/settings` that changes `kb_embedding_model` empties `kb_chunk_vec` in one transaction
+  (C1), but an `embed_pending` run already in flight — a second tab, a bulk job — still holds an
+  embedder for the *old* model and can upsert its vectors after the wipe, putting two vector spaces
+  in one KNN with nothing on screen to say so. It needs two concurrent user actions in a
+  single-user app, so Phase 2 accepts it; Task 4.4 (re-index / rebuild, which owns the model-change
+  path) must close it — e.g. `embed_pending` re-reads the configured model before each batch's
+  write and drops the batch on a mismatch. — Cost if forgotten: silently degraded similarity for
+  the chunks of one run, repaired only by a full re-index.
 
 ---
 
