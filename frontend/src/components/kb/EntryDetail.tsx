@@ -358,7 +358,19 @@ function Summary({ entry, onChanged }: { entry: KbEntryDetail; onChanged: () => 
               </Button>
             </>
           ) : (
-            <Button size="sm" variant="ghost" onClick={() => setEditing(true)}>
+            <Button
+              size="sm"
+              variant="ghost"
+              // Seeded here as well as by `useState`, and for the same reason
+              // Cancel re-seeds: this component is keyed on the entry id, so a
+              // Recompile re-renders it without remounting and the draft still
+              // holds the summary from before. Edit then Save wrote that back
+              // over the text the user had just paid the model to produce.
+              onClick={() => {
+                setDraft(entry.summary_md ?? '')
+                setEditing(true)
+              }}
+            >
               Edit
             </Button>
           )}
