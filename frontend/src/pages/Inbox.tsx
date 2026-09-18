@@ -25,6 +25,7 @@ import BulkBar from '../components/inbox/BulkBar'
 import FilterBar from '../components/inbox/FilterBar'
 import ItemRow from '../components/inbox/ItemRow'
 import ManageFeeds from '../components/inbox/ManageFeeds'
+import SaveToKnowledge from '../components/inbox/SaveToKnowledge'
 import GenerateNotesDialog from '../components/notes/GenerateNotesDialog'
 import RefreshSummary from '../components/inbox/RefreshSummary'
 import StatusBadge from '../components/inbox/StatusBadge'
@@ -79,6 +80,9 @@ export default function InboxPage({ embedded = false }: EmbeddablePageProps) {
   const [refreshResult, setRefreshResult] = useState<RefreshResponse | null>(null)
   const [extractNotes, setExtractNotes] = useState<Record<number, string>>({})
   const [notesFor, setNotesFor] = useState<FeedItem[] | null>(null)
+  // Frozen at the click: the list refetches under an open panel, and the job is
+  // already running over the ids it was started with.
+  const [saveToKb, setSaveToKb] = useState<number[] | null>(null)
 
   const debouncedSearch = useDebouncedValue(search)
   const filters: ItemFilters = useMemo(
@@ -277,6 +281,10 @@ export default function InboxPage({ embedded = false }: EmbeddablePageProps) {
               selecting={selecting}
               busy={busy}
               extracting={extract.isPending && extract.variables === item.id}
+              // In `auto` compile mode a star waits for the model before it
+              // answers, so the row says which star is working rather than
+              // freezing every control for a few seconds with no reason given.
+              starring={triage.isPending && triage.variables?.id === item.id}
               highlighted={item.id === linkedItemId}
               extractNote={extractNotes[item.id]}
               onToggleSelect={toggleSelect}
@@ -305,6 +313,7 @@ export default function InboxPage({ embedded = false }: EmbeddablePageProps) {
             onDismiss={() => bulk.mutate({ ids: selectedIds, next: 'dismissed' })}
             onRestore={() => bulk.mutate({ ids: selectedIds, next: 'unread' })}
             onGenerateNotes={() => setNotesFor(selectedItems)}
+            onSaveToKnowledge={() => setSaveToKb(selectedIds)}
             onResearch={() => {
               // The Chat page reads these off the route state and pre-attaches
               // them to the first message.
@@ -330,6 +339,10 @@ export default function InboxPage({ embedded = false }: EmbeddablePageProps) {
 
       {notesFor ? (
         <GenerateNotesDialog initialItems={notesFor} onClose={() => setNotesFor(null)} />
+      ) : null}
+
+      {saveToKb ? (
+        <SaveToKnowledge itemIds={saveToKb} onClose={() => setSaveToKb(null)} />
       ) : null}
     </Page>
   )
