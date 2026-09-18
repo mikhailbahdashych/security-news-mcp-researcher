@@ -77,10 +77,12 @@ MAX_SEARCH_LIMIT = 50
 DEFAULT_ACTIVITY_LIMIT = 200
 MAX_ACTIVITY_LIMIT = 1_000
 
-#: How many pending chunks one ``POST /api/kb/embed-pending`` embeds. Bounded so
-#: that a backlog of thousands is a series of calls the user can watch and stop,
-#: not one request that either finishes or times out. The client calls again while
-#: the response says chunks are still pending.
+#: How many pending chunks one ``POST /api/kb/embed-pending`` embeds. A backlog
+#: of thousands is a series of calls the client repeats while the response still
+#: says chunks are pending, rather than one request that either finishes or times
+#: out. The bound is on **chunks, not time**: typical chunks make 200 one or two
+#: Voyage requests, but 200 chunks at the token ceiling would be a couple of dozen
+#: sequential ones inside a single HTTP request the user cannot cancel.
 EMBED_PENDING_LIMIT = 200
 
 

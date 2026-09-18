@@ -310,6 +310,10 @@ def test_the_compile_prompt_is_generic_and_says_the_text_is_data():
     assert isinstance(settings_service.COMPILE_PROMPT_VERSION, int)
     assert "instruction" in prompt.lower()
     assert prompt == prompt.strip()
+    # The ground rule itself, not just the shape: nothing that would make the
+    # prompt about a particular employer, product or customer.
+    forbidden = ("employer", "company", "corporate", "organisation", "organization", "our ")
+    assert [word for word in forbidden if word in prompt.lower()] == []
 
 
 def test_the_minimum_snapshot_default_matches_the_capture_constant():

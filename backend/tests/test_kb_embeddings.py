@@ -242,6 +242,25 @@ async def test_a_transport_failure_is_the_same_typed_error() -> None:
     assert KEY not in str(raised.value)
 
 
+async def test_an_unreadable_answer_is_redacted_too() -> None:
+    """Every error path is redacted, not only the status one.
+
+    ``index`` is parsed with ``int()``, so a provider that put the key where a
+    number belongs would otherwise land it inside the ``ValueError``'s own text.
+    """
+
+    def handle(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, json={"data": [{"index": KEY, "embedding": [1.0]}]})
+
+    embedder = VoyageEmbedder(KEY, transport=httpx2.MockTransport(handle))
+
+    with pytest.raises(EmbeddingError) as raised:
+        await embedder.embed_documents(["a"])
+
+    assert KEY not in str(raised.value)
+    assert KEY not in raised.value.message
+
+
 async def test_a_short_answer_is_an_error_rather_than_a_silent_mismatch() -> None:
     """One vector per text, in order — a provider that returns fewer would
     otherwise pair vectors with the wrong chunks."""
@@ -542,6 +561,36 @@ async def test_a_voyage_failure_is_a_502_and_the_chunks_stay_pending(
         await db_session.refresh(chunk)
         assert chunk.embedded_at is None
     assert await _activity(db_session, "embed") == []
+
+
+async def test_a_502_after_a_partial_run_still_kept_what_it_paid_for(
+    app, client, db_session, session_factory
+) -> None:
+    """The counts are lost with the response body, the work is not.
+
+    A 502 carries no ``embedded``/``pending``, so the only record of a run that
+    failed on its second request is the state: eight chunks embedded, three still
+    pending, and one activity row counting exactly the eight.
+    """
+    entry = await _entry(db_session)
+    chunks = await _chunks(db_session, entry, *[BIG_TEXT] * 11)
+    app.dependency_overrides[get_kb_service] = lambda: KbService(
+        session_factory=session_factory,
+        embedder=FakeEmbedder(model="voyage-4", fail_after_batch=1),
+    )
+
+    response = await client.post("/api/kb/embed-pending")
+
+    assert response.status_code == 502
+    assert "embedded" not in response.json()
+    embedded = []
+    for chunk in chunks:
+        await db_session.refresh(chunk)
+        embedded.append(chunk.embedded_at is not None)
+    assert embedded == [True] * 8 + [False] * 3
+    [row] = await _activity(db_session, "embed")
+    assert row.detail == "8 chunks"
+    assert row.input_tokens == estimate_tokens(BIG_TEXT) * 8
 
 
 # ------------------------------------------------------------ the fake embedder

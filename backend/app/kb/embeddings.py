@@ -18,7 +18,6 @@ wider one would silently become several requests the resume point cannot see.
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Sequence
 from typing import Any, Protocol, runtime_checkable
 
@@ -29,8 +28,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import Settings
 from app.kb.chunking import estimate_tokens
 from app.kb.schema import VEC_DIMENSIONS
-
-logger = logging.getLogger(__name__)
 
 VOYAGE_URL = "https://api.voyageai.com/v1/embeddings"
 
@@ -235,7 +232,11 @@ class VoyageEmbedder:
             data = response.json()["data"]
             vectors = [list(row["embedding"]) for row in sorted(data, key=_index_of)]
         except (KeyError, TypeError, ValueError) as exc:
-            raise EmbeddingError(response.status_code, f"unreadable answer ({exc})") from None
+            # Redacted like every other path: the exception's text is the
+            # provider's own data, and `index` is one `int()` away from it.
+            raise EmbeddingError(
+                response.status_code, self._redact(f"unreadable answer ({exc})")
+            ) from None
 
         if len(vectors) != len(texts):
             raise EmbeddingError(
