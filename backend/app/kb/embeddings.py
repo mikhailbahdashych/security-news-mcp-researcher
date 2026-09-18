@@ -66,6 +66,12 @@ def max_tokens_for(model: str) -> int:
 #: going out over one connection.
 DEFAULT_TIMEOUT_S = 120.0
 
+#: Getting the connection is a different thing from waiting for the answer, and a
+#: capture runs inside a request the user is watching. A provider that black-holes
+#: — no RST, no route — would otherwise hold a click, or the note-generation
+#: stream's terminal frame, for the whole read budget.
+CONNECT_TIMEOUT_S = 10.0
+
 
 @runtime_checkable
 class Embedder(Protocol):
@@ -196,7 +202,7 @@ class VoyageEmbedder:
         from app.services.http import USER_AGENT
 
         async with httpx2.AsyncClient(
-            timeout=httpx2.Timeout(self._timeout_s),
+            timeout=httpx2.Timeout(self._timeout_s, connect=CONNECT_TIMEOUT_S),
             transport=self._transport,
             headers={
                 "Authorization": f"Bearer {self._api_key}",
@@ -311,6 +317,7 @@ async def discard_vectors(session: AsyncSession) -> int:
 
 
 __all__ = [
+    "CONNECT_TIMEOUT_S",
     "DEFAULT_EMBEDDING_MODEL",
     "DEFAULT_TIMEOUT_S",
     "MAX_TEXTS_PER_REQUEST",

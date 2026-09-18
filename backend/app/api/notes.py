@@ -242,10 +242,15 @@ async def _stream_generation(
         return
 
     logger.info("Saved note %s from generation %s", note_id, generation_id)
-    # The note is committed; the knowledge base is a consequence of that, and its
-    # failure is an activity row rather than a stream that ends without ``done``.
-    await capture_note_if_enabled(kb, note_id, trigger="generate")
     yield sse_data("done", {"note_id": note_id})
+    # **After** the terminal frame, deliberately. The note is committed and the
+    # client has its id; capture is a consequence of that, and it embeds — an
+    # outbound call that can hang for its whole budget. The stream is still open
+    # (sse-starlette comes back for the next frame and gets StopAsyncIteration),
+    # so the work still runs; it just no longer stands between the user and the
+    # note they are waiting for. Its failure is an activity row, never a stream
+    # that ends without ``done``.
+    await capture_note_if_enabled(kb, note_id, trigger="generate")
 
 
 @router.post("/notes/generate/cancel", response_model=CancelResponse)

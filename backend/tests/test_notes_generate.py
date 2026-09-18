@@ -26,6 +26,7 @@ from sse_util import event_names, parse_sse, payloads_for
 from test_api_sessions import finish_turn
 
 from app.agent import events as ev
+from app.api import notes
 from app.api import tasks as task_registry
 from app.api.deps import get_chat_client_factory, get_kb_service
 from app.db.models import Feed, FeedItem, Message, Note, NoteSource, ResearchSession, utcnow
@@ -1181,6 +1182,56 @@ async def test_a_generated_note_is_captured_into_the_knowledge_base(
     assert [(entry.kind, entry.authorship, entry.note_id) for entry in entries] == [
         ("note", "human", notes[0].id)
     ]
+
+
+class _NeverDisconnects:
+    """The one thing ``_stream_generation`` uses its ``Request`` for."""
+
+    async def is_disconnected(self) -> bool:
+        return False
+
+
+async def test_the_done_frame_does_not_wait_for_the_knowledge_base(session_factory):
+    """Capture embeds, and embedding is an outbound HTTPS call.
+
+    The note is already committed by the time it runs, so the client must be told
+    its id first: a provider that black-holes would otherwise leave the user
+    watching a "generating" spinner for the whole embedding budget with the note
+    long since saved. Driven through the generator rather than the route because
+    ordering *within* one response is invisible once the body has been buffered.
+    """
+
+    async def events():
+        yield ev.TextDelta(text=NOTE_BODY)
+
+    service = RecordingKb(session_factory)
+    context = notes_service.GenerationContext(
+        title="Weekly security notes",
+        template="template",
+        system_override="system",
+        user_content=[{"type": "text", "text": "the items"}],
+        items=(),
+        session_id=None,
+        tool_subset=frozenset(),
+    )
+
+    names: list[str] = []
+    async for frame in notes._stream_generation(
+        _NeverDisconnects(),
+        events(),
+        None,
+        "notes:ordering",
+        "gen-ordering",
+        context,
+        session_factory,
+        service,
+    ):
+        names.append(frame["event"])
+        if frame["event"] == "done":
+            assert service.captured == []
+
+    assert names[-1] == "done"
+    assert len(service.captured) == 1
 
 
 async def test_the_generation_trigger_respects_the_policy_setting(

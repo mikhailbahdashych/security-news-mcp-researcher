@@ -21,6 +21,8 @@ from app.config import Settings
 from app.kb.capture import embed_pending
 from app.kb.chunking import estimate_tokens
 from app.kb.embeddings import (
+    CONNECT_TIMEOUT_S,
+    DEFAULT_TIMEOUT_S,
     MAX_TEXTS_PER_REQUEST,
     MAX_TOKENS_PER_REQUEST,
     Embedder,
@@ -105,6 +107,20 @@ async def test_the_model_name_is_the_configured_one() -> None:
 
     assert json.loads(recorded[0].content)["model"] == "voyage-4-lite"
     assert embedder.model == "voyage-4-lite"
+
+
+async def test_a_provider_that_never_answers_is_given_up_on_long_before_the_read_budget() -> None:
+    """A capture runs inside a request the user is watching — sometimes inside the
+    note-generation stream — so a black-holed Voyage must not hold it for the whole
+    120 s body budget before the connection is even made."""
+    recorded: list[httpx2.Request] = []
+
+    await VoyageEmbedder(KEY, transport=voyage_transport(recorded)).embed_documents(["a"])
+
+    timeout = recorded[0].extensions["timeout"]
+    assert timeout["connect"] == CONNECT_TIMEOUT_S <= 10.0
+    # The read budget stays generous: a full batch is 256 000 tokens of text.
+    assert timeout["read"] == DEFAULT_TIMEOUT_S
 
 
 async def test_embedding_nothing_makes_no_request() -> None:
