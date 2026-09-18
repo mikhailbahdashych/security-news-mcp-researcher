@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 Effort = Literal["low", "medium", "high", "xhigh", "max"]
 ThinkingDisplay = Literal["summarized", "omitted"]
@@ -71,6 +71,10 @@ class SettingsRead(BaseModel):
     kb_compile_model: str
     kb_compile_effort: Effort
     kb_compile_prompt: str
+    #: The prompt this build **ships** with, read-only, so "Reset to default"
+    #: restores that and not whatever was saved last (plan decision P2-24). It is
+    #: on the wire nowhere else, and the client cannot reconstruct it.
+    kb_compile_prompt_default: str
     kb_compile_max_chars: int
     #: Compile tokens per calendar month. **Chat spend is not counted here.**
     kb_compile_monthly_token_budget: int
@@ -119,6 +123,20 @@ class SettingsUpdate(BaseModel):
     kb_recency_boost: bool | None = None
     kb_rerank: bool | None = None
     kb_duplicate_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
+
+    @field_validator("kb_compile_prompt")
+    @classmethod
+    def _prompt_is_not_blank(cls, value: str | None) -> str | None:
+        """A blank compile prompt is refused, not stored (plan decision P2-24).
+
+        The getter falls back to the shipped default only when the **row is
+        absent**, so saving an empty string destroyed the default for good and
+        every compile afterwards went out with no instructions at all. Checked
+        after stripping, because a textarea holding one newline is empty.
+        """
+        if value is not None and not value.strip():
+            raise ValueError("the compile prompt cannot be empty")
+        return value
 
 
 class TestKeyResult(BaseModel):

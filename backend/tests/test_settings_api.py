@@ -58,6 +58,7 @@ async def test_get_settings_returns_seeded_defaults(client: httpx2.AsyncClient) 
         "kb_compile_model": "claude-sonnet-5",
         "kb_compile_effort": "low",
         "kb_compile_prompt": settings_service.DEFAULT_COMPILE_PROMPT,
+        "kb_compile_prompt_default": settings_service.DEFAULT_COMPILE_PROMPT,
         "kb_compile_max_chars": 24_000,
         "kb_compile_monthly_token_budget": 5_000_000,
         "kb_auto_accept_suggestions": True,
@@ -506,3 +507,34 @@ async def test_put_rejects_out_of_range_phase_two_values(
     client: httpx2.AsyncClient, payload: dict
 ) -> None:
     assert (await client.put("/api/settings", json=payload)).status_code == 422
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\n\n", "\t"])
+async def test_put_refuses_to_empty_the_compile_prompt(
+    client: httpx2.AsyncClient, blank: str
+) -> None:
+    # It used to be stored, and the getter falls back to the shipped prompt only
+    # when the *row is absent* — so one save with an empty textarea destroyed the
+    # default for good and every compile afterwards went out with no
+    # instructions. A whitespace-only prompt is the same thing typed slower.
+    assert (await client.put("/api/settings", json={"kb_compile_prompt": blank})).status_code == 422
+    body = (await client.get("/api/settings")).json()
+    assert body["kb_compile_prompt"] == settings_service.DEFAULT_COMPILE_PROMPT
+
+
+async def test_the_shipped_compile_prompt_is_readable_beside_the_stored_one(
+    client: httpx2.AsyncClient,
+) -> None:
+    await client.put("/api/settings", json={"kb_compile_prompt": "# Mine"})
+
+    body = (await client.get("/api/settings")).json()
+
+    assert body["kb_compile_prompt"] == "# Mine"
+    # What "Reset to default" puts back. It is on the wire nowhere else.
+    assert body["kb_compile_prompt_default"] == settings_service.DEFAULT_COMPILE_PROMPT
+
+
+async def test_the_shipped_compile_prompt_is_not_writable(client: httpx2.AsyncClient) -> None:
+    response = await client.put("/api/settings", json={"kb_compile_prompt_default": "# No"})
+
+    assert response.status_code == 422

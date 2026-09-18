@@ -86,6 +86,9 @@ async def _read(session: DbSession, settings: AppSettings) -> SettingsRead:
             Effort, await settings_service.get_choice(session, "kb_compile_effort")
         ),
         kb_compile_prompt=await settings_service.get_str(session, "kb_compile_prompt"),
+        # Not a preference and not stored: this is what the build ships with, so
+        # "Reset to default" has something true to reset to.
+        kb_compile_prompt_default=settings_service.DEFAULT_COMPILE_PROMPT,
         kb_compile_max_chars=await settings_service.get_int(session, "kb_compile_max_chars"),
         kb_compile_monthly_token_budget=await settings_service.get_int(
             session, "kb_compile_monthly_token_budget"
