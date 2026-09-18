@@ -16,7 +16,6 @@ import {
   listActivity,
   vecVersionLabel,
   type KbActivity,
-  type KbBudget,
   type KbStats,
 } from '../../api/kb'
 import {
@@ -372,7 +371,9 @@ function Budget() {
     return <p className="text-[11.5px] text-red">This month&rsquo;s spend could not be read.</p>
   }
 
-  const data = budget.data as Partial<KbBudget> as KbBudget
+  // Read field by field below: this is a payload from a backend that need not
+  // be this bundle's version, and one missing key used to take the SPA down.
+  const data = budget.data
   const label = budgetLabel(data)
 
   return (
