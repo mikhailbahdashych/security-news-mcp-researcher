@@ -34,8 +34,10 @@ is on screen in either pane, because the rail carries the chat history now.
 | `/settings` | `pages/Settings.tsx` | Layout, archived chats, API key, model, toggles, MCP panel |
 
 `components/ui/ErrorBoundary.tsx` is the **only class component** in the app — catching
-a render error is the one thing hooks cannot do. `SettingsSection` wraps every section's
-body in one, `Settings`' shell wraps the sections together, and the Knowledge page wraps
+a render error is the one thing hooks cannot do. `App` wraps **each pane** in one (keyed
+on `location.pathname` and on `paneB`, so navigating away is a fresh attempt and one bad
+payload cannot wedge the app until a reload), `SettingsSection` wraps every section's
+body, `Settings`' shell wraps the sections together, and the Knowledge page wraps
 each of its two modes (keyed, so opening another entry is a fresh attempt). The reason is
 version skew: this bundle and the backend it talks to need not agree, and one unguarded
 read of a payload — `stats.index`, `kb_schema_version` — used to unmount the **whole

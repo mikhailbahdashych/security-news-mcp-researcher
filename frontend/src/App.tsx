@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Route, Routes, useLocation, useMatch, useNavigate } from 'react-router-dom'
 
 import { parseSessionId } from './api/chat'
+import ErrorBoundary from './components/ui/ErrorBoundary'
 import GlobalSearch from './components/ui/GlobalSearch'
 import PageHost from './components/ui/PageHost'
 import Rail from './components/ui/Rail'
@@ -84,21 +85,30 @@ export default function App() {
             layout.split && 'border-r border-line',
           )}
         >
-          <Routes>
-            <Route path="/" element={<InboxPage />} />
-            <Route path="/chat" element={<ChatPage />} />
-            <Route path="/chat/:id" element={<ChatPage />} />
-            <Route path="/notes" element={<NotesPage />} />
-            <Route path="/notes/:id" element={<NoteDetailPage />} />
-            <Route path="/knowledge" element={<KnowledgePage />} />
-            <Route path="/knowledge/:id" element={<KnowledgePage />} />
-            <Route path="/settings" element={<SettingsPage />} />
-          </Routes>
+          {/* One boundary per pane, so a page that cannot render costs its own
+              pane and not the rail, the other pane and the ⌘K overlay with it.
+              Keyed on what the pane is showing: a boundary that has caught stays
+              caught, and navigating somewhere else has to be a fresh attempt —
+              otherwise one bad payload wedges the app until a reload. */}
+          <ErrorBoundary key={location.pathname}>
+            <Routes>
+              <Route path="/" element={<InboxPage />} />
+              <Route path="/chat" element={<ChatPage />} />
+              <Route path="/chat/:id" element={<ChatPage />} />
+              <Route path="/notes" element={<NotesPage />} />
+              <Route path="/notes/:id" element={<NoteDetailPage />} />
+              <Route path="/knowledge" element={<KnowledgePage />} />
+              <Route path="/knowledge/:id" element={<KnowledgePage />} />
+              <Route path="/settings" element={<SettingsPage />} />
+            </Routes>
+          </ErrorBoundary>
         </div>
 
         {layout.split ? (
           <div className="h-full min-w-0 flex-1 overflow-hidden">
-            <PageHost page={layout.paneB} embedded />
+            <ErrorBoundary key={layout.paneB}>
+              <PageHost page={layout.paneB} embedded />
+            </ErrorBoundary>
           </div>
         ) : null}
       </main>
