@@ -22,7 +22,9 @@ from app.kb.retrieval import (
     rrf,
 )
 from app.kb.schema import VEC_DIMENSIONS
+from app.kb.service import KbService
 from app.kb.store import SearchFilters, SqliteKnowledgeStore, VectorRow, published_day
+from app.services import settings as settings_service
 
 # -- pure ----------------------------------------------------------------
 
@@ -610,6 +612,32 @@ async def test_the_recency_prior_reaches_hybrid_search(session_factory, db_sessi
     # Without the prior the keyword leg's own order stands, and bm25 ranks the
     # two identical passages by rowid.
     assert [hit.entry.id for hit in plain] == [old.id, new.id]
+
+
+async def test_the_service_honours_the_recency_setting_on_both_search_paths(
+    session_factory, db_session
+):
+    """``kb_recency_boost`` is a settings row; ``hybrid_search`` only takes a flag.
+
+    The service is where the two meet, and it searches from two places — the
+    chat tools and the Knowledge page. A setting wired into one of them is a
+    setting that works half the time.
+    """
+    old = await _entry(
+        db_session, "Old", "liblzma everywhere", published_at=utcnow() - timedelta(days=400)
+    )
+    new = await _entry(db_session, "New", "liblzma everywhere", published_at=utcnow())
+    old_id, new_id = old.id, new.id  # the commit below expires both rows
+    service = KbService(session_factory, embedder=NullEmbedder())
+
+    assert [h.entry.id for h in await service.search_for_model("liblzma")][0] == new_id
+    assert [h.entry.id for h in await service.search_for_user("liblzma")][0] == new_id
+
+    await settings_service.set_value(db_session, "kb_recency_boost", "false")
+    await db_session.commit()
+
+    assert [h.entry.id for h in await service.search_for_model("liblzma")] == [old_id, new_id]
+    assert [h.entry.id for h in await service.search_for_user("liblzma")] == [old_id, new_id]
 
 
 async def test_the_adaptive_k_doubles_until_the_topic_join_is_satisfied(

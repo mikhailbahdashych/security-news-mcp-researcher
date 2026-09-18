@@ -24,6 +24,9 @@ def isolated_api_key_env(monkeypatch: pytest.MonkeyPatch) -> None:
     set it themselves.
     """
     monkeypatch.delenv(settings_service.API_KEY_ENV_VAR, raising=False)
+    # The Voyage key has the same precedence and the same trap: with a real one
+    # in the environment, every capture in the suite would try to embed.
+    monkeypatch.delenv(settings_service.VOYAGE_KEY_ENV_VAR, raising=False)
 
 
 #: A public address (example.com's). The stub resolver below hands it out so that
@@ -120,6 +123,7 @@ def app(app_factory, tmp_path) -> FastAPI:
             db_path=tmp_path / "app.db",
             static_dir=tmp_path / "absent",
             anthropic_api_key="",
+            voyage_api_key="",
         )
     )
 

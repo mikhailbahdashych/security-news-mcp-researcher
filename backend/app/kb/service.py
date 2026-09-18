@@ -163,6 +163,10 @@ class KbService:
         async with self.session_factory() as session:
             return await settings_service.get_bool(session, "kb_reviewed_only")
 
+    async def recency_boost(self) -> bool:
+        async with self.session_factory() as session:
+            return await settings_service.get_bool(session, "kb_recency_boost")
+
     # -- capture ---------------------------------------------------------
 
     async def guarded(self, operation: Awaitable[Any], *, source: str) -> CaptureResult | None:
@@ -333,6 +337,7 @@ class KbService:
             since=since,
             reviewed_only=await self.reviewed_only(),
             include_model_authored=False,
+            recency_boost=await self.recency_boost(),
             limit=limit,
         )
 
@@ -358,6 +363,7 @@ class KbService:
             since=since,
             reviewed_only=reviewed_only,
             include_model_authored=True,
+            recency_boost=await self.recency_boost(),
             limit=limit,
         )
 
