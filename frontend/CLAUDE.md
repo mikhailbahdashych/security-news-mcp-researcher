@@ -615,7 +615,13 @@ which leg answered.
   title is seeded once per entry through a `key`, not through an effect — a background
   refetch mid-edit would otherwise throw the half-typed title away — and the rename is a
   mutation that **puts the field back and says so** when the write loses, because the
-  blur that would have retried it has already happened.
+  blur that would have retried it has already happened. Every commit calls `rename.reset`
+  **before** deciding whether to send: putting the field back means the next commit is
+  usually the unchanged one, which returns early, so "Could not rename it." outlived the
+  edit that caused it.
+- **Entity chips are deduplicated on the client** (`entityChips`). `entities` carries one
+  row per `source`, so the regex pass and a compile both report the same CVE — two
+  identical chips under one React `key`.
 - **A re-read has three outcomes, not two.** `POST /entries/{id}/refresh` answers 200
   whether the text moved, did not move, or could not be fetched at all, so `changed`
   alone cannot tell the last two apart — `refreshMessage` / `refreshFailed` read `status`
@@ -628,7 +634,9 @@ which leg answered.
 - **A soft delete is readable.** The entry page stays open with a banner, and the
   timeline's "Needs attention" strip lists what is in the bin with an Undo. The strip is
   drawn only when it has something. A 409 on Undo means the URL was captured again while
-  the entry was deleted — it is shown, not swallowed.
+  the entry was deleted — it is shown, not swallowed, **in both places**, through the one
+  `api/client.ts::conflictDetail`. The entry page's own banner used to answer "Could not
+  restore it." to the one refusal that needs explaining.
 - **The snapshot is captured Markdown** and goes through `components/chat/Markdown.tsx`
   like everything else. Never `dangerouslySetInnerHTML` — this is somebody else's page.
 - **Settings → Knowledge** (`components/settings/KnowledgeSection.tsx`) holds the two
@@ -673,12 +681,13 @@ the `activity` transitions, turn scoping, `activityLabel`, `showsProgress`,
 `components/ui/searchKeys.test.ts` (the shared overlay keyboard model),
 `components/ui/menuPosition.test.ts` (fits below, flips above, clamps — there is no DOM
 here, which is the point: the caller measures, the function decides),
-`api/client.test.ts` (`isNotFound`),
+`api/client.test.ts` (`isNotFound`, `conflictDetail`),
 `lib/dates.test.ts` (`parseUtc`, `dayLabel`, `groupByDay`),
 `lib/highlight.test.ts` (`splitOnQuery`, `splitOnTerms`),
 `api/kb.test.ts` (`kbEntryLink`, `parseEntryId`, `entryTimestamp`, the day grouping,
-`matchMarker`, `hitSnippet`, `cveChips`, `sourceLabel`, `kindLabel`, `sinceDaysAgo`,
-`entityFilter`/`entityHint`, `vecVersionLabel`, `refreshMessage`/`refreshFailed`),
+`matchMarker`, `hitSnippet`, `cveChips`, `entityChips`, `sourceLabel`, `kindLabel`,
+`sinceDaysAgo`, `entityFilter`/`entityHint`, `vecVersionLabel`,
+`refreshMessage`/`refreshFailed`),
 `components/kb/autosave.test.ts` (`autosaveDecision`, `autosaveLabel`, `flushPlan`),
 `components/notes/excerpt.test.ts` and `lib/ids.test.ts`.
 

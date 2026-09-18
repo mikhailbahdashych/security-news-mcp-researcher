@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   cveChips,
+  entityChips,
   entityFilter,
   entityHint,
   entryTimestamp,
@@ -184,6 +185,43 @@ describe('cveChips', () => {
       'CVE-2026-3333',
       '+2 more',
     ])
+  })
+})
+
+describe('entityChips', () => {
+  it('labels every entity, in order', () => {
+    const chips = entityChips({
+      entities: [
+        { kind: 'cve', value: 'CVE-2026-1111', source: 'regex' },
+        { kind: 'vendor', value: 'Acme', source: 'model' },
+      ],
+    })
+    expect(chips).toEqual(['cve: CVE-2026-1111', 'vendor: Acme'])
+  })
+
+  it('draws one chip however many sources claimed it', () => {
+    // `entities` is not deduplicated across `source` — the regex pass and the
+    // compile both find the same CVE — and the page used to key its chips on
+    // the label, so the duplicate was a duplicate React key as well as a
+    // duplicate chip.
+    const chips = entityChips({
+      entities: [
+        { kind: 'cve', value: 'CVE-2026-1111', source: 'regex' },
+        { kind: 'cve', value: 'CVE-2026-1111', source: 'model' },
+        { kind: 'cve', value: 'CVE-2026-1111', source: 'user' },
+      ],
+    })
+    expect(chips).toEqual(['cve: CVE-2026-1111'])
+  })
+
+  it('keeps two entities that only share a kind', () => {
+    const chips = entityChips({
+      entities: [
+        { kind: 'vendor', value: 'Acme', source: 'model' },
+        { kind: 'vendor', value: 'Globex', source: 'model' },
+      ],
+    })
+    expect(chips).toEqual(['vendor: Acme', 'vendor: Globex'])
   })
 })
 

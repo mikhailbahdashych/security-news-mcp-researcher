@@ -2,9 +2,10 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 
-import { isNotFound } from '../../api/client'
+import { conflictDetail, isNotFound } from '../../api/client'
 import {
   deleteEntry,
+  entityChips,
   getEntry,
   kbEntryKey,
   kbQueryKey,
@@ -115,6 +116,7 @@ export default function EntryDetail({ entryId, embedded, onBack }: EntryDetailPr
             key={data.id}
             initial={data.title}
             failed={rename.isError}
+            onCommit={rename.reset}
             onSave={rename.mutateAsync}
           />
         }
@@ -244,6 +246,12 @@ function DeletedBanner({
     onSuccess: onChanged,
   })
 
+  // A 409 is the one refusal worth spelling out — the URL was captured again
+  // while this entry was in the bin, so restoring it would make two of the same
+  // thing, and which survives is the reader's call. "Could not restore it."
+  // over that is the one sentence that explains nothing.
+  const conflict = conflictDetail(undo.error)
+
   return (
     <div
       className={cx(
@@ -258,7 +266,10 @@ function DeletedBanner({
       <Button size="sm" loading={undo.isPending} onClick={() => undo.mutate()}>
         Undo
       </Button>
-      {undo.isError ? <span className="text-red">Could not restore it.</span> : null}
+      {conflict ? <span className="basis-full text-red">{conflict}</span> : null}
+      {undo.isError && conflict === null ? (
+        <span className="text-red">Could not restore it.</span>
+      ) : null}
     </div>
   )
 }
@@ -273,18 +284,27 @@ function DeletedBanner({
 function TitleField({
   initial,
   failed,
+  onCommit,
   onSave,
 }: {
   initial: string
   /** The last rename lost. Shown under the field, because the blur that would
    *  have retried it has already happened. */
   failed: boolean
+  /** Clears `failed`. Called on **every** commit, including the ones that send
+   *  nothing — see `commit`. */
+  onCommit: () => void
   onSave: (title: string) => Promise<unknown>
 }) {
   const [draft, setDraft] = useState(initial)
   const [saved, setSaved] = useState(initial)
 
   const commit = () => {
+    // Before the early return, not after it. A failed rename puts the old name
+    // back, so the next commit is usually the *unchanged* one — and that leg
+    // returned without ever reaching the mutation, which left "Could not rename
+    // it." under a field nobody was going to touch again.
+    onCommit()
     const title = draft.trim()
     if (!title || title === saved) {
       setDraft(saved)
@@ -513,7 +533,10 @@ function Versions({ versions }: { versions: KbSnapshotVersion[] }) {
  * seeing even before there is a way to change them.
  */
 function Facts({ entry, embedded }: { entry: KbEntryDetail; embedded: boolean }) {
-  const entities = entry.entities.map((entity) => `${entity.kind}: ${entity.value}`)
+  // Deduplicated: the same `cve:…` arrives from the capture-time regex and from
+  // a compile as two rows with different `source`, and `Chips` keys on the
+  // label.
+  const entities = entityChips(entry)
   const topics = entry.topics.map((topic) => (topic.suggested ? `${topic.name} (suggested)` : topic.name))
   const tags = entry.tags.map((tag) => (tag.suggested ? `${tag.tag} (suggested)` : tag.tag))
 

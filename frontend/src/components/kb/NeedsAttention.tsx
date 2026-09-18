@@ -1,6 +1,6 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 
-import { ApiError } from '../../api/client'
+import { conflictDetail } from '../../api/client'
 import { kbQueryKey, undeleteEntry, type KbEntry } from '../../api/kb'
 import Button from '../ui/Button'
 import Card from '../ui/Card'
@@ -39,8 +39,8 @@ export default function NeedsAttention({ deleted }: NeedsAttentionProps) {
 
   // 409 is the one refusal worth spelling out: the URL was captured again while
   // this entry was in the bin, so restoring it would make two of the same thing.
-  const conflict =
-    undo.error instanceof ApiError && undo.error.status === 409 ? undo.error.detail : null
+  // The same helper the entry page's own Undo uses — the two used to disagree.
+  const conflict = conflictDetail(undo.error)
 
   return (
     <Card tone="panel2">

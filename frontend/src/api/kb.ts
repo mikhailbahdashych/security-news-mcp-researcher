@@ -407,6 +407,26 @@ export function cveChips(entry: KbEntry, max = 4): string[] {
 }
 
 /**
+ * Every entity on an entry, as one chip each.
+ *
+ * `entities` is **not** deduplicated across `source`: the capture-time regex and
+ * a later compile both find `CVE-2024-3094`, and the backend keeps both rows
+ * because it wants to know who said so. The page does not — it drew the same
+ * chip twice under a duplicate React `key`, which is also why this returns the
+ * labels rather than the rows: the label is the identity here.
+ */
+export function entityChips(entry: { entities: KbEntity[] }): string[] {
+  const seen: string[] = []
+  for (const entity of entry.entities) {
+    const label = `${entity.kind}: ${entity.value}`
+    if (!seen.includes(label)) {
+      seen.push(label)
+    }
+  }
+  return seen
+}
+
+/**
  * The line the entry page shows after a re-read.
  *
  * A fetch that was refused and a page that has not moved are **both** a 200 with
