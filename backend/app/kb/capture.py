@@ -401,7 +401,7 @@ async def capture_article(
         return CaptureResult(entry_id=entry_id, created=True)
 
     # Outside every transaction, on purpose — see the module docstring.
-    await _embed_pending_quietly(session_factory, embedder, entry_id, trigger=trigger)
+    await embed_pending_quietly(session_factory, embedder, entry_id, trigger=trigger)
     # After the embed, because the check reads the vector that embed just wrote.
     return CaptureResult(
         entry_id=entry_id,
@@ -443,7 +443,7 @@ async def capture_note(
         result = await _replace_snapshot(
             session_factory, existing_id, body, title=title, trigger=trigger
         )
-        await _embed_pending_quietly(session_factory, embedder, existing_id, trigger=trigger)
+        await embed_pending_quietly(session_factory, embedder, existing_id, trigger=trigger)
         return CaptureResult(entry_id=existing_id, created=False, skipped_reason=result.reason)
 
     return await capture_article(
@@ -586,7 +586,7 @@ async def refresh_snapshot(
         session_factory, entry_id, result.text.strip(), trigger=trigger
     )
     if outcome.changed:
-        await _embed_pending_quietly(session_factory, embedder, entry_id, trigger=trigger)
+        await embed_pending_quietly(session_factory, embedder, entry_id, trigger=trigger)
     return outcome
 
 
@@ -707,7 +707,7 @@ async def undelete(
                 "Merge the two, or delete the newer one first."
             ) from exc
 
-    await _embed_pending_quietly(session_factory, embedder, entry_id, trigger=trigger)
+    await embed_pending_quietly(session_factory, embedder, entry_id, trigger=trigger)
 
 
 async def purge(session_factory: async_sessionmaker[AsyncSession], ids: Sequence[int]) -> int:
@@ -1057,7 +1057,7 @@ async def embed_pending(
     return embedded
 
 
-async def _embed_pending_quietly(
+async def embed_pending_quietly(
     session_factory: async_sessionmaker[AsyncSession],
     embedder: Embedder,
     entry_id: int,
@@ -1611,6 +1611,7 @@ __all__ = [
     "cosine_from_distance",
     "dismiss_duplicate",
     "embed_pending",
+    "embed_pending_quietly",
     "entry_ids",
     "flag_near_duplicate",
     "is_near_duplicate",

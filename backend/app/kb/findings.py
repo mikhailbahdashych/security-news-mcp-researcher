@@ -36,8 +36,8 @@ from app.config import Settings
 from app.kb.capture import (
     DEFAULT_MIN_SNAPSHOT_CHARS,
     CaptureResult,
-    _embed_pending_quietly,
     capture_article,
+    embed_pending_quietly,
 )
 from app.kb.embeddings import Embedder, build_embedder
 from app.kb.models import KbEntry
@@ -147,7 +147,7 @@ async def capture_finding(
         defer_embedding=True,
     )
     if result.created and result.entry_id is not None:
-        await _embed_pending_quietly(session_factory, embedder, result.entry_id, trigger=trigger)
+        await embed_pending_quietly(session_factory, embedder, result.entry_id, trigger=trigger)
     return result
 
 

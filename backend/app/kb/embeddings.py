@@ -286,7 +286,7 @@ class VoyageEmbedder:
 
         A provider that echoes the ``Authorization`` header into its own error
         body — or a proxy in front of one — would otherwise put the key into an
-        exception, a log line and, through ``_embed_pending_quietly``, a row of
+        exception, a log line and, through ``embed_pending_quietly``, a row of
         the activity trail the UI shows. The length cap lives here, in this
         order, for the same three destinations: redacting *after* a cut could
         leave half a key behind, and every error path goes through this method.
