@@ -555,6 +555,29 @@ async def test_a_capture_failure_never_fails_the_star(
     assert "the extractor exploded" in rows[0].detail
 
 
+async def test_an_unexpected_capture_failure_is_a_502_and_not_a_500(client, app, session_factory):
+    """The explicit save does not swallow — but it is still a failed fetch.
+
+    The trigger paths answer 200 and write an activity row for exactly this
+    failure. A 500 here would make the same broken extractor read as "the
+    application is broken" on one route and "the save did not happen" on the
+    other.
+    """
+
+    class BrokenService(KbService):
+        async def capture_url(self, *args, **kwargs):
+            raise RuntimeError("the extractor exploded")
+
+    app.dependency_overrides[get_kb_service] = lambda: BrokenService(
+        session_factory=session_factory
+    )
+
+    response = await client.post("/api/kb/entries", json={"url": ARTICLE_URL})
+
+    assert response.status_code == 502, response.text
+    assert "the extractor exploded" in response.json()["detail"]
+
+
 async def test_saving_a_note_captures_it(client, kb, db_session):
     note = Note(title="Week 12", body_md=BODY, template_used="t")
     db_session.add(note)

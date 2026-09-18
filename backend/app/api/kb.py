@@ -18,13 +18,16 @@ Three status codes carry meaning beyond "it worked":
 * **422 / 502 on ``POST /entries {url}``** — the three ways a save of a pasted URL
   fails are three different things to the client: "you typed it wrong" (422), "the
   site did not answer" (502) and "the page was too short to keep" (409). One status
-  code for all three leaves a client with nothing useful to say.
+  code for all three leaves a client with nothing useful to say. A failure capture
+  did not name joins the second of those: still 502, never a 500, because it is the
+  save that did not happen and not the application that broke.
 * **404** — no such entry. A *deleted* entry is not a 404; it is readable, which is
   what makes Undo and the trash view possible.
 """
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Annotated
 
@@ -67,6 +70,8 @@ from app.schemas.kb import (
     TopicRead,
     TopicUpdate,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/kb", tags=["kb"])
 
@@ -139,6 +144,19 @@ async def create_entry(payload: EntryCreate, response: Response, kb: KbServiceDe
         # The revive collided: this entry's URL was captured again while it sat
         # in the trash, and which of the two survives is the user's call.
         raise HTTPException(status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except Exception as exc:
+        # Everything this route can name is already above, so what is left is the
+        # fetch/extract/store path failing in a way capture did not expect. That
+        # is still "the save did not happen", not "the application is broken":
+        # the *trigger* paths answer 200 and write an activity row for exactly
+        # this, and a 500 here would be the only place the same failure reads as
+        # a bug in the app. Logged, because a 502 with a sentence is all the
+        # client gets and the traceback must not go with it.
+        logger.exception("kb: saving %s failed", payload.url or payload.feed_item_id)
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            detail=f"capture failed: {type(exc).__name__}: {exc}",
+        ) from exc
 
     if result.entry_id is None:
         raise HTTPException(
