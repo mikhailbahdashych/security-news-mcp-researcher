@@ -663,11 +663,18 @@ class KbService:
         summary_md: str | None = None,
         review_status: str | None = None,
     ) -> KbEntry | None:
-        """Apply the hand edits the detail page makes. Only what is sent changes."""
+        """Apply the hand edits the detail page makes. Only what is sent changes.
+
+        A review change is the one edit that reaches past ``kb_entries``: vec0
+        metadata is written once, at upsert, so reviewing a model-authored finding
+        has to rewrite the entry's ``reviewed`` column or the vector leg keeps the
+        finding hidden until something re-embeds it (decision C2).
+        """
         async with self.session_factory() as session:
             entry = await session.get(KbEntry, entry_id)
             if entry is None:
                 return None
+            reviewed_changed = review_status is not None and review_status != entry.review_status
             if title is not None:
                 entry.title = title
             if notes_md is not None:
@@ -678,6 +685,8 @@ class KbService:
                 entry.review_status = review_status
             entry.updated_at = utcnow()
             await session.commit()
+            if reviewed_changed:
+                await self.store.set_reviewed(entry_id, review_status == "reviewed")
             return entry
 
     async def list_topics(self) -> list[tuple[Topic, int]]:

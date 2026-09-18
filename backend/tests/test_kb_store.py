@@ -14,9 +14,11 @@ from fakes.embedder import FakeEmbedder
 from sqlalchemy import event, text
 
 from app.db.models import utcnow
+from app.kb.capture import capture_article, soft_delete, undelete
 from app.kb.fts import fts_query
 from app.kb.models import KbChunk, KbEntry, KbEntryTopic, Topic
 from app.kb.schema import VEC_DIMENSIONS
+from app.kb.service import KbService
 from app.kb.store import SearchFilters, SqliteKnowledgeStore, VectorRow, published_day
 
 
@@ -632,3 +634,75 @@ async def test_set_reviewed_leaves_every_other_entry_alone(session_factory, db_s
 
     rows = await store.knn(_ray(0.0), 5, filters=SearchFilters(reviewed_only=True))
     assert len(rows) == 1
+
+
+#: Long enough to clear ``kb_min_snapshot_chars`` without being a fixture file.
+CAPTURED_TEXT = (
+    "A malicious commit in liblzma introduced a backdoor tracked as CVE-2024-3094. "
+    "The payload hooks RSA_public_decrypt through the IFUNC resolver, which is why it "
+    "only activates inside an sshd process linked against the notification library. "
+) * 3
+
+
+async def _vectors(db_session) -> int:
+    return (await db_session.execute(text("SELECT count(*) FROM kb_chunk_vec"))).scalar_one()
+
+
+async def test_reviewing_an_entry_through_the_service_updates_its_vector_rows(
+    session_factory, db_session
+):
+    """C2 end to end: ``PATCH /api/kb/entries/{id}`` is the only review path."""
+    finding = await _entry(db_session, kind="finding", authorship="model")
+    store = SqliteKnowledgeStore(session_factory)
+    chunk_id = await _vec_row(store, db_session, finding, "model conclusions")
+    service = KbService(session_factory, embedder=FakeEmbedder())
+
+    assert await store.knn(_ray(0.0), 5, filters=SearchFilters()) == []
+
+    await service.update_entry(finding.id, review_status="reviewed")
+    assert [row[0] for row in await store.knn(_ray(0.0), 5, filters=SearchFilters())] == [chunk_id]
+
+    await service.update_entry(finding.id, review_status="unreviewed")
+    assert await store.knn(_ray(0.0), 5, filters=SearchFilters()) == []
+
+
+async def test_an_edit_that_does_not_touch_the_review_status_leaves_the_vectors_alone(
+    session_factory, db_session, db_engine
+):
+    entry = await _entry(db_session, review_status="reviewed")
+    store = SqliteKnowledgeStore(session_factory)
+    await _vec_row(store, db_session, entry, "passage", reviewed=True)
+    service = KbService(session_factory, embedder=FakeEmbedder())
+
+    with _statements(db_engine) as seen:
+        await service.update_entry(entry.id, title="A better title")
+        await service.update_entry(entry.id, review_status="reviewed")
+
+    assert not any("UPDATE kb_chunk_vec" in statement for statement in seen)
+    assert await store.knn(_ray(0.0), 5, filters=SearchFilters(reviewed_only=True))
+
+
+async def test_a_soft_delete_removes_the_vectors_and_undelete_puts_them_back(
+    session_factory, db_session
+):
+    """C2 names delete/undelete, but the chunks already carry the vectors: the
+    delete drops them through ``kb_chunks_ad_vec`` and the undelete re-embeds."""
+    embedder = FakeEmbedder()
+    captured = await capture_article(
+        session_factory,
+        embedder,
+        url="https://example.test/xz",
+        title="The xz backdoor",
+        source_name="Example",
+        text=CAPTURED_TEXT,
+        published_at=None,
+        feed_item_id=None,
+        captured_by="user",
+    )
+    assert await _vectors(db_session) > 0
+
+    await soft_delete(session_factory, captured.entry_id)
+    assert await _vectors(db_session) == 0
+
+    await undelete(session_factory, embedder, captured.entry_id)
+    assert await _vectors(db_session) > 0
