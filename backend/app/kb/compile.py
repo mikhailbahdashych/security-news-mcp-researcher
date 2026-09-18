@@ -60,6 +60,7 @@ from app.kb.prompts import (
     COMPILE_SYSTEM,
     MAX_ENTITIES,
     MAX_ENTITY_CHARS,
+    MAX_SUMMARY_CHARS,
     MAX_TAGS,
     render_compile_user,
 )
@@ -459,7 +460,7 @@ async def _store(
     data = result.data if isinstance(result.data, dict) else {}
     input_tokens, output_tokens = _usage_tokens(result.usage)
 
-    summary = str(data.get("summary_md") or "").strip()
+    summary = str(data.get("summary_md") or "").strip()[:MAX_SUMMARY_CHARS]
     wanted_topic_ids = _ints(data.get("topic_ids"))
     tags = _tags(data.get("tags"))
     entities = _entities(data.get("entities"))

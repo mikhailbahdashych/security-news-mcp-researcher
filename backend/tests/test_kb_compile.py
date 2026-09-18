@@ -40,6 +40,7 @@ from app.kb.prompts import (
     DEFAULT_COMPILE_PROMPT,
     MAX_ENTITIES,
     MAX_ENTITY_CHARS,
+    MAX_SUMMARY_CHARS,
     MAX_TAGS,
     render_compile_user,
 )
@@ -90,7 +91,8 @@ def test_the_compile_schema_forbids_additional_properties_and_caps_tags():
     # `additionalProperties: false` and a complete `required` list is a 400.
     assert COMPILE_SCHEMA["additionalProperties"] is False
     assert set(COMPILE_SCHEMA["required"]) == set(COMPILE_SCHEMA["properties"])
-    assert COMPILE_SCHEMA["properties"]["tags"]["maxItems"] == MAX_TAGS
+    # The tag cap is stated, not enforced, in the schema: see the keyword test below.
+    assert str(MAX_TAGS) in COMPILE_SCHEMA["properties"]["tags"]["description"]
     # `new_topic` is nullable rather than absent, because every key is required.
     assert COMPILE_SCHEMA["properties"]["new_topic"]["type"] == ["object", "null"]
     assert COMPILE_SCHEMA["properties"]["new_topic"]["additionalProperties"] is False
@@ -578,8 +580,68 @@ async def test_a_repetition_loop_of_entities_cannot_bury_an_entry(kb, entry, ses
     # And the schema asks for the same bounds, so a well-behaved model never
     # sends what the code would have to throw away.
     entities = COMPILE_SCHEMA["properties"]["entities"]
-    assert entities["maxItems"] == MAX_ENTITIES
-    assert entities["items"]["properties"]["value"]["maxLength"] == MAX_ENTITY_CHARS
+    assert str(MAX_ENTITIES) in entities["description"]
+    assert str(MAX_ENTITY_CHARS) in entities["description"]
+
+
+#: JSON Schema keywords the structured-output subset does not accept. A schema
+#: that carries one is refused when the API compiles it — a 400 on **every**
+#: compile — and nothing in this suite would notice, because the scripted client
+#: never validates what it is handed.
+UNSUPPORTED_SCHEMA_KEYWORDS = {
+    "minLength",
+    "maxLength",
+    "minimum",
+    "maximum",
+    "exclusiveMinimum",
+    "exclusiveMaximum",
+    "multipleOf",
+    "maxItems",
+    "uniqueItems",
+    "minProperties",
+    "maxProperties",
+}
+
+
+def _schema_keywords(node) -> set[str]:
+    if isinstance(node, dict):
+        found = set(node)
+        for key, value in node.items():
+            # The names under ``properties`` are the answer's fields, not keywords.
+            named = key == "properties" and isinstance(value, dict)
+            children = value.values() if named else [value]
+            for child in children:
+                found |= _schema_keywords(child)
+        return found - set(node.get("properties", {})) if "properties" in node else found
+    if isinstance(node, list):
+        return set().union(*(_schema_keywords(item) for item in node)) if node else set()
+    return set()
+
+
+def test_the_compile_schema_uses_no_size_keyword_the_api_refuses():
+    """The caps live in code and in the descriptions, never as schema keywords."""
+    assert _schema_keywords(COMPILE_SCHEMA) & UNSUPPORTED_SCHEMA_KEYWORDS == set()
+
+
+async def test_a_runaway_summary_is_cut_before_it_is_stored_or_embedded(
+    kb, entry, session_factory
+):
+    """``summary_md`` is bounded by us, not by ``max_tokens``.
+
+    An unbounded summary is written whole to the column **and** as one un-split
+    ``summary`` chunk that is then embedded — past any provider's per-text limit.
+    """
+    await with_key(session_factory)
+    client = ScriptedAnthropic([turn_text(answer(summary_md="- " + "word " * 40_000))])
+
+    result = await compile_module.compile_entry(session_factory, factory(client), entry)
+
+    assert result.compiled is True
+    async with session_factory() as session:
+        stored = await session.get(KbEntry, entry)
+        assert len(stored.summary_md) <= MAX_SUMMARY_CHARS
+    chunks = await rows(session_factory, KbChunk, KbChunk.kind == "summary")
+    assert [len(chunk.text) <= MAX_SUMMARY_CHARS for chunk in chunks] == [True]
 
 
 # ----------------------------------------------------- the summary is not evidence

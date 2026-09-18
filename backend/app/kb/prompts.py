@@ -41,6 +41,17 @@ MAX_TAGS = 8
 MAX_ENTITIES = 24
 MAX_ENTITY_CHARS = 120
 
+#: The summary is asked for as three to eight bullets; this is ten times that. It
+#: is cut in code because the alternative bound is ``max_tokens`` — a quarter of a
+#: megabyte written to the column and embedded as ONE un-split ``summary`` chunk.
+MAX_SUMMARY_CHARS = 6000
+
+#: Every cap above is enforced in ``compile.py`` and *stated* in the schema's
+#: descriptions — never as ``maxItems`` / ``maxLength``. The structured-output
+#: subset of JSON Schema does not accept size keywords, a schema that carries one
+#: is refused when the API compiles it, and that is a 400 on every compile which
+#: no test here would see (the scripted client never validates a schema).
+
 #: What the model must answer with. ``additionalProperties: false`` and a full
 #: ``required`` list are not style: the API rejects a json_schema format without
 #: them. ``new_topic`` is nullable rather than optional for the same reason.
@@ -73,22 +84,24 @@ COMPILE_SCHEMA: dict[str, Any] = {
         },
         "tags": {
             "type": "array",
-            "maxItems": MAX_TAGS,
             "items": {"type": "string"},
+            "description": f"Short lowercase labels, at most {MAX_TAGS}.",
         },
         "entities": {
             "type": "array",
-            "maxItems": MAX_ENTITIES,
             "items": {
                 "type": "object",
                 "additionalProperties": False,
                 "required": ["kind", "value"],
                 "properties": {
                     "kind": {"type": "string", "enum": ["vendor", "product"]},
-                    "value": {"type": "string", "maxLength": MAX_ENTITY_CHARS},
+                    "value": {"type": "string"},
                 },
             },
-            "description": "Vendors and products the text names. CVE ids are extracted already.",
+            "description": (
+                "Vendors and products the text names. CVE ids are extracted already. "
+                f"At most {MAX_ENTITIES}, each at most {MAX_ENTITY_CHARS} characters."
+            ),
         },
     },
 }
@@ -155,6 +168,7 @@ __all__ = [
     "DEFAULT_COMPILE_PROMPT",
     "MAX_ENTITIES",
     "MAX_ENTITY_CHARS",
+    "MAX_SUMMARY_CHARS",
     "MAX_TAGS",
     "TRUNCATION_NOTE",
     "render_compile_user",
