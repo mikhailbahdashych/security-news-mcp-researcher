@@ -660,7 +660,7 @@ Three more ingest invariants worth not re-litigating (`app/services/feeds.py`):
 
 ## Tests (`backend/tests/`)
 
-`make test` → `uv run pytest` (**898 passed, 3 skipped**, ~40 s) then the frontend's
+`make test` → `uv run pytest` (**1110 passed, 4 skipped**, ~50 s) then the frontend's
 vitest. One `test_<area>.py` per area, `fakes/` for client stand-ins, `fixtures/` for
 XML/HTML.
 

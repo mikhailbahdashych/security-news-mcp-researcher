@@ -688,8 +688,10 @@ and model-authored findings.
   **never** from `itemIds.length` (the server de-duplicates), `done` is terminal and
   nothing after it moves the state, and an `error` is kept *beside* the counts because a
   cancelled run still ends on `done`. **Stop is the cancel endpoint alone** — an abort
-  would throw that ending away, the same reason the chat's Stop does not abort either —
-  while leaving the panel does abort, since no page can re-attach to a bulk stream.
+  would throw that ending away, the same reason the chat's Stop does not abort either.
+  **Leaving the panel is the opposite**: an undelivered run is cancelled *and* the reader
+  aborted, because no page can re-attach to a bulk stream and a job nobody can see, stop
+  or resume is worse than one that ended.
 - **Three lessons from one phase, all of them silent when broken.** Act on the `done`
   *event*, not on the end of the body. Never abort a stream that has already delivered
   `done` — the server is still working (`generationPhase.ts`, `bulkSave.ts::bulkDelivered`).
