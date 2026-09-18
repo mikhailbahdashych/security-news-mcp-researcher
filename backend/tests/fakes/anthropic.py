@@ -402,16 +402,35 @@ class _ScriptedStream:
         return self._turn.message
 
 
+@dataclass
+class FakeTokenCount:
+    """What ``messages.count_tokens`` answers with."""
+
+    input_tokens: int
+
+
 class _ScriptedMessages:
     def __init__(self, turns: list[ScriptedTurn], calls: list[dict[str, Any]]) -> None:
         self._turns = list(turns)
         self.calls = calls
+        #: Every ``count_tokens`` call's kwargs, kept apart from ``calls`` on
+        #: purpose: counting tokens generates no completion and is billed
+        #: nothing, so a test that asserts "no model call was made" must not see
+        #: one here.
+        self.token_counts: list[dict[str, Any]] = []
+        #: What each count answers. A plain number rather than a tokenizer: the
+        #: point of the endpoint here is *that it is used*, not what it returns.
+        self.tokens_per_count = 1_000
 
     def stream(self, **kwargs: Any) -> _ScriptedStream:
         self.calls.append(kwargs)
         if not self._turns:
             raise AssertionError(f"ScriptedAnthropic ran out of turns on call {len(self.calls)}")
         return _ScriptedStream(self._turns.pop(0))
+
+    async def count_tokens(self, **kwargs: Any) -> FakeTokenCount:
+        self.token_counts.append(kwargs)
+        return FakeTokenCount(input_tokens=self.tokens_per_count)
 
 
 class _ScriptedBeta:

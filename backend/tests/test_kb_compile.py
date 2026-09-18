@@ -16,6 +16,7 @@ import json
 import pytest
 from sqlalchemy import select
 
+from app.api.deps import get_chat_client_factory, get_kb_service
 from app.kb import compile as compile_module
 from app.kb.capture import capture_article, log_activity
 from app.kb.models import KbActivity, KbChunk, KbEntry, KbEntryTag, KbEntryTopic, Topic
@@ -475,3 +476,124 @@ async def test_the_summary_chunk_is_never_returned_as_evidence(kb, entry, sessio
 
     hits = await kb.search_for_model("pangolin telemetry")
     assert [hit.snippet for hit in hits if "pangolin" in hit.snippet] == []
+
+
+# ------------------------------------------------------------------- routes
+
+
+@pytest.fixture
+def api(app, kb):
+    """Point the app's knowledge base at the test database."""
+    app.dependency_overrides[get_kb_service] = lambda: kb
+    return app
+
+
+def scripted(app, client):
+    app.dependency_overrides[get_chat_client_factory] = lambda: factory(client)
+    return client
+
+
+async def test_the_compile_route_returns_the_refreshed_entry(api, client, kb, entry):
+    await with_key(kb.session_factory)
+    scripted(api, ScriptedAnthropic([turn_text(answer())]))
+
+    response = await client.post(f"/api/kb/entries/{entry}/compile")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["compiled"] is True
+    assert body["reason"] is None and body["reason_code"] is None
+    assert body["entry"]["summary_md"] == ANSWER["summary_md"]
+    assert body["entry"]["compile_model"] == "claude-opus-5"
+    assert body["entry"]["compile_prompt_version"] == COMPILE_PROMPT_VERSION
+    assert body["entities"] == [{"kind": "product", "value": "liblzma"}]
+    assert body["suggested_tags"] == ["supply-chain"]
+
+
+async def test_an_unknown_entry_is_the_only_error_the_compile_route_has(api, client, kb):
+    await with_key(kb.session_factory)
+    scripted(api, ScriptedAnthropic([turn_text(answer())]))
+
+    assert (await client.post("/api/kb/entries/4004/compile")).status_code == 404
+
+
+async def test_a_refusal_is_a_two_hundred_with_a_reason_code(api, client, kb, entry):
+    await with_key(kb.session_factory)
+    scripted(api, ScriptedAnthropic([turn_refusal(category="cyber")]))
+
+    response = await client.post(f"/api/kb/entries/{entry}/compile")
+
+    assert response.status_code == 200
+    assert response.json()["compiled"] is False
+    assert response.json()["reason_code"] == "refusal"
+
+
+async def test_the_batch_endpoint_compiles_each_entry_and_reports_per_entry_outcomes(
+    api, client, kb, entry, session_factory
+):
+    second = (
+        await capture_article(
+            kb.session_factory,
+            kb.embedder,
+            url="https://example.test/other",
+            title="Another advisory",
+            text=BODY,
+            captured_by="user",
+            min_chars=1,
+        )
+    ).entry_id
+    await with_key(session_factory)
+    scripted(api, ScriptedAnthropic([turn_text(answer()), turn_refusal()]))
+
+    response = await client.post("/api/kb/compile", json={"entry_ids": [entry, second]})
+
+    assert response.status_code == 200, response.text
+    results = response.json()["results"]
+    assert [row["entry"]["id"] for row in results] == [entry, second]
+    assert [row["compiled"] for row in results] == [True, False]
+    assert results[1]["reason_code"] == "refusal"
+
+
+async def test_the_estimate_endpoint_makes_no_model_call_and_reports_the_remaining_budget(
+    api, client, kb, entry, session_factory
+):
+    await with_key(session_factory, kb_compile_monthly_token_budget="3000")
+    async with session_factory() as session:
+        await log_activity(session, "compile", input_tokens=500, output_tokens=100)
+        await session.commit()
+    fake = scripted(api, ScriptedAnthropic([]))
+
+    response = await client.post(
+        "/api/kb/compile", params={"estimate": 1}, json={"entry_ids": [entry]}
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "entries": 1,
+        "input_tokens": 1_000,  # the fake's count_tokens, not a guess
+        "budget_remaining": 2_400,
+        "would_exceed": False,
+    }
+    # count_tokens generates no completion and is billed nothing, so it is not a
+    # model call — and the scripted client was never asked for a turn.
+    assert fake.calls == []
+    assert len(fake.beta.messages.token_counts) == 1
+
+
+async def test_the_budget_route_keeps_the_voyage_counter_out_of_the_anthropic_total(
+    api, client, kb, session_factory
+):
+    await with_key(session_factory, kb_compile_monthly_token_budget="10000")
+    async with session_factory() as session:
+        await log_activity(session, "compile", input_tokens=900, output_tokens=100)
+        await log_activity(session, "embed", input_tokens=50_000)
+        await session.commit()
+
+    body = (await client.get("/api/kb/budget")).json()
+
+    assert body["anthropic_total"] == 1_000
+    assert body["remaining"] == 9_000
+    assert body["exhausted"] is False
+    assert body["voyage"] == 50_000
+    # It is our own ceil(chars / 3.6) estimate, not a number Voyage billed.
+    assert body["voyage_estimated"] is True
