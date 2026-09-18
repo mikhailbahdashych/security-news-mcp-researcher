@@ -10,6 +10,8 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-17-knowledge-base-design.md` (**v2**, revised after the adversarial critique; the rulings it applies are `S1`–`S6` and `I1`–`I16`, listed in spec §8).
 
+**Source of truth:** this plan, the spec and `docs/superpowers/specs/2026-09-17-knowledge-base-api-phase2.md` are the only authoritative planning documents, and they are tracked. The git-ignored `.superpowers/` directory is the executor's scratch (ledger, per-task briefs, reports, reviews, PR drafts): derived from these files, deleted when its work merges, never a second plan. Any decision that changes *what gets built* is written into the **Decisions log** at the end of this file, in the PR of the phase that made it — where the log and a task's text disagree, the log wins. Every phase branch is cut from `main` after the previous phase merged, and its PR base is `main`.
+
 **How this plan is used:** it is the phase-and-task map. Each phase is one PR. When a phase starts, its tasks are expanded into step-level briefs (failing test → run → implement → run → commit, with the exact code) from this document and the spec, so code snippets never go stale across five phases. Every task below states its files, its interfaces, its tests, its acceptance check, and the ruling(s) it implements.
 
 ## Global Constraints
@@ -101,6 +103,8 @@ Outcome: **save an article from a starred item or a pasted URL, list it, keyword
 
 ## Phase 2 — Embeddings, hybrid search and compile (PR `feat/kb-vectors`)
 
+> Read the **Decisions log → Phase 2** before any task below: it moves files between tasks, adds one endpoint and defers two UI strings.
+
 Outcome: the KB understands meaning as well as words, summarises what it holds, and has the spend controls the user asked for.
 
 ### Task 2.1: Voyage embedder and per-chunk state
@@ -186,10 +190,10 @@ Outcome: the chat and the notes use the KB; the inbox and global search know abo
 - **Tests:** the block is in the user content and `system_override` is byte-identical to a run without it; a **customised** template still gets the section; the setting off → absent; only entries older than the current items appear; a model-authored entry never appears unless reviewed.
 - **Acceptance:** generate notes for items that duplicate an older KB entry → the section names it.
 
-### Task 3.5: Inbox badge, bulk save, global search
+### Task 3.5: Inbox badge, single-row save, global search
 - **Rulings:** I2, minor 7.
-- **Files:** `backend/app/api/items.py` (`kb_entry_id` on items), `backend/app/services/search.py` (+`kb` entity), `backend/CLAUDE.md` (the response now has **four** keys), `frontend/src/components/inbox/**` (badge, row and bulk "Save to knowledge base" wired to the Phase 2 job), `frontend/src/components/ui/GlobalSearch.tsx`.
-- **Interfaces:** `SEARCH_TYPES = ("items", "sessions", "notes", "kb")` — the documented "always all three keys" contract becomes four, in the code, the tests and `backend/CLAUDE.md`, in this task and not by accident later. The bulk row action posts to the Phase 2 job; the single row action stays inline.
+- **Files:** `backend/app/api/items.py` (`kb_entry_id` on items), `backend/app/services/search.py` (+`kb` entity), `backend/CLAUDE.md` (the response now has **four** keys), `frontend/src/components/inbox/**` (badge and the single-row "Save to knowledge base"; the **bulk** action ships in Task 2.7 — decision P2-4), `frontend/src/components/ui/GlobalSearch.tsx`.
+- **Interfaces:** `SEARCH_TYPES = ("items", "sessions", "notes", "kb")` — the documented "always all three keys" contract becomes four, in the code, the tests and `backend/CLAUDE.md`, in this task and not by accident later. The single row action stays inline; the bulk action already exists (Task 2.7) and gains only the dedup report below.
 - **Tests:** items carry the id; global search returns kb hits and the contract test asserts four keys; the bulk action dedups and reports what it skipped.
 - **Acceptance (browser):** a saved item shows the badge and the badge deep-links to the entry.
 
@@ -249,6 +253,90 @@ Outcome: the chat and the notes use the KB; the inbox and global search know abo
 - **Interfaces:** `maybe_restore_on_empty(settings) -> RestoreInfo | None`, called from the lifespan **before** `create_db_engine`; `schedule_backup_after_capture(sf)` — a debounced task started by a capture event, never a timer that fires on its own, with a 30-minute window and a minimum-growth check.
 - **Tests:** the lifespan ordering (a restored file is in place before the engine is built — asserted by a fake restore that writes a marker table); `kb_backup_after_capture` defaults **off**; when on, two captures 5 minutes apart produce **one** upload and the 30-minute window is respected, with the last event winning; a backup failure surfaces in status and never fails the capture.
 - **Acceptance (documented in the PR):** fresh clone + `.env` with the bucket, passphrase and AWS variables → first start restores the database → the KB, chats, notes and keys are all there, and the Knowledge page reports N chunks pending until Re-index runs.
+
+---
+
+---
+
+## Decisions log
+
+Decisions taken while executing the plan that change what gets built, where it lives, or which
+task owns it. Newest phase last. **Where this log and a task's text disagree, the log wins.**
+Each entry: the decision — why — what it costs if wrong. Entry numbers match the executor's ledger;
+a gap is an entry folded into a neighbour.
+
+### Phase 1 (merged as #30) — carried into Phase 2
+
+- **C1. A same-dimension embedding-model change must empty the vector table.** `kb_chunk_vec` has no
+  `embedding_model` column (frozen DDL) and `rebuild_vec` carries vectors over when the dimension is
+  unchanged, so switching model at 1024 dims would mix two vector spaces in one KNN. Changing
+  `kb_embedding_model` therefore runs `DELETE FROM kb_chunk_vec` and marks every chunk pending, in
+  the same transaction (Task 2.1). — Cost if wrong: silently meaningless similarity scores.
+- **C2. vec0 metadata has no sync path.** The `reviewed` / `authorship` columns are written once, at
+  upsert. Reviewing or un-reviewing an entry, and soft-delete / undelete, must update or remove the
+  entry's vec rows (Task 2.2 acceptance). — Cost if wrong: a reviewed finding stays invisible to the
+  vector leg, or a deleted entry keeps matching.
+- **C3. `since` must work timezone-aware on both legs.** `published_day()` raises on an aware
+  datetime while `POST /kb/search` accepts one; normalise inside `published_day` and test both legs
+  with both spellings (Task 2.2).
+- **C4. UI still owed from Phase 1:** Purge, new-topic and merge buttons (the API exists) → Task 2.7.
+  Snapshot retention → Phase 4.
+- **C5. `services.settings` ↔ `app.kb` import direction** works and is documented in
+  `backend/CLAUDE.md`; no task may add an import from `app.services.settings` into `app.kb.models`
+  or the reverse at module import time.
+
+### Phase 2 (`feat/kb-vectors`)
+
+- **P2-1. Task 2.1 owns every new settings key of the phase** — `voyage_api_key` (masked),
+  `kb_embedding_model`, `kb_capture_findings`, `kb_compile_mode|model|effort|prompt|max_chars`,
+  `kb_compile_monthly_token_budget`, `kb_auto_accept_suggestions`, `kb_reviewed_only`,
+  `kb_recency_boost`, `kb_rerank`, `kb_duplicate_threshold` — including their API exposure. Other
+  tasks only read them. `kb_compile_max_chars` (24 000) is in the spec but was in no task's list.
+  — Why: one writer for `services/settings.py` lets tasks run in parallel. Cost: a key exists one
+  batch before its consumer.
+- **P2-2. New routes get their own router modules**: `app/api/kb_bulk.py` (2.3) and
+  `app/api/kb_compile.py` (2.5), mounted under `/api/kb`. Task 2.3 alone edits
+  `app/api/__init__.py` and creates a stub `kb_compile.py`; Task 2.5 fills it. `schemas/kb.py`
+  belongs to 2.5; 2.3 uses `schemas/kb_bulk.py`.
+- **P2-3. Branch name is `feat/kb-vectors`**, PR base `main`.
+- **P2-4. The Inbox already has multi-select (`BulkBar`)**, so the bulk "Save to knowledge base"
+  action, with progress and Cancel, ships in **Task 2.7**, and Task 2.3's browser acceptance is
+  reachable this phase. Task 3.5 keeps the badge, `kb_entry_id`, the single-row action and `kb` in
+  global search.
+- **P2-5. `embed_pending` already exists (Phase 1) with another shape**: one Voyage call for the
+  whole selection, `int` return, no activity row. Task 2.1 makes it write `embedded_at` **per
+  batch**, keeps the `int` return (its callers live in `capture.py`) and adds the `kb_activity`
+  row with the Voyage token count. — Why: the plan's "a 429 on the second batch leaves 8 of 11
+  embedded" cannot hold otherwise.
+- **P2-6. Findings capture lives in a new `app/kb/findings.py`** (Task 2.6), delegating to
+  `capture_article(kind="finding", authorship="model", …)` the way `capture_note` does;
+  `capture.py` belongs to Task 2.3 this phase.
+- **P2-8. `compile_if_auto` ships in Task 2.5 with a unit test; wiring it into the three capture
+  call sites** (`kb/service.py`, `api/items.py`, `api/notes.py`) is a separate integration commit
+  after batch B. — Cost if forgotten: `kb_compile_mode: auto` is a setting with no effect; the
+  final review checks it.
+- **P2-9. `searchable()` stays synchronous** (`builtin.py`'s `__post_init__` is sync). Task 2.1
+  adds an async builder and switches `get_kb_service` **and** `agent/providers.py`; missing the
+  second leaves the two chat tools keyword-only with no error.
+- **P2-10. `DEFAULT_COMPILE_PROMPT` and `COMPILE_PROMPT_VERSION` live in `services/settings.py`**
+  beside `DEFAULT_NOTE_TEMPLATE` (the settings defaults need them at import time);
+  `app/kb/prompts.py` re-exports them.
+- **P2-11. `oneshot.py` also exports `structured_call_result(...) -> StructuredResult(data, usage,
+  model, stop_reason)`**; `structured_call` stays the `-> dict` convenience. — Why: the budget needs
+  the usage the plan's signature hides.
+- **P2-13. Shared docs and `tests/conftest.py` have one writer**: tasks report their documentation
+  deltas and one docs commit applies them at the end of the phase. Exception:
+  `app/agent/CLAUDE.md` belongs to Task 2.4 (its acceptance requires it). `fakes/embedder.py` → 2.1,
+  `fakes/anthropic.py` → 2.5.
+- **P2-14. Two UI strings are deferred**: the "narrow filter — results may be incomplete" notice
+  (Task 2.2 ships the `SearchOutcome.topic_filter_truncated` signal; surfacing it is Phase 3).
+  Review stays `PATCH /api/kb/entries/{id}` — there is no `/review` route.
+- **P2-15. Phase 2 ships `POST /api/kb/embed-pending`** (Task 2.1): user-triggered, embeds up to
+  a bounded number of pending chunks per call, returns `{embedded, pending, tokens}`; Settings →
+  Knowledge shows the pending count with an **Embed now** button (Task 2.7). Full re-index and
+  rebuild stay in Task 4.4. — Why: without it, entries captured before the Voyage key was entered
+  would stay keyword-only until Phase 4, and Task 2.7's acceptance ("enter a key → a semantic query
+  finds the entry") is unreachable. Cost: one small endpoint Task 4.4 later subsumes.
 
 ---
 

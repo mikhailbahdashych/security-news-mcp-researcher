@@ -117,10 +117,18 @@ handler and was dropped.
 ## Delivery workflow — MUST follow
 
 - **Feature branch + PR. The human merges. Never merge, never push to `main`.**
-  Branches **stack**: each feature branch is cut from the previous one and its PR base
-  is the previous branch (PR 1's base is `main`).
-- **Plain commit messages. NO AI attribution trailers of any kind** — no
-  `Co-Authored-By: Claude`, no `Claude-Session:`, no "Generated with ...".
+  Cut each branch from `main` and open its PR **against `main`**. Do not stack: a stacked
+  PR merges into its *base branch*, not into `main` (that is how knowledge-base Phase 1
+  first missed `main`). If a stack is ever unavoidable, retarget the child to `main`
+  before it is merged.
+- **Planned work has one source of truth: the tracked `docs/superpowers/` spec + plan**
+  (and the plan's Decisions log). `.superpowers/` is the executor's git-ignored scratch —
+  never a second plan, deleted when its work merges. See `docs/CLAUDE.md`.
+- **Plain commit messages, co-authored with Claude.** End every commit message with the
+  attribution trailer the session supplies (`Co-Authored-By: Claude … <noreply@anthropic.com>`
+  and its `Claude-Session:` line), and end every PR description with the
+  "Generated with Claude Code" line. (Until 2026-09-18 this rule was the opposite, which is
+  why earlier history carries no trailers — do not rewrite it.)
 - **`git add <explicit paths>` only.** Never `git add -A` / `git add .`.
 - `.superpowers/`, `.remember/`, `.playwright-mcp/`, `data/`, `.env`, `node_modules/`,
   `frontend/dist/` are gitignored scratch — never commit them, never read `.env`.
