@@ -40,6 +40,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.agent import events as ev
 from app.agent.turnlog import TurnLog
 from app.db.models import ResearchSession, utcnow
+from app.kb.findings import FindingDraft, capture_turn_finding
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +78,9 @@ class RunningTurn:
     started_at: datetime
     log: TurnLog
     session_factory: async_sessionmaker[AsyncSession] = field(repr=False)
+    #: The question that started the turn. Kept because the finding capture needs
+    #: it at the *end* of the turn, long after the request that carried it.
+    prompt: str = ""
     client: Any | None = field(default=None, repr=False)
     #: Set — synchronously, before any await — by the first call to ``_finish``.
     #: Every path that can close a turn out (the task's own cleanup, a cancel that
@@ -214,6 +218,7 @@ class TurnRegistry:
                 started_at=started_at,
                 log=log,
                 session_factory=session_factory,
+                prompt=prompt,
                 client=client,
             )
             turn.task = asyncio.create_task(self._drive(turn, generator), name=f"turn:{session_id}")
@@ -233,8 +238,15 @@ class TurnRegistry:
     async def _drive(self, turn: RunningTurn, generator: AsyncIterator[ev.AgentEvent]) -> None:
         saw_done = False
         terminal: ev.Error | None = None
+        # Watches every event for the answer and the sources it used, in case the
+        # user has asked for findings to be kept. Costs a string list and a dict
+        # per turn whether they have or not; the setting is read at the end,
+        # because by then the turn is over and a slow settings read cannot delay
+        # anything the user is watching.
+        draft = FindingDraft()
         try:
             async for event in generator:
+                draft.observe(event)
                 if isinstance(event, ev.Done):
                     saw_done = True
                     # Before the event reaches a subscriber: a client that has seen
@@ -257,7 +269,7 @@ class TurnRegistry:
             # Stop then shutdown — would otherwise finish the task while the
             # cleanup ran on as an orphan, leaving the client open and the row on
             # ``running`` after ``drain()`` had already returned.
-            cleanup = asyncio.ensure_future(self._finish(turn, terminal, saw_done))
+            cleanup = asyncio.ensure_future(self._finish(turn, terminal, saw_done, draft))
             self._finishing.add(cleanup)
             cleanup.add_done_callback(self._finishing.discard)
             while not cleanup.done():
@@ -266,8 +278,18 @@ class TurnRegistry:
                 except asyncio.CancelledError:
                     continue
 
-    async def _finish(self, turn: RunningTurn, terminal: ev.Error | None, saw_done: bool) -> None:
-        """End the log, close the client, idle the row. Runs at most once."""
+    async def _finish(
+        self,
+        turn: RunningTurn,
+        terminal: ev.Error | None,
+        saw_done: bool,
+        draft: FindingDraft | None = None,
+    ) -> None:
+        """End the log, close the client, idle the row — then, last, keep the finding.
+
+        *draft* is the turn's own; the cancel paths that close a turn out from
+        outside pass nothing, and a cancelled turn is not a finding anyway.
+        """
         if turn.finished:
             return
         turn.finished = True
@@ -303,6 +325,18 @@ class TurnRegistry:
         except Exception:  # noqa: BLE001 - the app may be shutting down
             logger.warning(
                 "Could not idle session %s after its turn", turn.session_id, exc_info=True
+            )
+        # Last, and only for a turn that ran to its own ``done``: the knowledge
+        # base is a consequence of the turn, never part of it. Everything above
+        # has already happened, subscribers saw ``done`` back in ``_drive``, and
+        # the capture carries its own error handling — so the worst a finding can
+        # cost is time in a cleanup nobody is waiting on.
+        if draft is not None and saw_done and terminal is None:
+            await capture_turn_finding(
+                turn.session_factory,
+                draft,
+                session_id=turn.session_id,
+                question=turn.prompt,
             )
 
     def _remember(self, turn: RunningTurn) -> None:

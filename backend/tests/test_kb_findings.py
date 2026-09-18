@@ -12,15 +12,23 @@ No network anywhere: the turns are scripted event generators and the embedder is
 
 from __future__ import annotations
 
+import asyncio
+import json
+from collections.abc import AsyncIterator
+
 from fakes.embedder import FakeEmbedder
 from sqlalchemy import func, select
 
-from app.agent.builtin import MODEL_TITLE_PREFIX
+from app.agent import events as ev
+from app.agent.builtin import MODEL_TITLE_PREFIX, BuiltinToolProvider
+from app.agent.turns import RunningTurn, TurnRegistry
 from app.db.models import Message, ResearchSession
 from app.kb import capture as capture_module
+from app.kb import findings as findings_module
 from app.kb.embeddings import NullEmbedder
 from app.kb.findings import capture_finding, finding_title, render_finding
 from app.kb.models import KbActivity, KbChunk, KbEntry
+from app.kb.service import KbService
 from app.services import settings as settings_service
 from app.services.notes import ExtraSource
 
@@ -107,7 +115,10 @@ def test_the_snapshot_is_question_answer_and_sources_as_markdown():
     text = render_finding(
         QUESTION,
         ANSWER,
-        [ExtraSource(url="https://example.test/xz", title="The xz backdoor"), ExtraSource(url="https://example.test/b")],
+        [
+            ExtraSource(url="https://example.test/xz", title="The xz backdoor"),
+            ExtraSource(url="https://example.test/b"),
+        ],
     )
 
     assert text.index("## Question") < text.index("## Answer") < text.index("## Sources")
@@ -244,3 +255,299 @@ async def test_a_finding_never_takes_part_in_duplicate_flagging(session_factory,
             .where(KbChunk.entry_id == result.entry_id, KbChunk.embedded_at.is_(None))
         )
     assert pending == 0
+
+
+# ----------------------------------------------------------- the turn-end hook
+
+
+def _fetch(url: str, *, is_error: bool = False, tool_use_id: str = "t1") -> list[ev.AgentEvent]:
+    """The three events one ``fetch_article`` call produces."""
+    return [
+        ev.ToolUseStart(tool_use_id=tool_use_id, name="fetch_article", source="builtin"),
+        ev.ToolUseInput(tool_use_id=tool_use_id, partial_json=json.dumps({"url": url})),
+        ev.ToolResult(
+            tool_use_id=tool_use_id,
+            name="fetch_article",
+            is_error=is_error,
+            duration_ms=3,
+            preview="",
+        ),
+    ]
+
+
+def _searched(*urls: str, tool_use_id: str = "s1") -> list[ev.AgentEvent]:
+    """A ``web_search`` that handed the model several candidates."""
+    return [
+        ev.ToolUseStart(tool_use_id=tool_use_id, name="web_search", source="server"),
+        ev.ServerToolResult(
+            tool_use_id=tool_use_id,
+            name="web_search",
+            is_error=False,
+            results=[{"url": url, "title": f"Result {index}"} for index, url in enumerate(urls)],
+        ),
+    ]
+
+
+async def _script(events, *, hang: float = 0.0) -> AsyncIterator[ev.AgentEvent]:
+    for event in events:
+        yield event
+    if hang:
+        await asyncio.sleep(hang)
+
+
+async def _run_turn(
+    session_factory, events, *, prompt: str = QUESTION, done: bool = True
+) -> tuple[RunningTurn, int, int]:
+    """Drive one whole turn through the registry and wait for its cleanup."""
+    chat_id, message_id = await _chat(session_factory)
+    script = list(events)
+    if done:
+        script.append(ev.Done(session_id=chat_id, message_ids=[message_id]))
+    registry = TurnRegistry()
+    turn = await registry.start(
+        session_id=chat_id,
+        session_factory=session_factory,
+        generator=_script(script),
+        client=None,
+        prompt=prompt,
+        attachments=[],
+    )
+    await turn.task
+    return turn, chat_id, message_id
+
+
+CITED = [*_fetch("https://example.test/xz"), ev.TextDelta(text=ANSWER)]
+
+
+async def test_with_the_setting_off_a_full_turn_leaves_kb_entries_unchanged(session_factory):
+    """The acceptance: ``kb_capture_findings`` defaults to off, and off means nothing."""
+    turn, _, _ = await _run_turn(session_factory, CITED)
+
+    assert turn.log.closed
+    assert await _count(session_factory, KbEntry) == 0
+    assert await _count(session_factory, KbChunk) == 0
+    assert await _activity(session_factory) == []
+
+
+async def test_a_turn_that_cited_a_fetched_article_creates_a_model_authored_finding(
+    session_factory,
+):
+    await _settings(session_factory, kb_capture_findings="true")
+
+    _, chat_id, message_id = await _run_turn(session_factory, CITED)
+
+    (entry,) = await _entries(session_factory)
+    assert entry.kind == "finding"
+    assert entry.authorship == "model"
+    assert entry.review_status == "unreviewed"
+    assert entry.captured_by == "auto"
+    assert entry.session_id == chat_id
+    assert entry.turn_message_id == message_id
+    assert entry.published_at is None
+    assert entry.title == QUESTION
+    snapshot = await _snapshot(session_factory, entry.id)
+    assert QUESTION in snapshot
+    assert ANSWER in snapshot
+    assert "https://example.test/xz" in snapshot
+
+
+async def test_an_answer_that_merely_mentions_a_url_is_not_a_finding(session_factory):
+    await _settings(session_factory, kb_capture_findings="true")
+
+    await _run_turn(session_factory, [ev.TextDelta(text=ANSWER)])
+
+    assert await _count(session_factory, KbEntry) == 0
+
+
+async def test_a_web_search_result_only_counts_when_the_answer_cites_it(session_factory):
+    await _settings(session_factory, kb_capture_findings="true")
+
+    await _run_turn(
+        session_factory,
+        [
+            *_searched("https://example.test/xz", "https://aggregator.test/reprint"),
+            ev.TextDelta(text=ANSWER),
+        ],
+    )
+
+    (entry,) = await _entries(session_factory)
+    snapshot = await _snapshot(session_factory, entry.id)
+    sources = snapshot.split("## Sources")[1]
+    assert "https://example.test/xz" in sources
+    assert "aggregator.test" not in sources
+
+
+async def test_a_failed_fetch_article_is_not_a_source(session_factory):
+    await _settings(session_factory, kb_capture_findings="true")
+
+    await _run_turn(
+        session_factory,
+        [*_fetch("https://example.test/xz", is_error=True), ev.TextDelta(text=ANSWER)],
+    )
+
+    assert await _count(session_factory, KbEntry) == 0
+
+
+async def test_a_stopped_turn_produces_no_finding(session_factory):
+    await _settings(session_factory, kb_capture_findings="true")
+    chat_id, _ = await _chat(session_factory)
+    registry = TurnRegistry()
+    turn = await registry.start(
+        session_id=chat_id,
+        session_factory=session_factory,
+        generator=_script(CITED, hang=5.0),
+        client=None,
+        prompt=QUESTION,
+        attachments=[],
+    )
+    await asyncio.sleep(0)
+    await registry.cancel(chat_id)
+    await asyncio.gather(turn.task, return_exceptions=True)
+    await asyncio.sleep(0)
+
+    assert await _count(session_factory, KbEntry) == 0
+    # The turn's own cleanup still ran.
+    assert turn.log.closed
+    async with session_factory() as session:
+        chat = await session.get(ResearchSession, chat_id)
+        assert chat.turn_status == "idle"
+
+
+async def test_a_crashed_turn_produces_no_finding(session_factory):
+    await _settings(session_factory, kb_capture_findings="true")
+
+    async def explodes() -> AsyncIterator[ev.AgentEvent]:
+        for event in CITED:
+            yield event
+        raise RuntimeError("the stream died")
+
+    chat_id, _ = await _chat(session_factory)
+    registry = TurnRegistry()
+    turn = await registry.start(
+        session_id=chat_id,
+        session_factory=session_factory,
+        generator=explodes(),
+        client=None,
+        prompt=QUESTION,
+        attachments=[],
+    )
+    await turn.task
+
+    assert await _count(session_factory, KbEntry) == 0
+    assert turn.log.events[-1].type == "done"
+
+
+async def test_a_turn_that_ended_in_an_error_produces_no_finding(session_factory):
+    """A refusal or a rate limit is a terminal ``ev.Error`` followed by ``done``."""
+    await _settings(session_factory, kb_capture_findings="true")
+
+    await _run_turn(
+        session_factory,
+        [*CITED, ev.Error(error_type="refusal", message="declined", category="cyber")],
+    )
+
+    assert await _count(session_factory, KbEntry) == 0
+
+
+async def test_a_second_turn_for_the_same_message_does_not_create_a_second_entry(session_factory):
+    await _settings(session_factory, kb_capture_findings="true")
+    chat_id, message_id = await _chat(session_factory)
+
+    for _ in range(2):
+        registry = TurnRegistry()
+        turn = await registry.start(
+            session_id=chat_id,
+            session_factory=session_factory,
+            generator=_script([*CITED, ev.Done(session_id=chat_id, message_ids=[message_id])]),
+            client=None,
+            prompt=QUESTION,
+            attachments=[],
+        )
+        await turn.task
+
+    assert await _count(session_factory, KbEntry) == 1
+
+
+async def test_a_capture_failure_never_breaks_the_turn(session_factory, monkeypatch):
+    await _settings(session_factory, kb_capture_findings="true")
+
+    async def explodes(*args, **kwargs):
+        raise RuntimeError("the knowledge base is on fire")
+
+    monkeypatch.setattr(findings_module, "capture_finding", explodes)
+
+    turn, chat_id, _ = await _run_turn(session_factory, CITED)
+
+    assert turn.log.events[-1].type == "done"
+    assert turn.log.closed
+    async with session_factory() as session:
+        chat = await session.get(ResearchSession, chat_id)
+        assert chat.turn_status == "idle"
+    assert await _count(session_factory, KbEntry) == 0
+    assert [(action, source) for action, source, _ in await _activity(session_factory)] == [
+        ("skip", "finding")
+    ]
+
+
+async def test_a_finding_is_never_auto_compiled(session_factory, monkeypatch):
+    """Even in ``auto``: no model prose summarising model prose, and no surprise call."""
+    calls: list[object] = []
+
+    async def spy(self, result):
+        calls.append(result)
+
+    monkeypatch.setattr(KbService, "_auto_compile", spy)
+    await _settings(session_factory, kb_capture_findings="true", kb_compile_mode="auto")
+
+    await _run_turn(session_factory, CITED)
+
+    (entry,) = await _entries(session_factory)
+    assert calls == []
+    assert entry.summary_md is None
+    assert entry.compiled_at is None
+
+
+async def test_a_finding_is_invisible_to_the_model_until_reviewed(session_factory):
+    await _settings(session_factory, kb_capture_findings="true")
+    await _run_turn(session_factory, CITED)
+    (entry,) = await _entries(session_factory)
+    service = KbService(session_factory=session_factory)
+
+    assert await service.search_for_model("liblzma") == []
+
+    async with session_factory() as session:
+        row = await session.get(KbEntry, entry.id)
+        row.review_status = "reviewed"
+        await session.commit()
+
+    assert [hit.entry.id for hit in await service.search_for_model("liblzma")] == [entry.id]
+    result = await BuiltinToolProvider(session_factory).search_knowledge_base(q="liblzma")
+    assert MODEL_TITLE_PREFIX in result.content
+
+
+async def test_a_finding_is_visible_to_the_user_immediately(session_factory):
+    """The Knowledge page shows everything the user captured (plan decision P2-17)."""
+    await _settings(session_factory, kb_capture_findings="true")
+    await _run_turn(session_factory, CITED)
+    (entry,) = await _entries(session_factory)
+
+    hits = await KbService(session_factory=session_factory).search_for_user("liblzma")
+
+    assert [hit.entry.id for hit in hits] == [entry.id]
+    assert hits[0].entry.review_status == "unreviewed"
+
+
+async def test_deleting_the_chat_leaves_the_finding_with_its_source_ref(session_factory):
+    await _settings(session_factory, kb_capture_findings="true")
+    _, chat_id, message_id = await _run_turn(session_factory, CITED)
+    (entry,) = await _entries(session_factory)
+    assert entry.source_ref == f"session {chat_id} turn {message_id}"
+
+    async with session_factory() as session:
+        await session.delete(await session.get(ResearchSession, chat_id))
+        await session.commit()
+
+    (kept,) = await _entries(session_factory)
+    assert kept.id == entry.id
+    assert kept.turn_message_id is None and kept.session_id is None
+    assert kept.source_ref == f"session {chat_id} turn {message_id}"
