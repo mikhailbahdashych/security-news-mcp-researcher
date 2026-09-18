@@ -22,12 +22,22 @@ from app.api.deps import get_chat_client_factory, get_kb_service
 from app.db.models import Feed, FeedItem, Note
 from app.kb import compile as compile_module
 from app.kb.capture import capture_article, log_activity
-from app.kb.models import KbActivity, KbChunk, KbEntry, KbEntryTag, KbEntryTopic, Topic
+from app.kb.models import (
+    KbActivity,
+    KbChunk,
+    KbEntry,
+    KbEntryEntity,
+    KbEntryTag,
+    KbEntryTopic,
+    Topic,
+)
 from app.kb.prompts import (
     COMPILE_PROMPT_VERSION,
     COMPILE_SCHEMA,
     COMPILE_SYSTEM,
     DEFAULT_COMPILE_PROMPT,
+    MAX_ENTITIES,
+    MAX_ENTITY_CHARS,
     MAX_TAGS,
     render_compile_user,
 )
@@ -497,6 +507,32 @@ async def test_auto_mode_compiles_and_manual_does_not(kb, entry, session_factory
 
     assert result is not None and result.compiled is True
     assert len(client.calls) == 1
+
+
+async def test_a_repetition_loop_of_entities_cannot_bury_an_entry(kb, entry, session_factory):
+    """``entities`` is capped in count and in length, in the schema and in code.
+
+    A degenerate repetition loop is an ordinary model failure, and an answer
+    bounded only by ``max_tokens`` is roughly five thousand ``kb_entry_entities``
+    rows on one entry. They survive every snapshot refresh by design
+    (``_sync_regex_entities`` deletes only the regex ones) and there is no bulk
+    way to undo them, so the entry would be permanently unusable.
+    """
+    await with_key(session_factory)
+    flood = [{"kind": "vendor", "value": f"Vendor {index} " + "x" * 500} for index in range(400)]
+    client = ScriptedAnthropic([turn_text(answer(entities=flood))])
+
+    result = await compile_module.compile_entry(session_factory, factory(client), entry)
+
+    assert len(result.entities) == MAX_ENTITIES
+    assert max(len(value) for _kind, value in result.entities) == MAX_ENTITY_CHARS
+    stored = await rows(session_factory, KbEntryEntity, KbEntryEntity.source == "model")
+    assert len(stored) == MAX_ENTITIES
+    # And the schema asks for the same bounds, so a well-behaved model never
+    # sends what the code would have to throw away.
+    entities = COMPILE_SCHEMA["properties"]["entities"]
+    assert entities["maxItems"] == MAX_ENTITIES
+    assert entities["items"]["properties"]["value"]["maxLength"] == MAX_ENTITY_CHARS
 
 
 # ----------------------------------------------------- the summary is not evidence

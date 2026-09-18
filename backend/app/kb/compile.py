@@ -15,8 +15,8 @@ get wrong, and why each one is here:
   read and the session closed before the client is built; the answer is written
   in a new one. SQLite has a single writer and this call takes seconds.
 * **The model's answer is untrusted.** Topic ids it invented are dropped, tags
-  are capped, entity kinds are checked against the column's own CHECK
-  constraint, and ``new_topic`` creates nothing — the user confirms it through
+  and entities are capped in count and in length, entity kinds are checked
+  against the column's own CHECK constraint, and ``new_topic`` creates nothing — the user confirms it through
   the topic route that already exists.
 * **The summary is never evidence.** It is stored as a ``summary`` chunk so an
   entry-level match is cheap, and both search legs default to
@@ -58,6 +58,8 @@ from app.kb.prompts import (
     COMPILE_PROMPT_VERSION,
     COMPILE_SCHEMA,
     COMPILE_SYSTEM,
+    MAX_ENTITIES,
+    MAX_ENTITY_CHARS,
     MAX_TAGS,
     render_compile_user,
 )
@@ -679,15 +681,23 @@ def _tags(values: Any) -> list[str]:
 
 
 def _entities(values: Any) -> list[tuple[str, str]]:
+    """The vendors and products the model named — capped like the tags are.
+
+    Twice over, as :func:`_tags` is: the schema asks for at most
+    :data:`MAX_ENTITIES` of at most :data:`MAX_ENTITY_CHARS` each, and a model
+    that ignores either bound still cannot write more rows than that. An invented
+    ``kind`` is dropped here rather than raising on the insert, because
+    ``kb_entry_entities.kind`` has a CHECK constraint.
+    """
     out: list[tuple[str, str]] = []
     for value in values if isinstance(values, list) else []:
         if not isinstance(value, dict):
             continue
         kind = str(value.get("kind") or "").strip().lower()
-        text = str(value.get("value") or "").strip()
+        text = str(value.get("value") or "").strip()[:MAX_ENTITY_CHARS]
         if kind in MODEL_ENTITY_KINDS and text:
             out.append((kind, text))
-    return list(dict.fromkeys(out))
+    return list(dict.fromkeys(out))[:MAX_ENTITIES]
 
 
 def _new_topic(value: Any) -> dict[str, Any] | None:

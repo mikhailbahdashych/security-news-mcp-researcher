@@ -32,6 +32,15 @@ from app.services.settings import COMPILE_PROMPT_VERSION, DEFAULT_COMPILE_PROMPT
 #: `maxItems` the model happens to ignore must not become nine rows.
 MAX_TAGS = 8
 
+#: The same two bounds for ``entities``, which is a *list of rows on the entry*
+#: and therefore the expensive one to get wrong: a degenerate repetition loop —
+#: an ordinary model failure — is otherwise bounded only by ``max_tokens``, i.e.
+#: thousands of ``kb_entry_entities`` rows that survive every snapshot refresh by
+#: design and have no bulk undo. Twenty-four vendors and products is more than
+#: any one article names.
+MAX_ENTITIES = 24
+MAX_ENTITY_CHARS = 120
+
 #: What the model must answer with. ``additionalProperties: false`` and a full
 #: ``required`` list are not style: the API rejects a json_schema format without
 #: them. ``new_topic`` is nullable rather than optional for the same reason.
@@ -69,13 +78,14 @@ COMPILE_SCHEMA: dict[str, Any] = {
         },
         "entities": {
             "type": "array",
+            "maxItems": MAX_ENTITIES,
             "items": {
                 "type": "object",
                 "additionalProperties": False,
                 "required": ["kind", "value"],
                 "properties": {
                     "kind": {"type": "string", "enum": ["vendor", "product"]},
-                    "value": {"type": "string"},
+                    "value": {"type": "string", "maxLength": MAX_ENTITY_CHARS},
                 },
             },
             "description": "Vendors and products the text names. CVE ids are extracted already.",
@@ -140,6 +150,8 @@ __all__ = [
     "COMPILE_SCHEMA",
     "COMPILE_SYSTEM",
     "DEFAULT_COMPILE_PROMPT",
+    "MAX_ENTITIES",
+    "MAX_ENTITY_CHARS",
     "MAX_TAGS",
     "TRUNCATION_NOTE",
     "render_compile_user",
