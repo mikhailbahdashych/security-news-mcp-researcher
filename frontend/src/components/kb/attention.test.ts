@@ -111,8 +111,8 @@ describe('needsAttention', () => {
   })
 
   it('tells a failed compile from a successful one by what the trail wrote', () => {
-    // A success writes its detail as JSON; only the three failure prefixes are
-    // failures, so a future detail format cannot be mistaken for one.
+    // A success is the only thing that writes JSON into `detail`; everything
+    // else on a compile row is `_skip`'s prose, whatever it happens to say.
     const rows = needsAttention(
       [],
       [
@@ -123,6 +123,30 @@ describe('needsAttention', () => {
     )
     expect(rows.map((row) => row.entryId)).toEqual([2, 3])
     expect(rows[1].text).toMatch(/budget is spent/)
+  })
+
+  it('recognises every compile failure, not the three with a prefix', () => {
+    // All six outcomes of `app/kb/compile.py`. The two at the bottom carry the
+    // bare `reason` — `_skip` is called with no `detail` — and used to be read
+    // as successes, which is the state a brand-new install is in.
+    const details = [
+      'refused (cyber): the model declined',
+      'unusable answer: missing "summary"',
+      'api error: HTTP 529 from the API',
+      'needs about 4000 tokens',
+      'There is no text on this entry to compile.',
+      'No Anthropic API key is configured.',
+    ]
+    const trail = details.map((detail, index) =>
+      activity({ id: 50 + index, action: 'compile', entry_id: index + 1, detail }),
+    )
+    expect(needsAttention([], trail, { maxFailures: 10 })).toHaveLength(details.length)
+  })
+
+  it('reads a compile row with no detail at all as a failure', () => {
+    // It cannot be a success: a success always carries its JSON.
+    const rows = needsAttention([], [activity({ id: 60, action: 'compile', detail: null })])
+    expect(rows.map((row) => row.kind)).toEqual(['failure'])
   })
 
   it('caps the failures — the trail is history, attention is not', () => {

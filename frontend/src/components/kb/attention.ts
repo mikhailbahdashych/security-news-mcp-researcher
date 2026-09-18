@@ -50,19 +50,29 @@ export const ATTENTION_FAILURES = 5
 /**
  * The failures the trail records, told apart from the successes in it.
  *
- * A compile writes its *success* detail as JSON (`{"applied": …}`) and its
- * failures as prose that `app/kb/compile.py` prefixes — so the prefix is the
- * test, rather than "the detail is not JSON", which would call every future
- * detail format a failure.
+ * A compile's **success** is the only thing that writes JSON into `detail`:
+ * `app/kb/compile.py` logs `json.dumps({"applied": …, "topic_ids": …})` on the
+ * one path that stored a summary, and every other path goes through `_skip`,
+ * whose `detail = detail or reason` is free prose. So JSON is the test.
+ *
+ * It used to be the other way round — three prose prefixes (`refused`,
+ * `unusable answer`, `api error`) — and it missed two of the six outcomes,
+ * including the first one a new user meets: `_skip(code="api_error")` with no
+ * key configured writes the bare sentence "No Anthropic API key is configured.",
+ * and `_skip(code="no_text")` writes "There is no text on this entry to
+ * compile." Twelve failed compiles, and the one screen whose job is to say what
+ * did not work said nothing. Prose drifts; the success format is the thing the
+ * backend changes deliberately.
  */
-const COMPILE_FAILURE = /^(refused|unusable answer|api error)\b/i
+const compiledSuccessfully = (detail: string | null): boolean =>
+  (detail ?? '').trimStart().startsWith('{')
 
 export function isFailure(row: KbActivity): boolean {
   if (row.action === 'skip' || row.action === 'budget_hit') {
     return true
   }
   if (row.action === 'compile' || row.action === 'recompile') {
-    return COMPILE_FAILURE.test((row.detail ?? '').trim())
+    return !compiledSuccessfully(row.detail)
   }
   return false
 }
