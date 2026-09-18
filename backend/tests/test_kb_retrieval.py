@@ -583,6 +583,29 @@ def test_the_recency_prior_is_off_when_the_setting_is_off():
     assert apply_recency(fused, dates, now=now, boost=1.0) == fused
 
 
+def test_the_recency_prior_displaces_a_bounded_number_of_rrf_ranks():
+    """How far from a tie-break the prior is, pinned in arithmetic.
+
+    Spec §4.4 wants recency to be "most of the relevance signal, not a tie-break",
+    so the boost is deliberately much larger than the ~1.6 % gap between
+    consecutive RRF ranks. This is the number that gets read by whoever
+    recalibrates it: a recent hit from one leg reaches the top from this far down,
+    and no further.
+    """
+    now = datetime(2026, 9, 18)
+    stale = now - timedelta(days=400)
+    ranks = list(range(1, 41))
+    fused = rrf([ranks])  # entry id == its rank in the single leg
+
+    def leader(recent: int) -> int:
+        dates = {entry_id: stale for entry_id in ranks} | {recent: now}
+        return apply_recency(fused, dates, now=now)[0][0]
+
+    # Rank 16 still wins; rank 17 does not. Fifteen places of displacement, which
+    # is what ``RECENCY_BOOST``'s comment has to say.
+    assert [rank for rank in ranks if leader(rank) == rank] == list(range(1, 17))
+
+
 def test_the_recency_prior_never_lifts_a_hit_over_an_exact_entity_hit():
     """RRF over two legs cannot exceed ``2/(k+1)``; ``ENTITY_SCORE`` is 1.0."""
     now = datetime(2026, 9, 18)

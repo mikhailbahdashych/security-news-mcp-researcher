@@ -56,10 +56,15 @@ TOPIC_K_CAP = 512
 #: An entry newer than this is "recent" for the purpose of the prior.
 RECENCY_WINDOW_DAYS = 90
 
-#: The multiplier a recent entry's fused score gets. Chosen to reorder hits that
-#: RRF placed within one rank of each other without ever crossing the exact leg:
-#: RRF over two legs cannot exceed ``2/(RRF_K + 1)`` ≈ 0.033, so even at this
-#: boost a fused hit stays two orders of magnitude below ``ENTITY_SCORE``.
+#: The multiplier a recent entry's fused score gets. Deliberately far larger than
+#: a tie-break: consecutive RRF ranks differ by ~1.6 % at ``RRF_K = 60``
+#: (``1/61`` vs ``1/62``) and this is 25 %, so a recent single-leg hit as deep as
+#: **rank 16 comes out first** — fifteen places of displacement. That is spec
+#: §4.4's "recency is most of the relevance signal, not a tie-break", and
+#: ``test_the_recency_prior_displaces_a_bounded_number_of_rrf_ranks`` is where the
+#: number is pinned. What it can never do is cross the exact leg: RRF over two
+#: legs cannot exceed ``2/(RRF_K + 1)`` ≈ 0.033, so even boosted a fused hit stays
+#: two orders of magnitude below ``ENTITY_SCORE``.
 RECENCY_BOOST = 1.25
 
 #: ``(entry_id, chunk_id, score)`` — what a leg looks like once hydrated.
