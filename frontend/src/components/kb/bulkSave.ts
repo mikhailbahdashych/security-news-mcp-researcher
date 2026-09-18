@@ -12,7 +12,11 @@
  *   and a bar keyed on the request would stop at 95%.
  * - **`done` is terminal, and it is an *event*.** Nothing after it may move the
  *   state, and the stream is never aborted once it has arrived (`generationPhase.ts`
- *   learned that on the notes generator: the body outlives the frame).
+ *   learned that on the notes generator: the body outlives the frame). This leans
+ *   on the route emitting exactly one: `run_bulk_capture` yields only `TurnStart`
+ *   and `TextDelta` and never `ev.Done`, so `kb_bulk.py`'s own terminal frame is
+ *   the only `done` on the wire. Were a second one ever added the panel would
+ *   freeze at `0 saved`, which is why "past `done` is history" is tested with two.
  * - **`error` is not the end.** A cancelled run still ends on `done`, so the
  *   error is kept beside the counts rather than replacing them. The one `error`
  *   with no `done` after it is the duplicate-job-id race.

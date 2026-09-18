@@ -79,6 +79,19 @@ describe('bulkFrame', () => {
     expect(state.error?.type).toBe('cancelled')
   })
 
+  it('ignores a second `done`, whatever it claims', () => {
+    // Insurance for a shape dependency: the panel is only correct because
+    // `run_bulk_capture` never yields `ev.Done` and the route's own terminal
+    // frame is the single `done` on the wire. A second one saying nothing was
+    // saved would otherwise freeze the panel at `0 saved`.
+    const state = run([
+      ['done', '{"saved": 12, "skipped": 0, "duplicates": 1, "entry_ids": [3, 4]}'],
+      ['done', '{"saved": 0, "skipped": 0, "duplicates": 0, "entry_ids": []}'],
+    ])
+    expect(state.saved).toBe(12)
+    expect(state.entryIds).toEqual([3, 4])
+  })
+
   it('ignores a frame it cannot read rather than losing the run', () => {
     const start = startBulk('job-1')
     expect(run([['text_delta', 'not json']], start)).toBe(start)
