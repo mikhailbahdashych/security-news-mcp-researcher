@@ -12,14 +12,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import timedelta
 
 import httpx2
 import pytest
 from feed_fixtures import fixture_text, routes_transport
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.api.deps import get_chat_client_factory, get_kb_service
-from app.db.models import Feed, FeedItem, Note
+from app.db.models import Feed, FeedItem, Note, utcnow
+from app.kb import capture as capture_module
 from app.kb import compile as compile_module
 from app.kb.capture import capture_article, log_activity
 from app.kb.models import (
@@ -390,6 +392,51 @@ async def test_a_month_old_row_is_outside_the_budget(session_factory):
 
     assert (await compile_module.month_usage(session_factory))["anthropic_input"] == 0
     assert await compile_module.budget_allows(session_factory, 10) is True
+
+
+async def test_ten_thousand_rows_of_noise_do_not_move_the_budget(session_factory):
+    """The trail is pruned oldest-first; the ledger it carries must survive that.
+
+    ``kb_activity`` gets a row per capture, per embed, per skip and per compile,
+    so a few thousand captures — one click of "Save all" is up to two hundred —
+    roll the table over inside a month. The rows that go first are the oldest,
+    which within a month are exactly the compiles whose tokens are already spent:
+    ``month_usage`` would drop, ``budget_allows`` would start saying yes again,
+    and nothing on screen would say the ceiling had gone.
+    """
+    stale = utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0) - timedelta(days=95)
+    async with session_factory() as session:
+        # Oldest first: this is what an id-ordered prune reaches for.
+        session.add(
+            KbActivity(action="compile", source="user", input_tokens=900, output_tokens=100)
+        )
+        session.add(
+            KbActivity(action="compile", source="user", input_tokens=7, output_tokens=3, at=stale)
+        )
+        session.add_all(
+            KbActivity(action="capture", source="star")
+            for _ in range(capture_module.ACTIVITY_MAX_ROWS + 500)
+        )
+        await session.commit()
+
+    # One more write is what runs the prune.
+    async with session_factory() as session:
+        await log_activity(session, "capture", source="star")
+        await session.commit()
+
+    usage = await compile_module.month_usage(session_factory)
+    assert (usage["anthropic_input"], usage["anthropic_output"]) == (900, 100)
+
+    async with session_factory() as session:
+        total = await session.scalar(select(func.count()).select_from(KbActivity))
+        old_rows = await session.scalar(
+            select(func.count()).select_from(KbActivity).where(KbActivity.at == stale)
+        )
+    # Still bounded — the exemption is a handful of rows, not a licence to grow.
+    assert total <= capture_module.ACTIVITY_MAX_ROWS + 10
+    # And a compile row from three months ago is outside the window the budget
+    # can ever read, so it is pruned like any other noise.
+    assert old_rows == 0
 
 
 # ------------------------------------------------------------- the outcomes

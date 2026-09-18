@@ -29,11 +29,11 @@ import json
 import logging
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Literal
 
 import httpx2
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import delete, func, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -70,6 +70,15 @@ DEFAULT_MIN_SNAPSHOT_CHARS = 400
 #: The activity log is a trail, not an archive; it is pruned to this many rows on
 #: every write. Read at call time so a test can lower it.
 ACTIVITY_MAX_ROWS = 10_000
+
+#: The actions whose token counters the compile budget is **derived** from
+#: (``compile.month_usage``: ``compile``/``recompile`` for Anthropic, ``embed``
+#: for Voyage — a refusal or an unusable answer is a ``compile`` row too, and
+#: carries the tokens it was billed). These are exempt from the prune inside the
+#: window ``month_usage`` can still read, because pruning is oldest-first and the
+#: oldest rows of a month are exactly the spend already made: the ceiling would
+#: silently lift itself on a busy month. Everything else is trail.
+METERED_ACTIONS = ("compile", "recompile", "embed")
 
 #: What separates two entries' notes when they are merged.
 NOTE_SEPARATOR = "\n\n---\n\n"
@@ -214,6 +223,16 @@ async def log_activity(
     return row
 
 
+def budget_floor() -> datetime:
+    """Midnight UTC on the first of **last** month — the prune's keep-line.
+
+    ``month_usage`` only ever reads the current month, so one full month of slack
+    is enough to cover a prune that runs at 00:00:01 on the first.
+    """
+    this_month = utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    return (this_month - timedelta(days=1)).replace(day=1)
+
+
 async def _prune_activity(session: AsyncSession) -> None:
     total = await session.scalar(select(func.count()).select_from(KbActivity)) or 0
     if total <= ACTIVITY_MAX_ROWS:
@@ -222,7 +241,19 @@ async def _prune_activity(session: AsyncSession) -> None:
         select(KbActivity.id).order_by(KbActivity.id.desc()).offset(ACTIVITY_MAX_ROWS - 1).limit(1)
     )
     if oldest_kept is not None:
-        await session.execute(delete(KbActivity).where(KbActivity.id < oldest_kept))
+        await session.execute(
+            delete(KbActivity).where(
+                KbActivity.id < oldest_kept,
+                # The ledger is not trail: a metered row inside the window the
+                # budget can still read stays, however old it is by id. The table
+                # is still bounded — everything else goes, and a metered row from
+                # before last month goes with it.
+                or_(
+                    KbActivity.action.not_in(METERED_ACTIONS),
+                    KbActivity.at < budget_floor(),
+                ),
+            )
+        )
 
 
 # ------------------------------------------------------------------ capture
