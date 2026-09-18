@@ -18,6 +18,7 @@ wider one would silently become several requests the resume point cannot see.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from typing import Any, Protocol, runtime_checkable
 
@@ -76,6 +77,21 @@ DEFAULT_TIMEOUT_S = 120.0
 CONNECT_TIMEOUT_S = 10.0
 
 
+def l2_normalise(vector: Sequence[float]) -> list[float]:
+    """*vector* scaled to unit length. A zero vector comes back unchanged.
+
+    The invariant every vector in this application is held to — see the
+    :class:`Embedder` protocol. Idempotent, so applying it to a provider whose
+    vectors are already unit costs one pass and changes nothing.
+    """
+    norm = math.sqrt(sum(value * value for value in vector))
+    if norm == 0.0:
+        # No direction to preserve, and dividing by it is a crash rather than a
+        # bad answer. The chunk is unusable either way; the request is not.
+        return list(vector)
+    return [value / norm for value in vector]
+
+
 @runtime_checkable
 class Embedder(Protocol):
     """What the knowledge base needs from an embedding provider.
@@ -84,6 +100,15 @@ class Embedder(Protocol):
     embed the two asymmetrically (Voyage's ``input_type``), and getting that
     backwards is the single most common RAG bug — a protocol that had one method
     would make it un-typo-able.
+
+    **Both must return L2-normalised vectors.**
+    ``capture.cosine_from_distance`` reads vec0's L2 ``distance`` as a cosine
+    with ``1 - d²/2``, which is the cosine only for unit vectors: at norm 0.5 a
+    true cosine of 1.0 reads as 0.875, and above norm 2.41 it reads negative and
+    can never clear ``kb_duplicate_threshold``. The failure is silent — no error,
+    no log line, just a near-duplicate check that stops finding anything — so
+    :class:`VoyageEmbedder` normalises rather than trusting the provider's
+    documented default, and :func:`l2_normalise` is where that is done.
     """
 
     @property
@@ -249,7 +274,11 @@ class VoyageEmbedder:
                 response.status_code,
                 f"{len(vectors)} vectors for {len(texts)} texts",
             )
-        return vectors
+        # Voyage documents unit vectors for ``output_dtype: float``, and this is
+        # what makes that an invariant of *this* application rather than a
+        # promise in someone else's changelog — one that an ``output_dimension``
+        # truncation, which is not re-normalised, would quietly break.
+        return [l2_normalise(vector) for vector in vectors]
 
     def _redact(self, message: str) -> str:
         """Never pass on a message that quotes the key back at us — nor more of
@@ -341,6 +370,7 @@ __all__ = [
     "VoyageEmbedder",
     "build_embedder",
     "discard_vectors",
+    "l2_normalise",
     "max_tokens_for",
     "plan_batches",
 ]

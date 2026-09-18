@@ -31,6 +31,7 @@ from app.kb.embeddings import (
     NullEmbedder,
     VoyageEmbedder,
     build_embedder,
+    l2_normalise,
     plan_batches,
 )
 from app.kb.models import KbActivity, KbChunk, KbEntry
@@ -56,7 +57,9 @@ def voyage_transport(
             json={
                 "object": "list",
                 "data": [
-                    {"object": "embedding", "index": index, "embedding": [0.1, 0.2, 0.3]}
+                    # Unit length, because that is what the embedder guarantees
+                    # its callers and what it would normalise these to anyway.
+                    {"object": "embedding", "index": index, "embedding": [0.6, 0.8, 0.0]}
                     for index, _ in enumerate(sent["input"])
                 ],
                 "model": sent["model"],
@@ -88,8 +91,8 @@ async def test_documents_and_queries_use_the_right_input_type() -> None:
     documents = await embedder.embed_documents(["first", "second"])
     query = await embedder.embed_query("what happened")
 
-    assert documents == [[0.1, 0.2, 0.3], [0.1, 0.2, 0.3]]
-    assert query == [0.1, 0.2, 0.3]
+    assert documents == [[0.6, 0.8, 0.0], [0.6, 0.8, 0.0]]
+    assert query == [0.6, 0.8, 0.0]
     assert [request.url.path for request in recorded] == ["/v1/embeddings", "/v1/embeddings"]
     assert [request.headers["authorization"] for request in recorded] == [f"Bearer {KEY}"] * 2
     # Honest robot UA, never a browser's.
@@ -138,14 +141,62 @@ async def test_vectors_come_back_in_the_order_the_texts_went_out() -> None:
 
     def handle(request: httpx2.Request) -> httpx2.Response:
         sent = json.loads(request.content)
+        # Distinct *unit* vectors, one per index: the embedder normalises, so a
+        # fixture that differed only in length could not tell order from scaling.
+        axes = [[1.0, 0.0], [0.0, 1.0], [0.6, 0.8]]
         data = [
-            {"index": index, "embedding": [float(index)]} for index, _ in enumerate(sent["input"])
+            {"index": index, "embedding": axes[index]} for index, _ in enumerate(sent["input"])
         ]
         return httpx2.Response(200, json={"data": list(reversed(data))})
 
     embedder = VoyageEmbedder(KEY, transport=httpx2.MockTransport(handle))
 
-    assert await embedder.embed_documents(["a", "b", "c"]) == [[0.0], [1.0], [2.0]]
+    assert await embedder.embed_documents(["a", "b", "c"]) == [[1.0, 0.0], [0.0, 1.0], [0.6, 0.8]]
+
+
+async def test_every_vector_comes_back_l2_normalised() -> None:
+    """The one invariant the near-duplicate check rests on, made ours.
+
+    ``capture.cosine_from_distance`` converts vec0's **L2** distance to a cosine
+    with ``1 - d²/2``, which is only the cosine for unit vectors. Voyage's are
+    documented to be unit already — so normalising costs nothing and is
+    idempotent — but "documented by a provider" is not something a test can pin,
+    and the degradation is silent: a vector of norm 2.5 reads as a *negative*
+    cosine and can never clear 0.92, so duplicate flagging would simply stop with
+    no error anywhere. ``output_dimension`` truncation is exactly that trapdoor.
+    """
+
+    def handle(request: httpx2.Request) -> httpx2.Response:
+        sent = json.loads(request.content)
+        return httpx2.Response(
+            200,
+            json={
+                "data": [
+                    {"index": index, "embedding": [3.0, 4.0]}
+                    for index, _ in enumerate(sent["input"])
+                ]
+            },
+        )
+
+    embedder = VoyageEmbedder(KEY, transport=httpx2.MockTransport(handle))
+
+    assert await embedder.embed_documents(["a", "b"]) == [[0.6, 0.8], [0.6, 0.8]]
+    # The query leg too — it is the same request path, and a non-unit query
+    # vector skews every distance the KNN returns.
+    assert await embedder.embed_query("what happened") == [0.6, 0.8]
+    # Idempotent: an already-unit vector comes back untouched.
+    assert l2_normalise([0.6, 0.8]) == [0.6, 0.8]
+
+
+async def test_a_zero_vector_is_not_divided_by_zero() -> None:
+    """A provider that answers with all zeros is useless, not a ZeroDivisionError."""
+
+    def handle(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, json={"data": [{"index": 0, "embedding": [0.0, 0.0]}]})
+
+    assert await VoyageEmbedder(KEY, transport=httpx2.MockTransport(handle)).embed_documents(
+        ["a"]
+    ) == [[0.0, 0.0]]
 
 
 # -------------------------------------------------------------- the batcher

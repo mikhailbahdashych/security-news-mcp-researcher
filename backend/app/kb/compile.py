@@ -16,8 +16,8 @@ get wrong, and why each one is here:
   in a new one. SQLite has a single writer and this call takes seconds.
 * **The model's answer is untrusted.** Topic ids it invented are dropped, tags
   and entities are capped in count and in length, entity kinds are checked
-  against the column's own CHECK constraint, and ``new_topic`` creates nothing — the user confirms it through
-  the topic route that already exists.
+  against the column's own CHECK constraint, and ``new_topic`` creates nothing —
+  the user confirms it through the topic route that already exists.
 * **The summary is never evidence.** It is stored as a ``summary`` chunk so an
   entry-level match is cheap, and both search legs default to
   ``chunk_kinds=('body',)``, so nothing the model wrote is ever quoted back to a

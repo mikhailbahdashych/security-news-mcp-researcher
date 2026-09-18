@@ -1059,14 +1059,22 @@ def title_similarity(a: str, b: str) -> float:
 
 
 def cosine_from_distance(distance: float) -> float:
-    """vec0's ``distance`` as a cosine similarity, for **unit** vectors.
+    """vec0's ``distance`` as a cosine similarity.
 
     ``kb_chunk_vec`` is created without ``distance_metric=``, and sqlite-vec's
     default is **L2**, not cosine — so the conversion is ``1 - d²/2`` and *not*
-    the ``1 - d`` that a cosine-metric table would want. Voyage returns normalised
-    vectors, which is what makes the identity hold at all. Getting this backwards
+    the ``1 - d`` that a cosine-metric table would want. Getting this backwards
     flags everything or nothing, silently, which is why it is one named function
     with a test on it rather than an expression inside the lookup.
+
+    **Precondition: both vectors are L2-normalised**, which is the identity's
+    whole basis. It is not assumed of the provider: every embedder in this
+    application normalises what it returns
+    (:func:`app.kb.embeddings.l2_normalise`, applied in ``VoyageEmbedder._post``
+    and stated in the :class:`~app.kb.embeddings.Embedder` protocol). Without it
+    the answer is an under-estimate that never invents a duplicate but quietly
+    stops finding one: at norm 0.5 a true cosine of 1.0 reads 0.875, and above
+    norm 2.41 it reads negative and can never clear any threshold.
     """
     return 1.0 - (distance * distance) / 2.0
 
