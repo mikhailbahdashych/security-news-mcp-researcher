@@ -11,6 +11,7 @@ from fakes.embedder import FakeEmbedder
 
 from app.db.models import utcnow
 from app.kb.embeddings import NullEmbedder
+from app.kb.fts import fts_query
 from app.kb.models import KbChunk, KbEntry, KbEntryEntity, KbEntryTopic, Topic
 from app.kb.retrieval import (
     ENTITY_SCORE,
@@ -23,7 +24,13 @@ from app.kb.retrieval import (
 )
 from app.kb.schema import VEC_DIMENSIONS
 from app.kb.service import KbService
-from app.kb.store import SearchFilters, SqliteKnowledgeStore, VectorRow, published_day
+from app.kb.store import (
+    DEFAULT_LEG_SIZE,
+    SearchFilters,
+    SqliteKnowledgeStore,
+    VectorRow,
+    published_day,
+)
 from app.services import settings as settings_service
 
 # -- pure ----------------------------------------------------------------
@@ -527,8 +534,14 @@ class _CountingStore(SqliteKnowledgeStore):
         return await super().knn(query_vec, k, filters=filters)
 
 
-async def _ranked(db_session, store, count: int, *, topics=()) -> list[KbEntry]:
-    """*count* entries, one chunk each, at increasing distance from the origin."""
+async def _ranked(
+    db_session, store, count: int, *, topics: tuple[int, ...]
+) -> tuple[list[KbEntry], int]:
+    """*count* entries, one chunk each, at increasing distance from the origin.
+
+    ``topics`` are the indexes given the one topic this returns the id of — every
+    caller is a topic-widening test, so there is one return shape.
+    """
     from sqlalchemy import select as sa_select
 
     entries: list[KbEntry] = []
@@ -554,15 +567,14 @@ async def _ranked(db_session, store, count: int, *, topics=()) -> list[KbEntry]:
             ]
         )
         entries.append(entry)
-    if topics:
-        topic = Topic(name="supply chain")
-        db_session.add(topic)
-        await db_session.flush()
-        for index in topics:
-            db_session.add(KbEntryTopic(entry_id=entries[index].id, topic_id=topic.id))
-        await db_session.commit()
-        return entries, topic.id
-    return entries
+
+    topic = Topic(name="supply chain")
+    db_session.add(topic)
+    await db_session.flush()
+    for index in topics:
+        db_session.add(KbEntryTopic(entry_id=entries[index].id, topic_id=topic.id))
+    await db_session.commit()
+    return entries, topic.id
 
 
 def test_the_recency_prior_reorders_two_otherwise_equal_hits():
@@ -632,9 +644,14 @@ async def test_the_recency_prior_reaches_hybrid_search(session_factory, db_sessi
     plain = await hybrid_search(store, NullEmbedder(), "liblzma", recency_boost=False)
 
     assert [hit.entry.id for hit in boosted][0] == new.id
-    # Without the prior the keyword leg's own order stands, and bm25 ranks the
-    # two identical passages by rowid.
-    assert [hit.entry.id for hit in plain] == [old.id, new.id]
+    # Without the prior the keyword leg's own order stands, whatever bm25 makes
+    # of two identical passages — asserted against the leg rather than against
+    # today's tie-break, which is by rowid and is not a promise.
+    rows = await store.keyword(fts_query("liblzma"), DEFAULT_LEG_SIZE, filters=SearchFilters())
+    _, chunks = await store.load([], [chunk_id for chunk_id, _ in rows])
+    leg_order = list(dict.fromkeys(chunks[chunk_id].entry_id for chunk_id, _ in rows))
+    assert set(leg_order) == {old.id, new.id}
+    assert [hit.entry.id for hit in plain] == leg_order
 
 
 async def test_the_service_honours_the_recency_setting_on_both_search_paths(

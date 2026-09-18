@@ -11,7 +11,10 @@ Three legs, in this order:
 
 Each leg collapses to its **best chunk per entry before fusion**, so a 13-chunk
 advisory occupies one slot in each top-50 rather than thirteen, and reciprocal
-rank fusion then runs over entry ids rather than chunk ids. A recency prior is
+rank fusion then runs over entry ids rather than chunk ids. The two legs are the
+same size except when a topic filter widened the vector leg's ``k`` (see
+:func:`_vector_leg`): that leg is then longer, and RRF simply ranks its tail
+below everything the shorter leg found. A recency prior is
 the last thing applied to the fused score, because for a security-news knowledge
 base recency is most of the relevance signal rather than a tie-break.
 

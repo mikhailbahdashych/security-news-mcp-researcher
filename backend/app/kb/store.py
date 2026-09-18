@@ -135,8 +135,9 @@ class SqliteKnowledgeStore:
         self._session_factory = session_factory
         #: Memoised :meth:`_has_model_authored_entries`. A store is built per
         #: ``KbService.store`` access and lives for one search, so there is no
-        #: invalidation to get wrong — and one search runs the KNN up to four
-        #: times (the adaptive ``k``), which is what the cache is for.
+        #: invalidation to get wrong — and one search runs the KNN up to five
+        #: times (the adaptive ``k``: 50, 100, 200, 400, 512), which is what the
+        #: cache is for.
         self._model_authored: bool | None = None
 
     # -- vectors ---------------------------------------------------------
@@ -219,6 +220,11 @@ class SqliteKnowledgeStore:
             shared.append("reviewed = 1")
         if filters.since is not None:
             # vec0 has no >=; for integers "> day - 1" is the same thing.
+            # Whole days, because ``published_day`` is an integer column and the
+            # schema is frozen: a ``since`` with a time of day is rounded down
+            # here and compared exactly by the keyword and entity legs, so the
+            # three agree at a date boundary and the vector leg is the generous
+            # one within a day.
             shared.append("published_day > :day")
             params["day"] = published_day(filters.since) - 1
 
