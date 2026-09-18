@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from itertools import product
 from typing import Protocol
 
@@ -40,6 +40,18 @@ EPOCH = datetime(1970, 1, 1)
 DEFAULT_LEG_SIZE = 50
 
 
+def naive_utc(moment: datetime) -> datetime:
+    """The app's one datetime spelling: naive UTC (``app.db.models.utcnow``).
+
+    Every stored ``DATETIME`` is naive UTC, but ``POST /api/kb/search`` accepts
+    ``since=2026-01-01T00:00:00Z`` and FastAPI hands that over as an *aware*
+    datetime. Subtracting the naive epoch from it raises, and binding it to a
+    ``DateTime`` column silently drops the offset instead — so both legs
+    normalise here first rather than each discovering it separately.
+    """
+    return moment.astimezone(UTC).replace(tzinfo=None) if moment.tzinfo is not None else moment
+
+
 def published_day(moment: datetime | None) -> int:
     """Days since the epoch, the only time unit vec0 can compare.
 
@@ -50,7 +62,7 @@ def published_day(moment: datetime | None) -> int:
     to the epoch, which every ``since`` filter excludes; that is a dropped row, not
     a preserved one, and the fix is to give the caller a date, not to change this.
     """
-    return 0 if moment is None else (moment - EPOCH).days
+    return 0 if moment is None else (naive_utc(moment) - EPOCH).days
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,6 +103,8 @@ class KnowledgeStore(Protocol):
 
     async def delete_vectors(self, chunk_ids: Sequence[int]) -> None: ...
 
+    async def set_reviewed(self, entry_id: int, reviewed: bool) -> int: ...
+
     async def knn(
         self, query_vec: Sequence[float], k: int, *, filters: SearchFilters
     ) -> list[tuple[int, float]]: ...
@@ -119,6 +133,11 @@ class SqliteKnowledgeStore:
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._session_factory = session_factory
+        #: Memoised :meth:`_has_model_authored_entries`. A store is built per
+        #: ``KbService.store`` access and lives for one search, so there is no
+        #: invalidation to get wrong — and one search runs the KNN up to four
+        #: times (the adaptive ``k``), which is what the cache is for.
+        self._model_authored: bool | None = None
 
     # -- vectors ---------------------------------------------------------
 
@@ -239,13 +258,32 @@ class SqliteKnowledgeStore:
         return ordered[:k]
 
     async def _has_model_authored_entries(self) -> bool:
+        if self._model_authored is None:
+            async with self._session_factory() as session:
+                found = await session.scalar(
+                    select(KbEntry.id)
+                    .where(KbEntry.authorship == "model", KbEntry.deleted_at.is_(None))
+                    .limit(1)
+                )
+            self._model_authored = found is not None
+        return self._model_authored
+
+    async def set_reviewed(self, entry_id: int, reviewed: bool) -> int:
+        """Rewrite one entry's ``reviewed`` metadata; returns the rows changed.
+
+        vec0 metadata is written once, at upsert, so without this a finding the
+        user has just reviewed stays invisible to the vector leg until something
+        re-embeds it. ``authorship`` never changes after capture, and a delete
+        takes the chunks (and their vectors, by trigger) with it, so ``reviewed``
+        is the only column with anything to sync.
+        """
         async with self._session_factory() as session:
-            found = await session.scalar(
-                select(KbEntry.id)
-                .where(KbEntry.authorship == "model", KbEntry.deleted_at.is_(None))
-                .limit(1)
+            result = await session.execute(
+                text("UPDATE kb_chunk_vec SET reviewed = :reviewed WHERE entry_id = :entry_id"),
+                {"reviewed": int(reviewed), "entry_id": entry_id},
             )
-        return found is not None
+            await session.commit()
+        return result.rowcount or 0
 
     # -- keywords --------------------------------------------------------
 
@@ -307,7 +345,7 @@ class SqliteKnowledgeStore:
             clauses.append("e.review_status = 'reviewed'")
         if filters.since is not None:
             clauses.append("COALESCE(e.published_at, e.captured_at) >= :since")
-            params["since"] = filters.since
+            params["since"] = naive_utc(filters.since)
         if filters.topic_ids:
             names = {f"topic_{n}": value for n, value in enumerate(filters.topic_ids)}
             clauses.append(
@@ -422,5 +460,6 @@ __all__ = [
     "SearchFilters",
     "SqliteKnowledgeStore",
     "VectorRow",
+    "naive_utc",
     "published_day",
 ]
