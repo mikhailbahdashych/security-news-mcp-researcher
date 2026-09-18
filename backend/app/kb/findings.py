@@ -50,6 +50,11 @@ logger = logging.getLogger(__name__)
 #: How much of the question becomes the entry's title.
 TITLE_MAX_CHARS = 200
 
+#: How much of the question and of the answer reach the snapshot, each. Roughly a
+#: long feature article apiece, which is far more than a useful finding is and far
+#: less than one chat turn can produce.
+SNAPSHOT_MAX_CHARS = 60_000
+
 #: What a finding is filed under in ``kb_activity``.
 FINDING_TRIGGER = "finding"
 
@@ -65,21 +70,35 @@ def finding_title(question: str) -> str:
     return " ".join(first.split())[:TITLE_MAX_CHARS] or "Research finding"
 
 
+def _cut(text: str) -> str:
+    """*text*, at most :data:`SNAPSHOT_MAX_CHARS` long, and honest about it."""
+    stripped = (text or "").strip()
+    if len(stripped) <= SNAPSHOT_MAX_CHARS:
+        return stripped
+    return stripped[:SNAPSHOT_MAX_CHARS].rstrip() + "\n\n… (truncated)"
+
+
 def render_finding(question: str, answer: str, sources: Sequence[ExtraSource]) -> str:
     """The snapshot text: three Markdown sections, in the order they happened.
 
     Markdown, because that is what every other snapshot in the knowledge base is
     and what the chunker splits on. Never HTML: nothing in this application
     renders model output as markup.
+
+    Both prose sections are capped. Nothing else in the application writes an
+    entry this way — an article is bounded by ``MAX_FETCH_BYTES`` — but an answer
+    is ``MAX_TOKENS`` *per API turn* and ``max_tool_turns`` defaults to twelve, so
+    by construction one chat turn could put a megabyte of prose into a snapshot,
+    chunk it into hundreds of pieces and spend a real Voyage bill on it.
     """
     lines = [
         "## Question",
         "",
-        (question or "").strip(),
+        _cut(question),
         "",
         "## Answer",
         "",
-        (answer or "").strip(),
+        _cut(answer),
         "",
         "## Sources",
         "",

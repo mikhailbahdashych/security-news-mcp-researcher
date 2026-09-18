@@ -130,6 +130,21 @@ def test_the_snapshot_is_question_answer_and_sources_as_markdown():
     assert "https://example.test/b" in text
 
 
+def test_the_snapshot_is_capped_and_says_so():
+    """One chat turn is `MAX_TOKENS` *per API turn* over up to twelve tool turns,
+    so an uncapped snapshot is a megabyte of prose, hundreds of chunks and a real
+    Voyage bill — from one question. Nothing else in the app writes an entry this
+    way: an article is bounded by ``MAX_FETCH_BYTES``."""
+    cap = findings_module.SNAPSHOT_MAX_CHARS
+    text = render_finding("q" * (cap * 2), "a" * (cap * 2), [ExtraSource(url="https://e.test/x")])
+
+    assert text.count("… (truncated)") == 2
+    assert text.count("q") <= cap + len("## Question")
+    assert text.count("a") <= cap + len("## Answer")
+    # Untouched below the cap — the common case must not gain a marker.
+    assert "… (truncated)" not in render_finding(QUESTION, ANSWER, [])
+
+
 # ------------------------------------------------------------- capture_finding
 
 
