@@ -391,6 +391,10 @@ async def update_note(
     await session.commit()
     await session.refresh(note)
     read = await _read(session, note)
+    # Same reason as the star route: the response is built, and the read
+    # transaction ``refresh`` reopened must not span the capture's outbound
+    # embedding call (``app/kb/capture.py``'s header).
+    await session.commit()
     await capture_note_if_enabled(kb, note_id)
     return read
 

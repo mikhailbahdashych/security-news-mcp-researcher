@@ -76,6 +76,11 @@ async def set_item_status(
     await session.commit()
     await session.refresh(item)
     read = _to_read(item, await items_service.feed_titles(session))
+    # The response is built; this session has nothing left to do. Committing it
+    # here rather than at the end of the request is what keeps the read
+    # transaction ``refresh`` reopened from spanning the capture's outbound
+    # embedding call — the rule ``app/kb/capture.py``'s header states.
+    await session.commit()
     if payload.status == "starred":
         await capture_star_if_enabled(kb, item_id)
     return read
