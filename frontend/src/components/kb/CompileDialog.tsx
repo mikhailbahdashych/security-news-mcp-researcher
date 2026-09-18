@@ -39,7 +39,9 @@ export interface CompileDialogProps {
  */
 export default function CompileDialog({ entryIds, onClose, onOpen }: CompileDialogProps) {
   const queryClient = useQueryClient()
-  const ids = entryIds.slice(0, KB_COMPILE_BATCH_MAX)
+  // De-duplicated before the slice: the results are keyed on `entry.id`, and a
+  // repeated id would collide on the React key as well as being priced twice.
+  const ids = [...new Set(entryIds)].slice(0, KB_COMPILE_BATCH_MAX)
 
   const compile = useMutation({
     mutationFn: () => compileBatch(ids),
@@ -74,7 +76,10 @@ export default function CompileDialog({ entryIds, onClose, onOpen }: CompileDial
           : 'Summaries, topics, tags and entities, written by the model.'
       }
       width="lg"
-      onClose={onClose}
+      // Escape and a backdrop click close a dialog too, and Cancel being
+      // disabled did not stop either — so a batch that is billing right now
+      // could lose the only place it had to report to.
+      onClose={compile.isPending ? () => undefined : onClose}
       footer={
         results ? (
           <Button variant="primary" onClick={onClose}>
