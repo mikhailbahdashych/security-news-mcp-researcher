@@ -271,7 +271,12 @@ function KnowledgeTimeline({ embedded, onOpen, list, onList }: TimelineProps) {
       </div>
 
       <NeedsAttention
-        entries={shown}
+        // The timeline, plus the hits when one is searching — never the hits
+        // alone. The strip is a list of chores, and typing into the search box
+        // silently changing which chores you have is the one thing it must not
+        // do. (`needsAttention` claims one row per entry id, so the overlap
+        // between the two lists costs nothing.)
+        entries={hits ? [...entries, ...shown] : entries}
         deleted={deleted.data?.entries ?? []}
         activity={activity.data ?? []}
         embeddingsConfigured={stats.data?.embeddings_configured ?? false}
