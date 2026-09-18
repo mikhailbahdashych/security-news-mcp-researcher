@@ -6,8 +6,9 @@ from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query, status
 
-from app.api.deps import DbSession
+from app.api.deps import DbSession, KbServiceDep
 from app.db.models import FeedItem
+from app.kb.service import capture_star_if_enabled
 from app.schemas.items import (
     BulkStatusRequest,
     BulkStatusResponse,
@@ -62,14 +63,22 @@ async def _load_item(session: DbSession, item_id: int) -> FeedItem:
 
 @router.patch("/items/{item_id}", response_model=FeedItemRead)
 async def set_item_status(
-    item_id: int, payload: ItemStatusUpdate, session: DbSession
+    item_id: int, payload: ItemStatusUpdate, session: DbSession, kb: KbServiceDep
 ) -> FeedItemRead:
-    """Star, dismiss or restore one item. An unknown status is a 422."""
+    """Star, dismiss or restore one item. An unknown status is a 422.
+
+    Starring is also the knowledge base's main capture trigger. It runs **after**
+    the status has committed and swallows its own failures into a ``kb_activity``
+    row, so a paywall or a 403 can never cost the user the star they pressed.
+    """
     item = await _load_item(session, item_id)
     item.status = payload.status
     await session.commit()
     await session.refresh(item)
-    return _to_read(item, await items_service.feed_titles(session))
+    read = _to_read(item, await items_service.feed_titles(session))
+    if payload.status == "starred":
+        await capture_star_if_enabled(kb, item_id)
+    return read
 
 
 @router.post("/items/bulk-status", response_model=BulkStatusResponse)

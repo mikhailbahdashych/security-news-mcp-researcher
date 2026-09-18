@@ -258,6 +258,12 @@ class McpToolPref(Base):
     created_at: Mapped[datetime] = _created_at()
 
 
+# Imported for its side effect: the knowledge-base tables register themselves on
+# ``Base.metadata`` here, so ``create_all`` sees them without every caller having
+# to remember a second import. It has to come after ``Base`` is defined, which is
+# why it is down here rather than at the top of the file.
+from app.kb import models as kb_models  # noqa: E402, F401
+
 __all__ = [
     "Base",
     "Feed",

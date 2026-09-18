@@ -10,6 +10,7 @@ from httpx2 import ASGITransport
 
 from app.api.deps import get_anthropic_client
 from app.config import Settings
+from app.kb import schema as kb_schema
 from app.services import settings as settings_service
 
 RAW_KEY = "sk-ant-api03-supersecretvalue-a1b2"
@@ -43,6 +44,10 @@ async def test_get_settings_returns_seeded_defaults(client: httpx2.AsyncClient) 
         "note_template": settings_service.DEFAULT_NOTE_TEMPLATE,
         "system_prompt_extra": "",
         "feed_timeout_s": 15,
+        "kb_capture_starred": True,
+        "kb_capture_notes": True,
+        "kb_min_snapshot_chars": 400,
+        "kb_schema_version": kb_schema.current_schema_version(),
     }
 
 

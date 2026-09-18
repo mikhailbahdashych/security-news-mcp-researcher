@@ -18,6 +18,7 @@ import {
   type RefreshResponse,
   type StatusFilter,
 } from '../api/inbox'
+import { kbQueryKey } from '../api/kb'
 import type { ChatNavigationState } from './ChatPage'
 import type { EmbeddablePageProps } from '../components/ui/PageHost'
 import BulkBar from '../components/inbox/BulkBar'
@@ -128,9 +129,16 @@ export default function InboxPage({ embedded = false }: EmbeddablePageProps) {
     },
   })
 
+  // Starring is the knowledge base's main capture trigger, and the backend
+  // captures inside the same request — so by the time either of these resolves
+  // there may be a new entry, and the Knowledge pane (which can be on screen
+  // beside this one) would otherwise sit on a list that predates it.
   const triage = useMutation({
     mutationFn: ({ id, next }: { id: number; next: ItemStatus }) => setItemStatus(id, next),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['items'] }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['items'] })
+      await queryClient.invalidateQueries({ queryKey: kbQueryKey })
+    },
   })
 
   const bulk = useMutation({
@@ -138,6 +146,7 @@ export default function InboxPage({ embedded = false }: EmbeddablePageProps) {
     onSuccess: async () => {
       setSelected(new Set())
       await queryClient.invalidateQueries({ queryKey: ['items'] })
+      await queryClient.invalidateQueries({ queryKey: kbQueryKey })
     },
   })
 

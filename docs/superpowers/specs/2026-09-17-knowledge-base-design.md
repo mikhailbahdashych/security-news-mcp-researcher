@@ -864,8 +864,13 @@ string in `kb_activity.detail`; the global-search contract grows a fourth key.
   the sizes this KB will reach, and the design accepts it to ~100 000 chunks. **The
   measured ceiling is recorded by the Phase 2 store task**, which benchmarks 20 000
   synthetic chunks and writes the milliseconds into the PR body and back into this
-  section; Phase 1's keyword benchmark does the same for FTS5. The v1 acceptance
-  criterion ("200 chunks, under 100 ms") measured nothing.
+  section. The v1 acceptance criterion ("200 chunks, under 100 ms") measured nothing.
+
+  **Measured, Phase 1 (keyword leg, FTS5).** 20 000 chunks across 2 000 entries,
+  macOS arm64, CPython 3.13 / SQLite 3.47.1, a real on-disk WAL database: insert
+  **3.8 s**, `MATCH` + `bm25()` + the filter join, top 50 — **p50 24.5 ms, p95
+  26.3 ms** over 100 queries. Reproduce with
+  `KB_BENCHMARK=1 uv run pytest tests/test_kb_benchmark.py -s`.
 - **No ANN, and no plan to add one.** If the KB ever outgrows brute force, the exit
   is the `KnowledgeStore` interface: `kb_entries`, `kb_snapshots`, `kb_chunks`,
   `kb_entry_entities` and the topic tables are ordinary SQLite tables that survive

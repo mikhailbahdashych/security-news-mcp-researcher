@@ -30,12 +30,28 @@ is on screen in either pane, because the rail carries the chat history now.
 | `/chat`, `/chat/:id` | `pages/ChatPage.tsx` | The research view: transcript of turns, live stream. The chat list is in the rail, not here. |
 | `/notes` | `pages/Notes.tsx` | Note list + the generate dialog |
 | `/notes/:id` | `pages/NoteDetail.tsx` | Markdown viewer/editor, sources, copy/download |
+| `/knowledge`, `/knowledge/:id` | `pages/Knowledge.tsx` | The captured timeline, its search, and one entry in full |
 | `/settings` | `pages/Settings.tsx` | Layout, archived chats, API key, model, toggles, MCP panel |
+
+`components/ui/ErrorBoundary.tsx` is the **only class component** in the app — catching
+a render error is the one thing hooks cannot do. `App` wraps **each pane** in one (the routed
+pane with `resetKey={location.pathname}`, pane B keyed on `paneB`, so navigating away is
+a fresh attempt and one bad payload cannot wedge the app until a reload — `resetKey`
+clears a caught error **without remounting**, because a `key` on the pathname would
+remount the page on `/chat` → `/chat/12` and `/knowledge/7` → `/knowledge`, losing the
+live turn's optimistic state and the list filters), `SettingsSection` wraps every section's
+body, `Settings`' shell wraps the sections together, and the Knowledge page wraps
+each of its two modes (keyed, so opening another entry is a fresh attempt). The reason is
+version skew: this bundle and the backend it talks to need not agree, and one unguarded
+read of a payload — `stats.index`, `kb_schema_version` — used to unmount the **whole
+tree**, so a stats row nobody was looking at took the Inbox, the chat and the rail with
+it. The fallback is one line, deliberately: React already logs the error, and there is
+nothing to retry.
 
 `pages/Page.tsx` is the container every page but Research sits in: it owns the scroll
 and the column width (`PAGE_WIDTH` in `ui/classes.ts`). Research fills its pane and
 scrolls its answer column itself. Components are grouped by feature:
-`components/{inbox,chat,notes,settings}/`, plus the shared `components/ui/` (the
+`components/{inbox,chat,notes,kb,settings}/`, plus the shared `components/ui/` (the
 primitives `Card`, `Dialog`, `ConfirmDialog`, `GlobalSearch`, `Select`, `Input`, … and
 the preference modules `layout.ts`, `railState.ts`, `theme.ts`, `storage.ts`,
 `modal.ts`, `searchKeys.ts`) and `components/BackendStatus.tsx` (rendered at the foot
@@ -44,8 +60,8 @@ contexts.
 
 ### Split view and the `embedded` contract
 
-`ui/layout.ts` holds the four `PAGE_KEYS` (`inbox` / `research` / `notes` /
-`settings`), `routeForPage`, `pageFromPath` and the stored `LayoutState`
+`ui/layout.ts` holds the five `PAGE_KEYS` (`inbox` / `research` / `notes` /
+`knowledge` / `settings`), `routeForPage`, `pageFromPath` and the stored `LayoutState`
 (`{split, paneB}`). With `split` on, the shell renders the router's `<Routes>`
 in the left pane and `<PageHost page={paneB} embedded />` in the right one. There is no
 stored left pane: the URL is the only statement of what the left pane shows.
@@ -54,7 +70,10 @@ stored left pane: the URL is the only statement of what the left pane shows.
 their own. So every page accepts `EmbeddablePageProps` (`ui/PageHost.tsx`) and, when
 `embedded` is true, must keep its own selection in React state — **no `useParams`, no
 `useSearchParams`, no navigation**. `ChatPage` keeps `embeddedSessionId`; `Notes` keeps
-`openNoteId` and renders `NoteDetailPage embedded noteId=… onBack=…` itself; `Inbox`
+`openNoteId` and renders `NoteDetailPage embedded noteId=… onBack=…` itself; `Knowledge`
+keeps `openId` and renders `EntryDetail embedded onBack=…` in place (its rows become
+buttons rather than `<Link>`s, and `EntryDetail`'s back-links go flat for the same
+reason — following one would swap the *other* pane out); `Inbox`
 ignores the deep-link query params. Everything else (fetching, dialogs, mutations) is
 identical in both modes. `Settings` is the sanctioned exception: it ignores `embedded`
 entirely, because it edits app state rather than a selection, and its Layout section
@@ -142,13 +161,15 @@ predicate a page navigates away on — a 404 means the thing is gone, while a ba
 that is down throws a `TypeError` out of `fetch` and must not lose the user's URL.
 
 One module per domain — `inbox.ts`, `chat.ts`, `notes.ts`, `search.ts`, `settings.ts`,
-`mcp.ts` — each exporting the response *interfaces* (mirroring the backend pydantic
+`mcp.ts`, `kb.ts` — each exporting the response *interfaces* (mirroring the backend pydantic
 schemas), the **query keys**, and thin request functions. Query keys are exported
 constants/factories, never inline literals: `feedsQueryKey`, `itemsQueryKey(filters)`,
 `sessionsQueryKey`/`sessionsListKey(filters)`/`sessionQueryKey(id)`,
 `notesQueryKey`/`notesListKey(q)`/`noteQueryKey(id)`, `searchQueryKey(q)`,
 `settingsQueryKey`, `modelsQueryKey`, `mcpServersQueryKey`, `mcpToolsQueryKey`,
-`runningSessionsKey` (`['sessions', 'running']`).
+`runningSessionsKey` (`['sessions', 'running']`),
+`kbQueryKey`/`kbEntriesKey(filters)`/`kbSearchKey(q, filters)`/`kbEntryKey(id)`/
+`kbStatsKey`/`kbTopicsKey`.
 A bare prefix (`['sessions']`, `['notes']`) exists so one `invalidateQueries` refreshes
 every filtered variant under it — a rename or a delete cannot know which filter is on
 screen.
@@ -159,7 +180,28 @@ notes — `getNextPageParam: page => page.next_cursor ?? undefined`), `useMutati
 
 `lib/dates.ts::parseUtc(value)` — the backend stores **naive UTC**, so a timestamp
 arrives without a zone designator and `new Date(...)` would read it as local time.
-Every date must go through `parseUtc`. (It used to live in `api/inbox.ts`.)
+Every date must go through `parseUtc`. (It used to live in `api/inbox.ts`.) Beside it,
+`dayLabel(timestamp)` is the one rendered day in the app (`16 Sep 2026`, built from the
+parts so the browser locale cannot reorder or translate it) and `groupByDay(rows,
+stampOf)` cuts a server-ordered list into days on that label — the chat list and the
+Knowledge timeline both go through it. `stampOf` returns the **timestamp**: handing it
+a label that `dayLabel` already rendered re-parses `16 Sep 2026` as midnight UTC, which
+V8 accepts and which slips every header a day west of Greenwich.
+
+`lib/highlight.ts::splitOnQuery(text, query)` — the query marked inside a plain-text
+string, returned as parts for the caller to render as `<mark>`. Parts rather than
+markup because a captured headline is text somebody else wrote: `GlobalSearch` and the
+Knowledge timeline both mark their snippets this way, and neither may reach for
+`dangerouslySetInnerHTML`. **Which of the two you want depends on the backend that
+found the row**: `GlobalSearch` is `LIKE '%q%'`, so the whole query really is in the
+text and `splitOnQuery` is right; the KB is FTS5, handed `"a" AND "b"`, so a hit can
+match two words a paragraph apart and the timeline uses `splitOnTerms`, which marks each
+whitespace-separated term and never re-splits a run another term already claimed.
+
+`lib/urls.ts::hostOf(url)` — the host without `www.`, `null` when it is not a URL. It
+lived in `api/chat.ts` while the transcript's source cards were its only caller; the
+knowledge base names its sources the same way, and a helper with two callers belongs to
+neither module.
 
 `lib/useDebouncedValue.ts` — every search box drives a query key, so without it each
 keystroke is its own request and its own cache entry. Used by `GlobalSearch`, `Inbox`,
@@ -520,6 +562,99 @@ inline emphasis from the API's excerpt so a two-line clamp reads as prose. It is
 deliberately **not** a parser — it runs on a preview usually cut mid-sentence.
 `components/notes/noteDate.ts` formats through `parseUtc`.
 
+## Knowledge (`pages/Knowledge.tsx`, `components/kb/`, `api/kb.ts`)
+
+The captured layer: everything the app kept a searchable copy of. Phase 1 of
+`docs/superpowers/specs/2026-09-17-knowledge-base-design.md` — a keyword knowledge base;
+the vector leg and the compile step arrive later and the page is already built to show
+which leg answered.
+
+- **One page, two modes.** `/knowledge` is the timeline and `/knowledge/:id` is one
+  entry; embedded, the selection is `openId` in React state and `EntryDetail` renders in
+  place. The id is read with `parseEntryId`, never `Number()`: `Number('abc')` is `NaN`
+  and both it and `1.5` reach the API as a **422**, a status `isNotFound` cannot act on,
+  so the page would sit on a dead URL instead of leaving it.
+- **Listing and searching are one list.** Under `KB_MIN_SEARCH_CHARS` (2) the timeline
+  stands; above it `POST /kb/search` answers, and the rows carry a snippet and a
+  `keyword` / `vector` / `both` / `exact` marker (`matchMarker`, which shows an unknown
+  leg from a newer backend verbatim rather than hiding a real hit). Hits are **not** cut
+  into days: they are ordered by score, and a date header over them would lie about the
+  ordering. The filters (kind, date, topic chips, entity) narrow both legs, and the
+  **list state lives in `KnowledgePage`, above the entry view** — scanning several hits
+  for one search is what the page is for, and unmounting the timeline to show an entry
+  would empty the box every time.
+- **The entity box is the exact-identifier leg.** It sends `entity=cve:CVE-…`, and
+  `entityFilter` is what turns what was typed into that: the API reads a value with no
+  `kind:` as *no filter at all*, so an unqualified word is refused rather than silently
+  widening the search, and a bare CVE id is qualified for you because that is the form
+  people paste. Refusing to send is only half of it: `entityHint` — over the **debounced**
+  text, so it does not flash through every prefix — draws the line under the box that says
+  why nothing narrowed. The API now answers the same text with a 422, which is exactly
+  what this box exists to keep the user from meeting.
+- **`next_cursor` belongs to the list branch alone** — the backend drops it with the
+  absent leg when the answer is a search, so `listEntries` normalises it back to `null`.
+- **The timeline dates rows on `published_at ?? captured_at`** (`entryTimestamp`),
+  because that is the `COALESCE` the backend orders by — group on anything else and a
+  row lands under a header it did not sort into.
+- **`GET /kb/entries` carries one leg, never both.** The backend *drops* the absent key,
+  so `entries === undefined` means "that answer was a search", not "the list is empty".
+- **Capture is a side effect of other pages.** Starring an item and generating a note
+  capture server-side, inside the request that did it, so `Inbox`'s triage mutations
+  invalidate `kbQueryKey` as well as `['items']` — in the split view the Knowledge pane
+  is often the one on screen beside them.
+- **The notes editor autosaves.** `components/kb/autosave.ts::autosaveDecision` is the
+  tested decision (typing / clean / in-flight / failed / save) and `autosaveLabel` the
+  line under the box; a PATCH is never issued while one is in flight, because two writes
+  over one field can land out of order and the loser is the newer text. **A failure is
+  retried by the next edit, never by the effect**: mutations do not inherit the app's
+  `retry: 1`, and the effect re-fires whenever the decision flips, so a permanent 422 (or
+  a backend that is not running) was PATCHed as fast as `fetch` could reject it for as
+  long as the page stayed open. The text that lost is `save.variables` while
+  `save.isError` — the mutation already remembers it, so it needs no state of its own.
+  Unmounting cancels the debounce, so the editor **flushes on the way out**
+  (`flushPlan`, through refs, with a bare `patchEntry`) — otherwise "type a line, click
+  back" inside the 1.2 s window posts nothing. That flush compares against the text a
+  PATCH is *carrying*, not against the last confirmed one, **waits for that PATCH** and
+  then invalidates `kbQueryKey`: `staleTime` is 30 s, so without the invalidation
+  reopening the entry re-seeds the editor from the copy the flush just replaced. The
+  title is seeded once per entry through a `key`, not through an effect — a background
+  refetch mid-edit would otherwise throw the half-typed title away — and the rename is a
+  mutation that **puts the field back and says so** when the write loses, because the
+  blur that would have retried it has already happened. Every commit calls `rename.reset`
+  **before** deciding whether to send: putting the field back means the next commit is
+  usually the unchanged one, which returns early, so "Could not rename it." outlived the
+  edit that caused it.
+- **Entity chips are deduplicated on the client** (`entityChips`). `entities` carries one
+  row per `source`, so the regex pass and a compile both report the same CVE — two
+  identical chips under one React `key`.
+- **A re-read has three outcomes, not two.** `POST /entries/{id}/refresh` answers 200
+  whether the text moved, did not move, or could not be fetched at all, so `changed`
+  alone cannot tell the last two apart — `refreshMessage` / `refreshFailed` read `status`
+  and `reason`, and a failed re-read says "Refresh failed: …" in red instead of the
+  "unchanged" that used to sit over a Cloudflare 403.
+- **Capture failures are only visible in the entry's activity list**, so the detail page
+  draws the `activity` rows `GET /kb/entries/{id}` already carries.
+- **Leaving a dead entry `replace`s.** `EntryDetail`'s 404 effect calls `onBack(true)`:
+  a purged id is not a place Back should return to, or the 404 pushes forward again.
+- **A soft delete is readable.** The entry page stays open with a banner, and the
+  timeline's "Needs attention" strip lists what is in the bin with an Undo. The strip is
+  drawn only when it has something. A 409 on Undo means the URL was captured again while
+  the entry was deleted — it is shown, not swallowed, **in both places**, through the one
+  `api/client.ts::conflictDetail`. The entry page's own banner used to answer "Could not
+  restore it." to the one refusal that needs explaining.
+- **The snapshot is captured Markdown** and goes through `components/chat/Markdown.tsx`
+  like everything else. Never `dangerouslySetInnerHTML` — this is somebody else's page.
+- **Settings → Knowledge** (`components/settings/KnowledgeSection.tsx`) holds the two
+  capture toggles and `kb_min_snapshot_chars` as part of the settings draft, and reads
+  `GET /kb/stats` live beside them: the index counts are facts about the database, not
+  preferences, so Save has nothing to do with them. `kb_schema_version` is read-only and
+  is therefore omitted from `Draft` and from `SettingsUpdate`. Every read of that payload
+  is guarded and the schema row is dropped when the field is absent, because these are
+  facts about a *database* reported by a backend of possibly another version. The vector
+  row goes through `vecVersionLabel`: a missing extension is reported as the **empty
+  string**, not `null` (`extension_status` catches the `OperationalError`), so `??` never
+  fired and the row drew a label with nothing beside it.
+
 ## Markdown rendering
 
 `components/chat/Markdown.tsx` wraps `ReactMarkdown` with `remarkPlugins={[remarkGfm]}`
@@ -531,7 +666,7 @@ hand-rolled `.prose-chat` block in `src/index.css`, deliberately instead of
 
 ## Tests
 
-`npx vitest run` — **11 files, 188 tests**, `environment: 'node'` with
+`npx vitest run` — **16 files, 263 tests**, `environment: 'node'` with
 **`TZ` pinned to `UTC`** (`test.env` in `vite.config.ts`: the backend sends naive UTC and
 the app renders the viewer's *local* day of it, so a test that asserts an instant would
 otherwise assert the machine's offset, and UTC+13/+14 roll a midday stamp over to the next
@@ -551,7 +686,14 @@ the `activity` transitions, turn scoping, `activityLabel`, `showsProgress`,
 `components/ui/searchKeys.test.ts` (the shared overlay keyboard model),
 `components/ui/menuPosition.test.ts` (fits below, flips above, clamps — there is no DOM
 here, which is the point: the caller measures, the function decides),
-`api/client.test.ts` (`isNotFound`),
+`api/client.test.ts` (`isNotFound`, `conflictDetail`),
+`lib/dates.test.ts` (`parseUtc`, `dayLabel`, `groupByDay`),
+`lib/highlight.test.ts` (`splitOnQuery`, `splitOnTerms`),
+`api/kb.test.ts` (`kbEntryLink`, `parseEntryId`, `entryTimestamp`, the day grouping,
+`matchMarker`, `hitSnippet`, `cveChips`, `entityChips`, `sourceLabel`, `kindLabel`,
+`sinceDaysAgo`, `entityFilter`/`entityHint`, `vecVersionLabel`,
+`refreshMessage`/`refreshFailed`),
+`components/kb/autosave.test.ts` (`autosaveDecision`, `autosaveLabel`, `flushPlan`),
 `components/notes/excerpt.test.ts` and `lib/ids.test.ts`.
 
 Component and E2E tests are deliberately out of scope — **do not add a jsdom

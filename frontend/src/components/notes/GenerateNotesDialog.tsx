@@ -5,6 +5,7 @@ import { useNavigate } from 'react-router-dom'
 import type { ErrorPayload } from '../../api/chat'
 import { fetchSessions, sessionsQueryKey } from '../../api/chat'
 import { fetchItems, type FeedItem } from '../../api/inbox'
+import { kbQueryKey } from '../../api/kb'
 import {
   cancelGeneration,
   generateUrl,
@@ -213,6 +214,10 @@ export default function GenerateNotesDialog({
 
     if (savedNoteId !== null) {
       await queryClient.invalidateQueries({ queryKey: notesQueryKey })
+      // The generate route captures the note into the knowledge base inside the
+      // same request, so an entry exists by the time `done` arrives — and the
+      // Knowledge pane can be the one on screen beside this dialog.
+      await queryClient.invalidateQueries({ queryKey: kbQueryKey })
       if (onGenerated) {
         onGenerated(savedNoteId)
       } else {

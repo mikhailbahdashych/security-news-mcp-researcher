@@ -18,9 +18,11 @@ import {
 import ApiKeySection from '../components/settings/ApiKeySection'
 import ArchivedChatsDialog from '../components/settings/ArchivedChatsDialog'
 import Field, { FIELD_GRID } from '../components/settings/Field'
+import KnowledgeSection from '../components/settings/KnowledgeSection'
 import McpSection from '../components/settings/McpSection'
 import NumberField from '../components/settings/NumberField'
 import SettingsSection from '../components/settings/SettingsSection'
+import ErrorBoundary from '../components/ui/ErrorBoundary'
 import Button from '../components/ui/Button'
 import Card from '../components/ui/Card'
 import Checkbox from '../components/ui/Checkbox'
@@ -41,9 +43,14 @@ import {
 import type { EmbeddablePageProps } from '../components/ui/PageHost'
 import Page from './Page'
 
-/** Everything this form edits: not the write-only API key, and not the read-only
- *  `key_source` that describes where it came from. */
-type Draft = Omit<AppSettings, 'has_api_key' | 'api_key_masked' | 'key_source'>
+/** Everything this form edits: not the write-only API key, not the read-only
+ *  `key_source` that describes where it came from, and not the KB schema version
+ *  the index reports about itself. `SettingsUpdate` omits exactly the same four,
+ *  because `PUT /api/settings` forbids extra fields. */
+type Draft = Omit<
+  AppSettings,
+  'has_api_key' | 'api_key_masked' | 'key_source' | 'kb_schema_version'
+>
 
 /** Listed field by field so that adding a setting to the API is a type error here
  *  until the form handles it. */
@@ -58,6 +65,9 @@ const toDraft = (settings: AppSettings): Draft => ({
   note_template: settings.note_template,
   system_prompt_extra: settings.system_prompt_extra,
   feed_timeout_s: settings.feed_timeout_s,
+  kb_capture_starred: settings.kb_capture_starred,
+  kb_capture_notes: settings.kb_capture_notes,
+  kb_min_snapshot_chars: settings.kb_min_snapshot_chars,
 })
 
 /**
@@ -264,6 +274,17 @@ function SettingsForm({ settings }: { settings: AppSettings }) {
 
       <McpSection />
 
+      <KnowledgeSection
+        uid={uid}
+        captureStarred={draft.kb_capture_starred}
+        captureNotes={draft.kb_capture_notes}
+        minSnapshotChars={draft.kb_min_snapshot_chars}
+        schema={settings.kb_schema_version}
+        onCaptureStarred={(checked) => edit('kb_capture_starred', checked)}
+        onCaptureNotes={(checked) => edit('kb_capture_notes', checked)}
+        onMinSnapshotChars={(value) => edit('kb_min_snapshot_chars', value)}
+      />
+
       <SettingsSection title="Feeds">
         <NumberField
           id={`${uid}-feed-timeout`}
@@ -438,7 +459,7 @@ function Shell({ children }: { children: ReactNode }) {
         title="Settings"
         subtitle="Layout, API credentials, model preferences and the prompts used across the app."
       />
-      {children}
+      <ErrorBoundary>{children}</ErrorBoundary>
     </Page>
   )
 }

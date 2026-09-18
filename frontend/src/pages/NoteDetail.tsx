@@ -12,6 +12,7 @@ import {
   type Note,
   type NoteSource,
 } from '../api/notes'
+import { kbQueryKey } from '../api/kb'
 import Markdown from '../components/chat/Markdown'
 import { formatNoteDate, formatNoteDay } from '../components/notes/noteDate'
 import Button from '../components/ui/Button'
@@ -70,6 +71,8 @@ export default function NoteDetailPage({
       setEditing(false)
       await queryClient.invalidateQueries({ queryKey: noteQueryKey(noteId) })
       await queryClient.invalidateQueries({ queryKey: notesQueryKey })
+      // Editing a note re-captures it, the same trigger as generating one.
+      await queryClient.invalidateQueries({ queryKey: kbQueryKey })
     },
   })
 
@@ -78,6 +81,9 @@ export default function NoteDetailPage({
     onSuccess: async () => {
       setConfirmingDelete(false)
       await queryClient.invalidateQueries({ queryKey: notesQueryKey })
+      // `note_id` is `ON DELETE SET NULL`, so an entry captured from this note
+      // keeps a back-link to a note that is gone until the KB is refetched.
+      await queryClient.invalidateQueries({ queryKey: kbQueryKey })
       goBack()
     },
   })
