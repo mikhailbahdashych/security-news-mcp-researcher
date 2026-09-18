@@ -2,9 +2,12 @@
 
 Every article is fetched through an ``httpx2.MockTransport`` handed to the service
 by the same dependency override the production routes use, so nothing here
-reaches the network. The two tests about *timing* — the concurrency cap and the
-cancel — are driven by :class:`asyncio.Event`, never by a sleep: a cap asserted
-after 80 milliseconds is a cap that passes on a fast machine and reports nothing.
+reaches the network. The tests about *timing* — the two concurrency caps and the
+cancel — are driven by :class:`asyncio.Event`, a queue and a semaphore, never by
+a sleep: a cap asserted after 80 milliseconds is a cap that passes on a fast
+machine and reports nothing. None of them waits for something *not* to happen
+either; every step waits for an arrival a broken implementation would also make,
+which is what lets them fail rather than hang.
 """
 
 from __future__ import annotations
@@ -389,6 +392,67 @@ async def test_the_bulk_job_never_runs_more_than_eight_extractions_at_once(
     assert payloads_for(response.text, "done")[0]["saved"] == len(ids)
 
 
+async def test_at_most_eight_article_fetches_are_in_flight_at_once(
+    app, session_factory, db_session, feed
+):
+    """The cap counted where it is meant to bite: outbound requests.
+
+    The test above pins the semaphore around ``capture_feed_item``, which is a
+    property of this job's own loop. The ceiling it exists for is the *sites*' —
+    eight parallel reads is neighbourly, eighty is a scrape — so this one holds
+    the fetches themselves open and counts how many ``fetch_guarded`` has in
+    flight. Items with no stored text, so every one of them really goes out.
+    """
+    ids = await seed_items(db_session, feed, MAX_KB_EXTRACTIONS * 3, stored_text=False)
+    page = fixture_text("article.html")
+    live = 0
+    peak = 0
+    #: Every fetch announces itself here and then waits for a permit, so the test
+    #: decides when each one finishes. Nothing waits on a duration, and nothing
+    #: waits for something *not* to happen: each step waits for an arrival that a
+    #: correct implementation and a broken one both make.
+    arrived: asyncio.Queue[None] = asyncio.Queue()
+    permits = asyncio.Semaphore(0)
+
+    async def handle(request: httpx2.Request) -> httpx2.Response:
+        nonlocal live, peak
+        live += 1
+        peak = max(peak, live)
+        await arrived.put(None)
+        try:
+            await permits.acquire()
+            return httpx2.Response(200, text=page)
+        finally:
+            live -= 1
+
+    app.dependency_overrides[get_kb_service] = lambda: KbService(
+        session_factory=session_factory, transport=httpx2.MockTransport(handle)
+    )
+
+    async with httpx2.AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as http:
+        stream = asyncio.create_task(
+            http.post("/api/kb/bulk", json={"item_ids": ids, "job_id": "j-fetch"})
+        )
+        # Eight fetches arrive while no permit has been handed out at all.
+        for _ in range(MAX_KB_EXTRACTIONS):
+            await asyncio.wait_for(arrived.get(), timeout=5)
+        assert live == MAX_KB_EXTRACTIONS
+        # From here every further arrival has to be *bought* with a completion:
+        # one permit, one more fetch. Without the cap the remaining sixteen would
+        # pile up behind the held ones instead, and ``peak`` would say so.
+        for _ in range(len(ids) - MAX_KB_EXTRACTIONS):
+            permits.release()
+            await asyncio.wait_for(arrived.get(), timeout=5)
+        for _ in range(MAX_KB_EXTRACTIONS):
+            permits.release()
+        response = await stream
+
+    assert peak == MAX_KB_EXTRACTIONS
+    assert payloads_for(response.text, "done")[0]["saved"] == len(ids)
+
+
 async def test_cancelling_mid_run_leaves_committed_entries_committed(
     app, session_factory, db_session, feed
 ):
@@ -485,7 +549,9 @@ async def test_a_bulk_run_never_auto_compiles(app, client, session_factory, db_s
             session, {"anthropic_api_key": "sk-ant-test", "kb_compile_mode": "auto"}
         )
         await session.commit()
-    # An empty script: a compile would not merely be counted, it would raise.
+    # An empty script: a compile would raise. ``guarded`` swallows that, so the
+    # load-bearing assertion is the empty call list below — the raise only makes
+    # a stray call impossible to mistake for a no-op.
     anthropic = ScriptedAnthropic([])
     service = KbService(
         session_factory=session_factory,
