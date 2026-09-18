@@ -16,6 +16,7 @@ from fakes.embedder import FakeEmbedder
 from sqlalchemy import select, text
 
 from app.agent.providers import build_tool_providers
+from app.api.deps import get_kb_service
 from app.config import Settings
 from app.kb.capture import embed_pending
 from app.kb.chunking import estimate_tokens
@@ -31,7 +32,7 @@ from app.kb.embeddings import (
 )
 from app.kb.models import KbActivity, KbChunk, KbEntry
 from app.kb.schema import VEC_DIMENSIONS
-from app.kb.service import KbService
+from app.kb.service import EMBED_PENDING_LIMIT, KbService
 from app.services import settings as settings_service
 
 KEY = "pa-thisisthesecretvoyagekey-9999"
@@ -422,6 +423,67 @@ async def test_changing_the_embedding_model_discards_the_vectors_and_marks_chunk
     await client.put("/api/settings", json={"kb_embedding_model": "voyage-4-lite"})
     assert await db_session.scalar(text("SELECT count(*) FROM kb_chunk_vec")) == 2
     assert len(await _activity(db_session, "reindex")) == 1
+
+
+# --------------------------------------------------- POST /api/kb/embed-pending
+
+
+async def test_embed_pending_embeds_a_bounded_slice_and_reports_the_rest(
+    client, db_session, session_factory, offline_voyage
+) -> None:
+    """The client calls again while ``pending`` is above zero, so one click can
+    never turn into an unbounded run the user cannot stop."""
+    entry = await _entry(db_session)
+    texts = [f"passage number {index}" for index in range(EMBED_PENDING_LIMIT + 5)]
+    await _chunks(db_session, entry, *texts)
+    await client.put("/api/settings", json={"voyage_api_key": "pa-stored-0001"})
+
+    response = await client.post("/api/kb/embed-pending")
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "embedded": EMBED_PENDING_LIMIT,
+        "pending": 5,
+        "tokens": sum(estimate_tokens(text) for text in texts[:EMBED_PENDING_LIMIT]),
+    }
+    [row] = await _activity(db_session, "embed")
+    assert row.model == "voyage-4"
+    assert row.input_tokens == response.json()["tokens"]
+
+    assert (await client.post("/api/kb/embed-pending")).json() == {
+        "embedded": 5,
+        "pending": 0,
+        "tokens": sum(estimate_tokens(text) for text in texts[EMBED_PENDING_LIMIT:]),
+    }
+
+
+async def test_embed_pending_is_a_409_without_a_key(client, db_session) -> None:
+    entry = await _entry(db_session)
+    await _chunks(db_session, entry, "one passage")
+
+    response = await client.post("/api/kb/embed-pending")
+
+    assert response.status_code == 409
+    assert "key" in response.json()["detail"].lower()
+
+
+async def test_a_voyage_failure_is_a_502_and_the_chunks_stay_pending(
+    app, client, db_session, session_factory
+) -> None:
+    entry = await _entry(db_session)
+    chunks = await _chunks(db_session, entry, "one passage", "another passage")
+    app.dependency_overrides[get_kb_service] = lambda: KbService(
+        session_factory=session_factory,
+        embedder=FakeEmbedder(model="voyage-4", fail_after_batch=0),
+    )
+
+    response = await client.post("/api/kb/embed-pending")
+
+    assert response.status_code == 502
+    for chunk in chunks:
+        await db_session.refresh(chunk)
+        assert chunk.embedded_at is None
+    assert await _activity(db_session, "embed") == []
 
 
 # ------------------------------------------------------------ the fake embedder

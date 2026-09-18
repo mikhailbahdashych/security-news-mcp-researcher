@@ -270,6 +270,19 @@ class StatsRead(BaseModel):
     embeddings_configured: bool
 
 
+class EmbedPendingResponse(BaseModel):
+    """What one "Embed now" did, and what is left for the next call.
+
+    ``pending`` is the whole backlog, not this call's remainder, so the client
+    loops while it is above zero — and it is the same count ``StatsRead`` reports.
+    ``tokens`` is Voyage's, counted separately from the Anthropic compile budget.
+    """
+
+    embedded: int
+    pending: int
+    tokens: int
+
+
 class TopicRead(BaseModel):
     id: int
     name: str
@@ -387,6 +400,7 @@ __all__ = [
     "ActivityRead",
     "Authorship",
     "CapturedBy",
+    "EmbedPendingResponse",
     "EntityRead",
     "EntryCreate",
     "EntryDetailRead",

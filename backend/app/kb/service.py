@@ -77,6 +77,12 @@ MAX_SEARCH_LIMIT = 50
 DEFAULT_ACTIVITY_LIMIT = 200
 MAX_ACTIVITY_LIMIT = 1_000
 
+#: How many pending chunks one ``POST /api/kb/embed-pending`` embeds. Bounded so
+#: that a backlog of thousands is a series of calls the user can watch and stop,
+#: not one request that either finishes or times out. The client calls again while
+#: the response says chunks are still pending.
+EMBED_PENDING_LIMIT = 200
+
 
 @dataclass(frozen=True, slots=True)
 class EntryFacts:
@@ -611,6 +617,46 @@ class KbService:
                 .all()
             )
 
+    async def embed_pending(self, *, limit: int = EMBED_PENDING_LIMIT) -> dict[str, int]:
+        """Embed a bounded slice of the backlog; report it and what is left.
+
+        ``pending`` is counted afterwards and is the same number ``stats`` reports,
+        so the page that asked and the page that shows the badge cannot disagree.
+        The token count is read back from the ``kb_activity`` row the run wrote
+        rather than recomputed here: the month-to-date Voyage counter adds up those
+        rows, and a second definition of "what this cost" would drift from it.
+
+        An embedding failure propagates — the route answers 502 and the chunks it
+        never reached are still pending, which is exactly what the next call
+        resumes from.
+        """
+        async with self.session_factory() as session:
+            before = (
+                await session.scalar(
+                    select(func.max(KbActivity.id)).where(KbActivity.action == "embed")
+                )
+                or 0
+            )
+
+        embedded = await capture_module.embed_pending(
+            self.session_factory, self.embedder, limit=limit, source="settings"
+        )
+
+        async with self.session_factory() as session:
+            pending = await session.scalar(
+                select(func.count()).select_from(KbChunk).where(KbChunk.embedded_at.is_(None))
+            )
+            tokens = await session.scalar(
+                select(func.coalesce(func.sum(KbActivity.input_tokens), 0)).where(
+                    KbActivity.action == "embed", KbActivity.id > before
+                )
+            )
+        return {
+            "embedded": embedded,
+            "pending": int(pending or 0),
+            "tokens": int(tokens or 0),
+        }
+
     async def stats(self) -> dict[str, Any]:
         """What the Knowledge page and the Settings index panel report.
 
@@ -879,6 +925,7 @@ __all__ = [
     "DEFAULT_ACTIVITY_LIMIT",
     "DEFAULT_LIMIT",
     "DEFAULT_SEARCH_LIMIT",
+    "EMBED_PENDING_LIMIT",
     "MAX_ACTIVITY_LIMIT",
     "MAX_LIMIT",
     "MAX_SEARCH_LIMIT",

@@ -36,6 +36,7 @@ from fastapi import APIRouter, HTTPException, Query, Response, status
 from app.api.deps import KbServiceDep
 from app.kb import capture as capture_module
 from app.kb.capture import KbConflict
+from app.kb.embeddings import EmbeddingError
 from app.kb.models import KbEntry
 from app.kb.service import (
     DEFAULT_ACTIVITY_LIMIT,
@@ -51,6 +52,7 @@ from app.kb.service import (
 from app.schemas.kb import (
     ActivityListResponse,
     ActivityRead,
+    EmbedPendingResponse,
     EntryCreate,
     EntryDetailRead,
     EntryListResponse,
@@ -373,6 +375,32 @@ async def search(payload: SearchRequest, kb: KbServiceDep) -> SearchResponse:
 @router.get("/stats", response_model=StatsRead)
 async def stats(kb: KbServiceDep) -> StatsRead:
     return StatsRead.model_validate(await kb.stats())
+
+
+@router.post("/embed-pending", response_model=EmbedPendingResponse)
+async def embed_pending(kb: KbServiceDep) -> EmbedPendingResponse:
+    """Embed a bounded slice of the chunks that have no vector yet.
+
+    User-triggered (Settings -> Knowledge -> **Embed now**), like everything else
+    in this application: entries captured before a Voyage key was entered are
+    keyword-searchable and stay that way until someone asks for them to be
+    embedded. The client calls again while the answer says chunks are pending.
+
+    **409** with no key configured — nothing to embed *with* is not a failure of
+    the request. **502** when the provider refuses: the chunks it did not reach
+    stay pending and the next call resumes from them.
+    """
+    if kb.embedder.dimensions <= 0:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "No Voyage API key is configured, so there is nothing to embed with.",
+        )
+    try:
+        return EmbedPendingResponse.model_validate(await kb.embed_pending())
+    except EmbeddingError as exc:
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY, f"The embedding provider refused: {exc.message}"
+        ) from exc
 
 
 @router.get("/activity", response_model=ActivityListResponse)
