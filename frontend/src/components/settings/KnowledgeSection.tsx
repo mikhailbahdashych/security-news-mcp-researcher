@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useRef, useState } from 'react'
+import { Link } from 'react-router-dom'
 
 import {
   KB_ACTIVITY_LOG_LIMIT,
@@ -358,8 +359,11 @@ function Compile({
         </strong>{' '}
         Every compile&rsquo;s input tokens (including cached ones) and output tokens are added up for
         the calendar month, in UTC, from the knowledge base&rsquo;s own activity trail. Research chat
-        is counted separately, per session — see the token counts on each chat session. At the limit,
-        compiling stops and capture carries on.
+        is counted separately, per session — the counts are on{' '}
+        <Link to="/chat" className="underline underline-offset-2 hover:text-ink">
+          each chat session
+        </Link>
+        . At the limit, compiling stops and capture carries on.
       </p>
 
       <Checkbox
