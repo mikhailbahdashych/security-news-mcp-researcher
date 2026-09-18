@@ -371,6 +371,14 @@ a gap is an entry folded into a neighbour.
   explained" scores 0.698 and does not flag. With no Voyage key the trigram leg runs alone and
   near-identical *headlines* over different stories can flag; it only ever flags, never merges.
   Recalibrate from real use — one setting and one constant.
+- **P2-22. The compile schema carries no size keywords; every cap is enforced in code.** The
+  structured-output subset of JSON Schema does not accept `maxItems` / `maxLength` (or the numeric
+  bounds), and a schema that carries one is refused when the API compiles it — a 400 on every compile,
+  invisible to a suite whose scripted client never validates a schema. Tags (8), entities (24 × 120
+  chars) and the summary (6 000 chars) are cut in `compile.py` and *stated* in the schema's
+  descriptions; a test walks the schema for the forbidden keywords. **Still owed: one live compile in
+  the Phase 2 browser pass**, because no test can prove the API accepts the schema. — Cost if wrong:
+  none; the keywords were never the load-bearing cap.
 
 ---
 
