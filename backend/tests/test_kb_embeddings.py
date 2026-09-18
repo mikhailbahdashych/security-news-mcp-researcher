@@ -303,6 +303,36 @@ async def test_a_failure_on_the_second_batch_leaves_the_unreached_chunks_pending
     assert row.input_tokens == 8 * estimate_tokens(BIG_TEXT) == 256_000
 
 
+async def test_a_smaller_ceiling_model_resumes_at_the_request_boundary(
+    session_factory, db_session
+) -> None:
+    """The grouping has to be the *configured* model's, not ``voyage-4``'s.
+
+    ``voyage-4-large`` caps a request at 96 000 tokens, so 12 chunks of 32 000 are
+    four requests. Grouping them to ``voyage-4``'s 256 000 would make one planned
+    group three HTTP requests, and a 429 on the second would throw away the
+    vectors the first was already billed for.
+    """
+    entry = await _entry(db_session)
+    chunks = await _chunks(db_session, entry, *[BIG_TEXT] * 12)
+    embedder = FakeEmbedder(model="voyage-4-large", fail_after_batch=1)
+
+    with pytest.raises(EmbeddingError):
+        await embed_pending(session_factory, embedder)
+
+    assert len(embedder.documents) == 3
+    for chunk in chunks[:3]:
+        await db_session.refresh(chunk)
+        assert chunk.embedded_at is not None
+    for chunk in chunks[3:]:
+        await db_session.refresh(chunk)
+        assert chunk.embedded_at is None
+
+    # And the trail counts exactly the request that landed.
+    [row] = await _activity(db_session, "embed")
+    assert row.input_tokens == 3 * estimate_tokens(BIG_TEXT) == 96_000
+
+
 async def test_an_embed_writes_an_activity_row_with_the_voyage_token_count(
     session_factory, db_session
 ) -> None:

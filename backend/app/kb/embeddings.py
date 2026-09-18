@@ -10,8 +10,10 @@ Batching is **by tokens, not by a count**. Voyage documents two ceilings per
 request for ``voyage-4`` (1 000 texts *and* 320 000 tokens) and a request that
 breaks either is rejected whole, so :func:`plan_batches` packs to 80 % of both. It
 is a pure function on purpose: ``capture.embed_pending`` groups its chunks with the
-same call, which is what makes "a batch that failed leaves exactly the chunks it
-did not reach pending" a property of one boundary rather than two.
+same call and the same :func:`max_tokens_for` ceiling, which is what makes "a batch
+that failed leaves exactly the chunks it did not reach pending" a property of one
+boundary rather than two — the ceiling is per model, and a group planned to a
+wider one would silently become several requests the resume point cannot see.
 """
 
 from __future__ import annotations
@@ -49,6 +51,16 @@ MAX_TOKENS_BY_MODEL = {
     "voyage-4-lite": 800_000,
     "voyage-4-large": 96_000,
 }
+
+
+def max_tokens_for(model: str) -> int:
+    """The per-request token ceiling *model* is batched to.
+
+    The one place the ceiling is decided. ``capture.embed_pending`` plans the
+    groups it commits between and the embedder plans the requests it sends, and
+    the resume guarantee is only true while those two are the same number.
+    """
+    return MAX_TOKENS_BY_MODEL.get(model, MAX_TOKENS_PER_REQUEST)
 
 #: Whole-request budget. Generous because a full batch is 256 000 tokens of text
 #: going out over one connection.
@@ -191,8 +203,7 @@ class VoyageEmbedder:
                 "User-Agent": USER_AGENT,
             },
         ) as client:
-            max_tokens = MAX_TOKENS_BY_MODEL.get(self.model, MAX_TOKENS_PER_REQUEST)
-            for batch in plan_batches(texts, max_tokens=max_tokens):
+            for batch in plan_batches(texts, max_tokens=max_tokens_for(self.model)):
                 sent = [texts[index] for index in batch]
                 vectors.extend(await self._post(client, sent, input_type))
         return vectors
@@ -312,5 +323,6 @@ __all__ = [
     "VoyageEmbedder",
     "build_embedder",
     "discard_vectors",
+    "max_tokens_for",
     "plan_batches",
 ]

@@ -38,7 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db.models import Note, utcnow
 from app.kb.chunking import estimate_tokens, split_markdown
-from app.kb.embeddings import Embedder, plan_batches
+from app.kb.embeddings import Embedder, max_tokens_for, plan_batches
 from app.kb.entities import extract_entities
 from app.kb.models import (
     KbActivity,
@@ -827,8 +827,9 @@ async def embed_pending(
     state of the knowledge base rather than a failure.
 
     **Written per batch, not once at the end.** The selection is grouped by
-    :func:`~app.kb.embeddings.plan_batches` — the same grouping the embedder would
-    apply to one request — and each group's vectors, ``embedded_at`` and
+    :func:`~app.kb.embeddings.plan_batches` at the configured model's own ceiling
+    (:func:`~app.kb.embeddings.max_tokens_for`), so that one group is exactly one
+    request the embedder sends — and each group's vectors, ``embedded_at`` and
     ``embedding_model`` are committed before the next group is sent. So a provider
     that 429s on the fifth request leaves exactly the chunks it never reached
     pending, the entry's "8 of 11" is derived from counting them, and the next run
@@ -872,7 +873,9 @@ async def embed_pending(
     embedded = 0
     tokens = 0
     try:
-        for group in plan_batches([row[1] for row in rows]):
+        for group in plan_batches(
+            [row[1] for row in rows], max_tokens=max_tokens_for(embedder.model)
+        ):
             batch = [rows[index] for index in group]
             # No session is open here: an embedder call is a network round trip,
             # and SQLite has exactly one writer.
