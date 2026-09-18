@@ -1226,6 +1226,43 @@ class AngledEmbedder:
         return vector
 
 
+async def test_the_article_fetch_holds_no_database_connection(
+    session_factory, db_session, db_engine
+):
+    """Nothing is checked out of the pool while a capture waits on a website.
+
+    One at a time this was merely untidy; ``MAX_KB_EXTRACTIONS = 8`` made it eight
+    pooled connections parked on network I/O for up to ``feed_timeout_s`` each,
+    with every other request in the application competing for what is left.
+    """
+    feed = Feed(url="https://example.test/feed.xml", title="Example")
+    db_session.add(feed)
+    await db_session.flush()
+    item = FeedItem(
+        feed_id=feed.id,
+        guid="needs-extraction",
+        title="An advisory with no stored text",
+        url="https://example.test/article",
+    )
+    db_session.add(item)
+    await db_session.commit()
+
+    checked_out: list[int] = []
+    page = fixture_text("article.html")
+
+    def handle(request: httpx2.Request) -> httpx2.Response:
+        checked_out.append(db_engine.pool.checkedout())
+        return httpx2.Response(200, text=page)
+
+    service = KbService(session_factory=session_factory, transport=httpx2.MockTransport(handle))
+    baseline = db_engine.pool.checkedout()
+
+    result = await service.capture_feed_item(item.id)
+
+    assert result.created is True
+    assert checked_out == [baseline]
+
+
 async def test_a_long_entrys_own_chunks_do_not_crowd_the_duplicate_out_of_the_knn(
     session_factory, db_session
 ):

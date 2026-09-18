@@ -263,16 +263,27 @@ class KbService:
             item = await session.get(FeedItem, item_id)
             if item is None:
                 raise LookupError(f"No feed item with id {item_id}")
-            needs_extraction = not (item.content_text or "").strip() and bool(item.url)
+            missing_text = not (item.content_text or "").strip()
+            fetch_url = item.url if missing_text else None
             timeout_s = await settings_service.get_int(session, "feed_timeout_s")
 
-        if needs_extraction:
-            async with self.session_factory() as session:
-                result = await extract_service.extract_item(
-                    session, item_id, timeout_s=timeout_s, transport=transport or self.transport
-                )
-                await session.commit()
-                item = result.item
+        if fetch_url:
+            # ``extract_article`` rather than ``extract_item``: the latter takes a
+            # session, reads the row on it and only *then* goes to the network, so
+            # a pooled connection sits on the fetch for the whole
+            # ``feed_timeout_s``. One at a time that is untidy; a bulk run has
+            # MAX_KB_EXTRACTIONS = 8 of them at once, against a pool the rest of
+            # the application shares. Fetch first, then a short write.
+            extracted = await extract_service.extract_article(
+                fetch_url, timeout_s=timeout_s, transport=transport or self.transport
+            )
+            if extracted.ok and extracted.text:
+                async with self.session_factory() as session:
+                    item = await session.get(FeedItem, item_id)
+                    if item is not None:
+                        item.content_text = extracted.text
+                        item.extracted_at = utcnow()
+                    await session.commit()
 
         # Read inside the session and carried out as plain values. The ORM object
         # survives ``close()`` today because it expunges without expiring, but
