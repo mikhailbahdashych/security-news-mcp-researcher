@@ -58,15 +58,15 @@ def _calls_the_messages_api(source: str) -> bool:
 
     Parsed rather than grepped: a comment or a docstring that names the rule is
     not a breach of it, and a text search cannot tell the two apart. It still
-    misses ``getattr``/alias forms, which no amount of static reading catches —
+    misses ``getattr`` and renamed-alias forms, which no static reading catches —
     what it has to catch is the plain call somebody writes without thinking.
     """
     return any(
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
         and node.func.attr in {"create", "stream"}
-        and isinstance(node.func.value, ast.Attribute)
-        and node.func.value.attr == "messages"
+        and "messages"
+        in (getattr(node.func.value, "attr", None), getattr(node.func.value, "id", None))
         for node in ast.walk(ast.parse(source))
     )
 
@@ -94,6 +94,7 @@ def test_the_messages_api_check_reads_code_and_not_prose():
     """Both halves of the rule above, on source it is handed directly."""
     assert _calls_the_messages_api("await client.beta.messages.stream(**kwargs)")
     assert _calls_the_messages_api("client.messages.create(model=model)")
+    assert _calls_the_messages_api("messages = client.beta.messages\nmessages.create(model=m)")
     assert not _calls_the_messages_api("# Only the runner calls messages.create(...).")
     assert not _calls_the_messages_api('"""Never call messages.stream() from here."""')
 

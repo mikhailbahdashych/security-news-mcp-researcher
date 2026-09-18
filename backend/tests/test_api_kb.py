@@ -18,6 +18,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db, get_kb_service
+from app.config import Settings
 from app.db.models import Feed, FeedItem, Note, utcnow
 from app.kb.capture import capture_article
 from app.kb.models import KbActivity, KbEntry, KbEntryTopic, Topic
@@ -589,6 +590,20 @@ def request_sessions(app, session_factory) -> list[AsyncSession]:
     return sessions
 
 
+async def test_the_kb_dependency_hands_back_a_session_with_no_open_transaction(
+    session_factory, db_session
+):
+    """``get_kb_service`` reads the embedder settings on the request's session.
+
+    That SELECT opens a read transaction, and every ``/api/kb`` route then holds
+    it for the whole request — across ``POST /kb/embed-pending``'s Voyage calls,
+    which is the largest embed in the app. The dependency ends what it started.
+    """
+    await get_kb_service(db_session, session_factory, Settings(voyage_api_key=""))
+
+    assert db_session.in_transaction() is False
+
+
 class _TransactionWatch(KbService):
     """A knowledge base that records the transaction state it was called in."""
 
@@ -625,6 +640,7 @@ async def test_the_star_route_finishes_its_own_db_work_before_capturing(
     response = await client.patch(f"/api/items/{item.id}", json={"status": "starred"})
 
     assert response.status_code == 200
+    assert len(request_sessions) == 1  # the override applied: the check below is not vacuous
     assert service.open_transactions == [False]
 
 
@@ -641,6 +657,7 @@ async def test_the_note_route_finishes_its_own_db_work_before_capturing(
     response = await client.patch(f"/api/notes/{note.id}", json={"body_md": BODY + "\n\nMore."})
 
     assert response.status_code == 200
+    assert len(request_sessions) == 1  # the override applied: the check below is not vacuous
     assert service.open_transactions == [False]
 
 

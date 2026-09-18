@@ -107,8 +107,16 @@ async def get_kb_service(
     The request's session is taken as well, to read which embedder this database
     is configured for — so entering a Voyage key in Settings makes the very next
     search hybrid, with no restart and nothing cached.
+
+    That read opens a transaction on a session the request keeps until it ends,
+    so it is ended here: ``capture.py``'s rule — no transaction across an embed
+    call — would otherwise be broken by every ``/api/kb`` route, and worst by
+    ``POST /kb/embed-pending``, the largest embed there is. Nothing is pending at
+    this point (dependencies run before the route), so the commit writes nothing.
     """
-    return await for_request(session_factory, session, settings)
+    service = await for_request(session_factory, session, settings)
+    await session.commit()
+    return service
 
 
 KbServiceDep = Annotated[KbService, Depends(get_kb_service)]
