@@ -389,6 +389,14 @@ a gap is an entry folded into a neighbour.
 - **P2-24. `SettingsRead` exposes the shipped compile prompt, and an empty prompt is refused.** "Reset
   to default" could only restore the last *saved* prompt, and saving a blank one destroyed the default
   for good (the getter falls back only when the row is absent).
+- **P2-25. Known limit, accepted for Phase 2: a "Needs attention" failure row outlives the action
+  that fixes it.** Failure rows are derived client-side from the last rows of `kb_activity`; a later
+  successful compile adds a row but does not retire the earlier failure, so the row lingers until it
+  ages out of the window. The clean fix is a server-side outcome (a `reason_code` column or distinct
+  actions) — but `kb_activity.action` is a CHECK constraint and this app has no migrations beyond
+  `ADDED_COLUMNS`, which is also why a dismissed duplicate is filed under `action: "merge"`. Task 4.1
+  (curation) owns giving the trail a proper outcome and the strip a server-side source. — Cost: a
+  stale row in a strip the user can ignore.
 
 ---
 

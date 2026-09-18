@@ -663,8 +663,13 @@ and model-authored findings.
   entry, in that order, and **never** a row for an ordinary captured article (ruling I16,
   and the headline test). A failure is told from a success by what `app/kb/compile.py`
   writes into `detail`, plus `action: 'skip'` and `action: 'budget_hit'` — a compile
-  *success* writes JSON into the same column. The strip only sees entries the page has
-  loaded: correct for what is on screen, incomplete as a worklist.
+  *success* writes JSON into the same column, so for `compile`/`recompile` rows "the detail
+  is not JSON" **is** the failure test (all six outcomes pinned). `attention.ts::retryAction`
+  picks the row's action: a capture failure (`skip`) offers **Retry** (re-read the source), a
+  compile failure offers **Compile** — re-fetching an article cannot fix a refusal or a
+  spent budget. A failure row outlives the action that fixes it until it ages out of the
+  trail window (known, accepted). The strip only sees entries the page has loaded: correct
+  for what is on screen, incomplete as a worklist.
 - **A duplicate flag has a Dismiss.** `POST /entries/{id}/not-a-duplicate` clears it and
   is idempotent, which is what lets the strip and the entry banner both offer it. With no
   Voyage key the flag is the title trigram alone, so the row says so; before the route
@@ -737,7 +742,7 @@ hand-rolled `.prose-chat` block in `src/index.css`, deliberately instead of
 
 ## Tests
 
-`npx vitest run` — **16 files, 263 tests**, `environment: 'node'` with
+`npx vitest run` — **20 files, 322 tests**, `environment: 'node'` with
 **`TZ` pinned to `UTC`** (`test.env` in `vite.config.ts`: the backend sends naive UTC and
 the app renders the viewer's *local* day of it, so a test that asserts an instant would
 otherwise assert the machine's offset, and UTC+13/+14 roll a midday stamp over to the next

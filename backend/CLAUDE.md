@@ -126,7 +126,9 @@ Keys: `anthropic_api_key` (""), `model` (`claude-opus-5`), `effort` (`high`),
 Phase 2 added, all of them read-only to everything but `PUT /api/settings`:
 `voyage_api_key` (""), `kb_embedding_model` (`voyage-4`), `kb_capture_findings`
 (**false**), `kb_compile_mode` (`manual`), `kb_compile_model` (`claude-sonnet-5`),
-`kb_compile_effort` (`low`), `kb_compile_prompt` (`DEFAULT_COMPILE_PROMPT`),
+`kb_compile_effort` (`low`), `kb_compile_prompt` (`DEFAULT_COMPILE_PROMPT`; a blank one is a
+422, and `SettingsRead.kb_compile_prompt_default` carries the shipped text read-only so the
+UI's "Reset to default" restores *that* — P2-24),
 `kb_compile_max_chars` (24 000), `kb_compile_monthly_token_budget` (5 000 000),
 `kb_auto_accept_suggestions` (true), `kb_recency_boost` (true), `kb_rerank` (true, and
 nothing reads it until the Phase 3 reranker), `kb_duplicate_threshold` (0.92).
@@ -505,8 +507,14 @@ flagged nothing, silently). The entry is excluded from its own KNN with
 neighbours — while the separate `id < entry_id` rule says something else: the flag points
 backwards, at the copy that was already there. It only ever sets
 `kb_entries.possible_duplicate_of`; merging is a button, and
-`POST /entries/{id}/not-a-duplicate` clears the flag (idempotent, one activity row —
-P2-23). **Both numbers are uncalibrated** (P2-21): "The xz backdoor" vs "The xz backdoor,
+`POST /entries/{id}/not-a-duplicate` clears the flag (idempotent; a dismissal that changes
+nothing writes no row; the trail row is filed under `action: "merge"` because
+`kb_activity.action` is a CHECK constraint and this app has no migrations — P2-23). **A
+model-authored finding takes no part, in either direction**: `findings.py` never flags at
+its own capture, and neither leg offers a finding as a candidate (the vector leg sets
+`SearchFilters.exclude_model_authored`, the title leg filters `authorship != 'model'`), so a
+later article is never flagged against a finding — merging keeps the *older* entry, so a suggested
+merge would otherwise delete the user's research and keep the article it quotes. **Both numbers are uncalibrated** (P2-21): "The xz backdoor" vs "The xz backdoor,
 explained" scores 0.698 and does not flag, and with no Voyage key near-identical headlines
 over different stories do.
 
