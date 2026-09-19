@@ -239,7 +239,9 @@ CompileResponse {
 
 ### `POST /api/kb/compile` (batch)
 
-Request `{ "entry_ids": [1,2,3] }` (1–100 ids).
+Request `{ "entry_ids": [1,2,3] }` (1–100 ids). **Repeats are dropped, order preserved**, in the
+request model itself — an id sent twice is one compile and one charge, and the estimate and the
+batch cannot quote different numbers for the same list.
 
 - With **`?estimate=1`** → `200`, **no model call**:
   ```

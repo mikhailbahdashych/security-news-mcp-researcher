@@ -18,7 +18,14 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 from app.kb.capture import RefreshStatus
 from app.kb.models import KbEntry
@@ -333,6 +340,18 @@ class CompileRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     entry_ids: list[int] = Field(min_length=1, max_length=100)
+
+    @field_validator("entry_ids")
+    @classmethod
+    def _unique(cls, value: list[int]) -> list[int]:
+        """Drop repeats, keep the order.
+
+        A repeated id is real money: the batch loop would compile and **bill**
+        the same entry twice, and the estimate would quote double for it. Here
+        rather than in the route so the price and the charge cannot disagree,
+        which is what would make the double charge invisible.
+        """
+        return list(dict.fromkeys(value))
 
 
 class CompileBatchResponse(BaseModel):

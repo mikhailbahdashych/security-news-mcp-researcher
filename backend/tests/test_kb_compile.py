@@ -765,6 +765,35 @@ async def test_the_batch_route_validates_every_id_before_it_compiles_anything(
     assert await activity(session_factory, "compile") == []
 
 
+async def test_the_same_id_twice_in_one_batch_is_compiled_and_billed_once(
+    api, client, kb, entry, session_factory
+):
+    """Real money: a selection that repeats an id would otherwise pay twice for
+    the same entry. ``CompileRequest`` de-dups, so the route cannot."""
+    await with_key(session_factory)
+    fake = scripted(api, ScriptedAnthropic([turn_text(answer())]))
+
+    response = await client.post("/api/kb/compile", json={"entry_ids": [entry, entry]})
+
+    assert response.status_code == 200, response.text
+    assert [row["entry"]["id"] for row in response.json()["results"]] == [entry]
+    assert len(fake.calls) == 1
+
+
+async def test_the_estimate_prices_a_repeated_id_once(api, client, kb, entry, session_factory):
+    """The estimate and the batch read the same de-duplicated list, so a doubled
+    price cannot disagree with what the compile then charges."""
+    await with_key(session_factory)
+    scripted(api, ScriptedAnthropic([]))
+
+    response = await client.post(
+        "/api/kb/compile", params={"estimate": 1}, json={"entry_ids": [entry, entry]}
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["entries"] == 1
+
+
 async def test_the_estimate_endpoint_makes_no_model_call_and_reports_the_remaining_budget(
     api, client, kb, entry, session_factory
 ):
