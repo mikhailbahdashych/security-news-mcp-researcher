@@ -18,7 +18,14 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 from app.kb.capture import RefreshStatus
 from app.kb.models import KbEntry
@@ -107,6 +114,10 @@ class EntryRead(BaseModel):
     summary_md: str | None
     notes_md: str
     compiled_at: datetime | None
+    #: The model that actually answered the compile — a fallback switch can make
+    #: it a different one from ``kb_compile_model``.
+    compile_model: str | None
+    compile_prompt_version: int | None
     entities: list[EntityRead]
     topics: list[TopicRef]
     tags: list[TagRef]
@@ -136,6 +147,8 @@ class EntryRead(BaseModel):
             summary_md=entry.summary_md,
             notes_md=entry.notes_md or "",
             compiled_at=entry.compiled_at,
+            compile_model=entry.compile_model,
+            compile_prompt_version=entry.compile_prompt_version,
             entities=[
                 EntityRead(kind=kind, value=value, source=source)
                 for kind, value, source in facts.entities
@@ -270,6 +283,113 @@ class StatsRead(BaseModel):
     embeddings_configured: bool
 
 
+class EmbedPendingResponse(BaseModel):
+    """What one "Embed now" did, and what is left for the next call.
+
+    ``pending`` is the whole backlog, not this call's remainder, so the client
+    loops while it is above zero — and it is the same count ``StatsRead`` reports.
+    ``tokens`` is Voyage's, counted separately from the Anthropic compile budget.
+    """
+
+    embedded: int
+    pending: int
+    tokens: int
+
+
+class CompileEntity(BaseModel):
+    """An entity a compile proposed. Always stored with ``source='model'``."""
+
+    kind: str
+    value: str
+
+
+class CompileNewTopic(BaseModel):
+    """A topic the model proposed. **Nothing is created from it** — the client
+    confirms it through ``POST /api/kb/topics``, which already exists."""
+
+    name: str
+    description: str | None = None
+
+
+class CompileResponse(BaseModel):
+    """What one compile did, or why it did nothing.
+
+    Everything except an unknown entry is a **200**: a spent budget, a refusal
+    and an unusable answer are outcomes of asking a model to summarise security
+    content, not server errors. ``reason_code`` is the closed set a client can
+    branch on; ``reason`` is the sentence it shows.
+    """
+
+    entry: EntryRead
+    compiled: bool
+    reason: str | None = None
+    reason_code: Literal["budget", "refusal", "parse", "no_text", "api_error"] | None = None
+    input_tokens: int = 0
+    output_tokens: int = 0
+    model: str | None = None
+    prompt_version: int | None = None
+    new_topic: CompileNewTopic | None = None
+    #: Already applied (and marked ``suggested``) when ``kb_auto_accept_suggestions``
+    #: is on; reported and not applied when it is off.
+    suggested_topic_ids: list[int] = Field(default_factory=list)
+    suggested_tags: list[str] = Field(default_factory=list)
+    entities: list[CompileEntity] = Field(default_factory=list)
+
+
+class CompileRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    entry_ids: list[int] = Field(min_length=1, max_length=100)
+
+    @field_validator("entry_ids")
+    @classmethod
+    def _unique(cls, value: list[int]) -> list[int]:
+        """Drop repeats, keep the order.
+
+        A repeated id is real money: the batch loop would compile and **bill**
+        the same entry twice, and the estimate would quote double for it. Here
+        rather than in the route so the price and the charge cannot disagree,
+        which is what would make the double charge invisible.
+        """
+        return list(dict.fromkeys(value))
+
+
+class CompileBatchResponse(BaseModel):
+    """One result per requested entry, in request order."""
+
+    results: list[CompileResponse]
+
+
+class CompileEstimateResponse(BaseModel):
+    """What "Compile N" would cost. No model call is made to produce it."""
+
+    entries: int
+    input_tokens: int
+    budget_remaining: int
+    would_exceed: bool
+
+
+class BudgetRead(BaseModel):
+    """Month-to-date knowledge-base spend, derived from ``kb_activity``.
+
+    The Anthropic figures are **compile only** — chat spend is counted per
+    session and is deliberately not added here. ``voyage`` is counted separately
+    and is never added to them: it is this application's own estimate
+    (``ceil(chars / 3.6)``) of what was embedded, not a figure Voyage billed,
+    which is what ``voyage_estimated`` says out loud.
+    """
+
+    month: str
+    limit: int
+    anthropic_input: int
+    anthropic_output: int
+    anthropic_total: int
+    remaining: int
+    exhausted: bool
+    voyage: int
+    voyage_estimated: bool = True
+
+
 class TopicRead(BaseModel):
     id: int
     name: str
@@ -386,7 +506,15 @@ __all__ = [
     "ActivityListResponse",
     "ActivityRead",
     "Authorship",
+    "BudgetRead",
     "CapturedBy",
+    "CompileBatchResponse",
+    "CompileEntity",
+    "CompileEstimateResponse",
+    "CompileNewTopic",
+    "CompileRequest",
+    "CompileResponse",
+    "EmbedPendingResponse",
     "EntityRead",
     "EntryCreate",
     "EntryDetailRead",

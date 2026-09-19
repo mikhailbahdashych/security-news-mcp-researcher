@@ -1,8 +1,9 @@
 # Security News MCP Researcher
 
 A local-only, single-user web app for security engineers: an RSS security-news inbox,
-an LLM research chat, and a meeting-notes generator. FastAPI backend, React SPA,
-SQLite storage — nothing leaves your machine except the calls you ask it to make.
+an LLM research chat, a meeting-notes generator and a searchable knowledge base of what
+you kept. FastAPI backend, React SPA, SQLite storage — nothing leaves your machine except
+the calls you ask it to make.
 
 ## Quickstart (Docker)
 
@@ -90,6 +91,32 @@ streamed and can be stopped; it writes **nothing** unless it finishes, so a refu
 a stop leaves no half-note behind. A saved note records its sources — the items it was
 asked about, plus any page the model deliberately fetched or actually cited. Edit it in
 place, **Copy** it, or **Download** it as `.md`.
+
+## Knowledge base
+
+**Knowledge** is the durable layer: articles you starred, notes you saved, URLs you
+pasted, each kept with its own text snapshot so a page that is later edited or taken
+down is still readable. Save a whole Inbox selection at once with **Save to knowledge
+base** — it streams its progress and can be stopped, and what was already saved stays.
+
+Search works with no extra key: it is SQLite FTS5 over the snapshots. For **semantic
+search**, put a Voyage AI key in **Settings → Knowledge** (or `VOYAGE_API_KEY` in `.env`,
+same precedence as the Anthropic key, and it is only ever read back masked), then press
+**Embed now** to work through anything captured before the key existed. From then on a
+search runs both legs and each hit says which one found it.
+
+**Compile** asks a model to summarise one entry and suggest topics, tags and vendors.
+That is the only part that costs money, so it is manual by default and the dialog prices
+a batch before you confirm it — a **monthly token budget** (Settings → Knowledge) stops
+compiling when the month's allowance is gone, with capture and search unaffected. You can
+switch it to automatic, in which case starring an item waits for the summary. The budget
+counts compile tokens only; chat spend is reported per conversation instead.
+
+Two things are deliberately quiet. A new entry that looks like one you already have is
+**flagged, never merged** — you merge or dismiss. And **findings** (keeping a finished
+research answer as an entry of its own) are **off** until you turn them on: they are
+written by a model, so they are marked as such and never fed back to a model until you
+have reviewed one.
 
 ## Search and history
 

@@ -27,6 +27,18 @@ export function isNotFound(error: unknown): boolean {
 }
 
 /**
+ * The `detail` of a refusal with exactly this status, or `null`.
+ *
+ * The status is named by the caller because "the server explained itself" is
+ * only true for the refusals a screen can act on; a 500 or a dead backend has
+ * nothing to explain, and printing its text over the caller's own wording tells
+ * the reader less, not more.
+ */
+export function detailFor(error: unknown, status: number): string | null {
+  return error instanceof ApiError && error.status === status ? error.detail : null
+}
+
+/**
  * The sentence behind a 409, or `null` for anything else.
  *
  * A 409 from this API is never a bug: it is the one refusal the user can act on
@@ -37,7 +49,35 @@ export function isNotFound(error: unknown): boolean {
  * caller's own wording, because a 500 or a dead backend has nothing to explain.
  */
 export function conflictDetail(error: unknown): string | null {
-  return error instanceof ApiError && error.status === 409 ? error.detail : null
+  return detailFor(error, 409)
+}
+
+/**
+ * An error body's `detail`, as a sentence.
+ *
+ * FastAPI's own errors carry a string. A **validation** error (422) carries an
+ * array of `{loc, msg, …}` — printed raw that is ~180 characters of JSON in a red
+ * one-liner, so it is read instead: the field's name and what was wrong with it.
+ * Anything else falls back to JSON, never to `[object Object]`.
+ */
+export function detailText(detail: unknown): string {
+  if (typeof detail === 'string') {
+    return detail
+  }
+  if (Array.isArray(detail) && detail.length > 0) {
+    const lines = detail.map((item) => {
+      if (item && typeof item === 'object' && typeof (item as { msg?: unknown }).msg === 'string') {
+        const { loc, msg } = item as { loc?: unknown; msg: string }
+        const field = Array.isArray(loc) ? loc[loc.length - 1] : null
+        return typeof field === 'string' ? `${field}: ${msg}` : msg
+      }
+      return null
+    })
+    if (lines.every((line): line is string => line !== null)) {
+      return lines.join('; ')
+    }
+  }
+  return JSON.stringify(detail)
 }
 
 async function readDetail(response: Response): Promise<string> {
@@ -45,7 +85,7 @@ async function readDetail(response: Response): Promise<string> {
     const body: unknown = await response.json()
     if (body && typeof body === 'object' && 'detail' in body) {
       const { detail } = body as { detail: unknown }
-      return typeof detail === 'string' ? detail : JSON.stringify(detail)
+      return detailText(detail)
     }
   } catch {
     // Non-JSON error body (e.g. a proxy error page); fall through to the status text.

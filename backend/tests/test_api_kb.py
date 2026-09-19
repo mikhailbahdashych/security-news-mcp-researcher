@@ -8,14 +8,17 @@ code under test.
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from datetime import datetime, timedelta
 
 import httpx2
 import pytest
 from feed_fixtures import fixture_text, routes_transport
 from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_kb_service
+from app.api.deps import build_anthropic_client, get_db, get_kb_service
+from app.config import Settings
 from app.db.models import Feed, FeedItem, Note, utcnow
 from app.kb.capture import capture_article
 from app.kb.models import KbActivity, KbEntry, KbEntryTopic, Topic
@@ -421,6 +424,78 @@ async def test_merge_keeps_the_older_entry(client, kb):
     assert response.json()["deleted_at"] is None
 
 
+async def _flagged(kb, db_session):
+    """Two entries, the newer one flagged as a possible duplicate of the older."""
+    older = await _seed(kb, title="Older", url="https://example.test/older", text=BODY)
+    newer = await _seed(kb, title="Older", url="https://example.test/newer", text=BODY)
+    entry = await db_session.get(KbEntry, newer.entry_id)
+    entry.possible_duplicate_of = older.entry_id
+    await db_session.commit()
+    return older, newer
+
+
+async def test_not_a_duplicate_clears_the_flag_and_records_it(client, kb, db_session):
+    older, newer = await _flagged(kb, db_session)
+    before = await db_session.scalar(
+        select(KbEntry.updated_at).where(KbEntry.id == newer.entry_id)
+    )
+
+    response = await client.post(f"/api/kb/entries/{newer.entry_id}/not-a-duplicate")
+
+    assert response.status_code == 200
+    assert response.json()["id"] == newer.entry_id
+    assert response.json()["possible_duplicate_of"] is None
+    # Nothing the entry *says* changed. `updated_at` is `onupdate=utcnow`, so an ORM
+    # write would move it past `compiled_at` and a current summary would call itself
+    # stale — a nudge to pay for a recompile, for dismissing a false positive.
+    after = await db_session.scalar(
+        select(KbEntry.updated_at).where(KbEntry.id == newer.entry_id)
+    )
+    assert after == before
+    # The strip's own "why did this go away" trail must not have a hole in it.
+    rows = (
+        (
+            await db_session.execute(
+                select(KbActivity).where(KbActivity.entry_id == newer.entry_id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    dismissals = [row for row in rows if "possible-duplicate" in (row.detail or "")]
+    assert len(dismissals) == 1
+    assert str(older.entry_id) in dismissals[0].detail
+
+
+async def test_not_a_duplicate_is_idempotent(client, kb, db_session):
+    _, newer = await _flagged(kb, db_session)
+    await client.post(f"/api/kb/entries/{newer.entry_id}/not-a-duplicate")
+
+    # Both the strip and the entry page offer this, and both invalidate `kb`:
+    # the second press must not be an error the user has to read.
+    response = await client.post(f"/api/kb/entries/{newer.entry_id}/not-a-duplicate")
+
+    assert response.status_code == 200
+    assert response.json()["possible_duplicate_of"] is None
+    rows = (
+        (
+            await db_session.execute(
+                select(KbActivity).where(KbActivity.entry_id == newer.entry_id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    # Dismissing nothing is not an event, so the trail gains no second row.
+    assert len([row for row in rows if "possible-duplicate" in (row.detail or "")]) == 1
+
+
+async def test_not_a_duplicate_on_an_unknown_id_is_a_404(client, kb):
+    response = await client.post("/api/kb/entries/9999/not-a-duplicate")
+
+    assert response.status_code == 404
+
+
 # --------------------------------------------------- search, stats, activity
 
 
@@ -565,6 +640,99 @@ async def test_the_star_trigger_respects_the_policy_setting(client, kb, item):
     await client.patch(f"/api/items/{item.id}", json={"status": "starred"})
 
     assert (await client.get("/api/kb/entries")).json()["entries"] == []
+
+
+@pytest.fixture
+def request_sessions(app, session_factory) -> list[AsyncSession]:
+    """The sessions the routes themselves are handed.
+
+    A test can then ask the one question ``capture.py``'s header cares about:
+    was a transaction still open on the request's own session while a capture
+    ran? Nothing else can see it — the session is a dependency, and by the time
+    the response comes back it has been closed.
+    """
+    sessions: list[AsyncSession] = []
+
+    async def watched() -> AsyncIterator[AsyncSession]:
+        async with session_factory() as session:
+            sessions.append(session)
+            yield session
+
+    app.dependency_overrides[get_db] = watched
+    return sessions
+
+
+async def test_the_kb_dependency_hands_back_a_session_with_no_open_transaction(
+    session_factory, db_session
+):
+    """``get_kb_service`` reads the embedder settings on the request's session.
+
+    That SELECT opens a read transaction, and every ``/api/kb`` route then holds
+    it for the whole request — across ``POST /kb/embed-pending``'s Voyage calls,
+    which is the largest embed in the app. The dependency ends what it started.
+    """
+    await get_kb_service(
+        db_session, session_factory, Settings(voyage_api_key=""), build_anthropic_client
+    )
+
+    assert db_session.in_transaction() is False
+
+
+class _TransactionWatch(KbService):
+    """A knowledge base that records the transaction state it was called in."""
+
+    def __init__(self, sessions: list[AsyncSession], **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._sessions = sessions
+        self.open_transactions: list[bool] = []
+
+    def _observe(self) -> None:
+        self.open_transactions.append(any(s.in_transaction() for s in self._sessions))
+
+    async def capture_feed_item(self, *args, **kwargs):
+        self._observe()
+        return None
+
+    async def capture_note(self, *args, **kwargs):
+        self._observe()
+        return None
+
+
+async def test_the_star_route_finishes_its_own_db_work_before_capturing(
+    client, app, session_factory, item, request_sessions
+):
+    """No transaction is held across an embedding call — ``capture.py``'s rule.
+
+    The capture is outbound HTTPS, and ``refresh`` plus ``feed_titles`` had
+    reopened a read transaction on the request's session after the commit. SQLite
+    has one writer; a read transaction parked on it for the length of a Voyage
+    round trip is exactly what that rule forbids.
+    """
+    service = _TransactionWatch(request_sessions, session_factory=session_factory)
+    app.dependency_overrides[get_kb_service] = lambda: service
+
+    response = await client.patch(f"/api/items/{item.id}", json={"status": "starred"})
+
+    assert response.status_code == 200
+    assert len(request_sessions) == 1  # the override applied: the check below is not vacuous
+    assert service.open_transactions == [False]
+
+
+async def test_the_note_route_finishes_its_own_db_work_before_capturing(
+    client, app, session_factory, db_session, request_sessions
+):
+    """The same rule on the other trigger that captures from inside a request."""
+    note = Note(title="Week 12", body_md=BODY, template_used="t")
+    db_session.add(note)
+    await db_session.commit()
+    service = _TransactionWatch(request_sessions, session_factory=session_factory)
+    app.dependency_overrides[get_kb_service] = lambda: service
+
+    response = await client.patch(f"/api/notes/{note.id}", json={"body_md": BODY + "\n\nMore."})
+
+    assert response.status_code == 200
+    assert len(request_sessions) == 1  # the override applied: the check below is not vacuous
+    assert service.open_transactions == [False]
 
 
 async def test_a_capture_failure_never_fails_the_star(

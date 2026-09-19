@@ -1,11 +1,17 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  budgetLabel,
+  compileMetaLabel,
+  compileOutcome,
   cveChips,
+  duplicateLabel,
+  embeddingStatus,
   entityChips,
   entityFilter,
   entityHint,
   entryTimestamp,
+  formatTokens,
   groupEntriesByDay,
   hitSnippet,
   kbEntryLink,
@@ -14,9 +20,12 @@ import {
   parseEntryId,
   refreshFailed,
   refreshMessage,
+  searchModeLabel,
   sinceDaysAgo,
   sourceLabel,
+  summaryStale,
   vecVersionLabel,
+  type KbBudget,
   type KbEntry,
   type KbRefreshResult,
   type KbHit,
@@ -42,6 +51,8 @@ function entry(overrides: Partial<KbEntry> = {}): KbEntry {
     summary_md: null,
     notes_md: '',
     compiled_at: null,
+    compile_model: null,
+    compile_prompt_version: null,
     entities: [],
     topics: [],
     tags: [],
@@ -357,5 +368,173 @@ describe('refreshMessage', () => {
   it('reads a reason from a backend that sends no status as a failure', () => {
     const older = { entry: entry(), changed: false, version: 1, reason: 'timed out' }
     expect(refreshMessage(older as KbRefreshResult)).toBe('Refresh failed: timed out')
+  })
+})
+
+// ------------------------------------------------- Phase 2: tokens and budget
+
+describe('formatTokens', () => {
+  it('leaves small counts alone and shortens the large ones', () => {
+    expect(formatTokens(0)).toBe('0')
+    expect(formatTokens(999)).toBe('999')
+    expect(formatTokens(1_000)).toBe('1.0K')
+    expect(formatTokens(12_340)).toBe('12.3K')
+    // The monthly ceiling is the one number here that reaches seven figures,
+    // and `5000k` is not a number anybody reads as five million.
+    expect(formatTokens(5_000_000)).toBe('5.0M')
+  })
+
+  it('does not render a negative as a token count', () => {
+    expect(formatTokens(-12)).toBe('0')
+    expect(formatTokens(Number.NaN)).toBe('0')
+  })
+})
+
+function budget(overrides: Partial<KbBudget> = {}): KbBudget {
+  return {
+    month: '2026-09',
+    limit: 5_000_000,
+    anthropic_input: 120_345,
+    anthropic_output: 8_801,
+    anthropic_total: 129_146,
+    remaining: 4_870_854,
+    exhausted: false,
+    voyage: 412_000,
+    voyage_estimated: true,
+    ...overrides,
+  }
+}
+
+describe('budgetLabel', () => {
+  it('reads the month against the limit', () => {
+    const label = budgetLabel(budget())
+    expect(label.used).toBe('129.1K')
+    expect(label.limit).toBe('5.0M')
+    expect(label.pct).toBe(3)
+    expect(label.exhausted).toBe(false)
+  })
+
+  it('flips to spent exactly at the limit, and stays there past it', () => {
+    expect(budgetLabel(budget({ anthropic_total: 4_999_999 })).exhausted).toBe(false)
+    expect(budgetLabel(budget({ anthropic_total: 5_000_000 })).exhausted).toBe(true)
+    const over = budgetLabel(budget({ anthropic_total: 6_000_000 }))
+    expect(over.exhausted).toBe(true)
+    // The bar cannot run past its own end.
+    expect(over.pct).toBe(100)
+  })
+
+  it('reads a limit of zero as "no compiling at all" rather than dividing by it', () => {
+    const none = budgetLabel(budget({ limit: 0, anthropic_total: 0 }))
+    expect(none.pct).toBe(100)
+    expect(none.exhausted).toBe(true)
+  })
+})
+
+describe('embeddingStatus', () => {
+  it('says nothing when every chunk is embedded', () => {
+    expect(embeddingStatus({ chunks: 11, pending_chunks: 0 })).toBeNull()
+    expect(embeddingStatus({ chunks: 0, pending_chunks: 0 })).toBeNull()
+  })
+
+  it('counts the embedded ones, because no API field carries them', () => {
+    expect(embeddingStatus({ chunks: 11, pending_chunks: 3 })).toBe('8 of 11 chunks embedded')
+  })
+})
+
+describe('searchModeLabel', () => {
+  it('says hybrid when the server says hybrid', () => {
+    expect(searchModeLabel('hybrid', true)).toMatch(/meaning/i)
+  })
+
+  it('points at the missing key when the search was keywords only', () => {
+    expect(searchModeLabel('keyword', false)).toMatch(/Voyage/)
+  })
+
+  it('points at Embed now when a key is configured but nothing is embedded', () => {
+    expect(searchModeLabel('keyword', true)).toMatch(/Embed now/)
+  })
+
+  it('has nothing to say when nothing was searched', () => {
+    expect(searchModeLabel(undefined, true)).toBeNull()
+  })
+})
+
+describe('duplicateLabel', () => {
+  it('names the entry it would be folded into', () => {
+    const newer = entry({ id: 9, possible_duplicate_of: 4 })
+    const older = entry({ id: 4, title: 'ChainDrop worm hits npm' })
+    expect(duplicateLabel(newer, older)).toBe('Possible duplicate of “ChainDrop worm hits npm”')
+  })
+
+  it('falls back to the id when the other entry is not on this page', () => {
+    expect(duplicateLabel(entry({ id: 9, possible_duplicate_of: 4 }), undefined)).toBe(
+      'Possible duplicate of entry #4',
+    )
+  })
+
+  it('admits that without a key the flag is the title alone', () => {
+    // Two unrelated advisories with similar headlines flag each other, and the
+    // row has to say why before anyone merges them.
+    expect(duplicateLabel(entry({ possible_duplicate_of: 4 }), undefined, false)).toMatch(
+      /title alone/,
+    )
+  })
+})
+
+describe('compileOutcome', () => {
+  it('is a sentence for every reason code, not an error', () => {
+    expect(compileOutcome({ compiled: true, reason: null, reason_code: null })).toBe('Summarised.')
+    expect(compileOutcome({ compiled: false, reason: null, reason_code: 'budget' })).toMatch(
+      /budget is spent/,
+    )
+    expect(compileOutcome({ compiled: false, reason: null, reason_code: 'refusal' })).toMatch(
+      /declined/,
+    )
+    expect(compileOutcome({ compiled: false, reason: null, reason_code: 'parse' })).toMatch(
+      /not in a shape/,
+    )
+    expect(compileOutcome({ compiled: false, reason: null, reason_code: 'no_text' })).toMatch(
+      /no captured text/,
+    )
+    expect(compileOutcome({ compiled: false, reason: null, reason_code: 'api_error' })).toMatch(
+      /did not get through/,
+    )
+  })
+
+  it('keeps the backend’s own detail after the sentence', () => {
+    expect(
+      compileOutcome({ compiled: false, reason: 'cyber: no', reason_code: 'refusal' }),
+    ).toMatch(/cyber: no$/)
+  })
+
+  it('still says something when a newer backend sends a code this build has no word for', () => {
+    expect(
+      compileOutcome({
+        compiled: false,
+        reason: null,
+        reason_code: 'quota' as unknown as null,
+      }),
+    ).toBe('Not summarised.')
+  })
+})
+
+describe('compileMetaLabel and summaryStale', () => {
+  it('names the model that answered and the prompt it answered', () => {
+    expect(
+      compileMetaLabel(entry({ compile_model: 'claude-sonnet-5', compile_prompt_version: 3 })),
+    ).toBe('claude-sonnet-5 · prompt v3')
+    expect(compileMetaLabel(entry())).toBeNull()
+  })
+
+  it('calls a summary stale only once the entry moved after it', () => {
+    const compiled = entry({
+      summary_md: '## Summary',
+      compiled_at: '2026-09-16T09:00:00',
+      updated_at: '2026-09-16T09:00:00',
+    })
+    expect(summaryStale(compiled)).toBe(false)
+    expect(summaryStale({ ...compiled, updated_at: '2026-09-17T10:00:00' })).toBe(true)
+    // Nothing to be stale about.
+    expect(summaryStale(entry())).toBe(false)
   })
 })

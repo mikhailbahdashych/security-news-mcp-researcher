@@ -36,6 +36,7 @@ from fastapi import APIRouter, HTTPException, Query, Response, status
 from app.api.deps import KbServiceDep
 from app.kb import capture as capture_module
 from app.kb.capture import KbConflict
+from app.kb.embeddings import EmbeddingError
 from app.kb.models import KbEntry
 from app.kb.service import (
     DEFAULT_ACTIVITY_LIMIT,
@@ -51,6 +52,7 @@ from app.kb.service import (
 from app.schemas.kb import (
     ActivityListResponse,
     ActivityRead,
+    EmbedPendingResponse,
     EntryCreate,
     EntryDetailRead,
     EntryListResponse,
@@ -132,6 +134,12 @@ async def create_entry(payload: EntryCreate, response: Response, kb: KbServiceDe
     A save of something that is in the trash revives it, so the 200 always
     describes an entry the user can now see — reporting "Saved" for a row that
     stays hidden is the one answer that is not true.
+
+    **In ``kb_compile_mode: auto`` this response waits for an Anthropic call**
+    and the 201 already carries ``summary_md`` and ``compile_model``. One capture
+    compiles inline by design (spec §4.5), so Save takes seconds rather than
+    milliseconds and needs a pending state in the UI. The default mode is
+    ``manual``; a bulk run opts out entirely.
     """
     try:
         if payload.feed_item_id is not None:
@@ -321,6 +329,23 @@ async def merge_entry(entry_id: int, payload: MergeRequest, kb: KbServiceDep) ->
     return await _read(kb, await _load(kb, kept_id))
 
 
+@router.post("/entries/{entry_id}/not-a-duplicate", response_model=EntryRead)
+async def not_a_duplicate(entry_id: int, kb: KbServiceDep) -> EntryRead:
+    """Dismiss a possible-duplicate flag (plan decision P2-23).
+
+    Idempotent, because the strip and the entry page both offer it and both
+    invalidate the same cache: an entry that carries no flag is a 200 with
+    nothing done. A merge used to be the only thing that cleared the flag, and
+    with no Voyage key the flag comes from the title trigram alone — so the
+    answer to a false positive was folding two unrelated entries together.
+    """
+    try:
+        await kb.dismiss_duplicate(entry_id)
+    except LookupError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Entry not found") from exc
+    return await _read(kb, await _load(kb, entry_id))
+
+
 @router.post("/entries/{entry_id}/topics", response_model=EntryRead)
 async def set_entry_topics(
     entry_id: int, payload: EntryTopicsRequest, kb: KbServiceDep
@@ -373,6 +398,32 @@ async def search(payload: SearchRequest, kb: KbServiceDep) -> SearchResponse:
 @router.get("/stats", response_model=StatsRead)
 async def stats(kb: KbServiceDep) -> StatsRead:
     return StatsRead.model_validate(await kb.stats())
+
+
+@router.post("/embed-pending", response_model=EmbedPendingResponse)
+async def embed_pending(kb: KbServiceDep) -> EmbedPendingResponse:
+    """Embed a bounded slice of the chunks that have no vector yet.
+
+    User-triggered (Settings -> Knowledge -> **Embed now**), like everything else
+    in this application: entries captured before a Voyage key was entered are
+    keyword-searchable and stay that way until someone asks for them to be
+    embedded. The client calls again while the answer says chunks are pending.
+
+    **409** with no key configured — nothing to embed *with* is not a failure of
+    the request. **502** when the provider refuses: the chunks it did not reach
+    stay pending and the next call resumes from them.
+    """
+    if kb.embedder.dimensions <= 0:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "No Voyage API key is configured, so there is nothing to embed with.",
+        )
+    try:
+        return EmbedPendingResponse.model_validate(await kb.embed_pending())
+    except EmbeddingError as exc:
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY, f"The embedding provider refused: {exc.message}"
+        ) from exc
 
 
 @router.get("/activity", response_model=ActivityListResponse)

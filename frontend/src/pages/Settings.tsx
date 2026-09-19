@@ -2,6 +2,8 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useId, useState, type ReactNode } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 
+import { detailFor } from '../api/client'
+import { kbQueryKey } from '../api/kb'
 import {
   EFFORTS,
   THINKING_DISPLAYS,
@@ -12,6 +14,7 @@ import {
   updateSettings,
   type AppSettings,
   type Effort,
+  type NotWritable,
   type SettingsUpdate,
   type ThinkingDisplay,
 } from '../api/settings'
@@ -29,7 +32,7 @@ import Checkbox from '../components/ui/Checkbox'
 import EmptyState from '../components/ui/EmptyState'
 import Input from '../components/ui/Input'
 import PageHeader from '../components/ui/PageHeader'
-import Select from '../components/ui/Select'
+import Select, { UnknownOption } from '../components/ui/Select'
 import Textarea from '../components/ui/Textarea'
 import { FIELD_HINT } from '../components/ui/classes'
 import {
@@ -43,14 +46,13 @@ import {
 import type { EmbeddablePageProps } from '../components/ui/PageHost'
 import Page from './Page'
 
-/** Everything this form edits: not the write-only API key, not the read-only
- *  `key_source` that describes where it came from, and not the KB schema version
- *  the index reports about itself. `SettingsUpdate` omits exactly the same four,
- *  because `PUT /api/settings` forbids extra fields. */
-type Draft = Omit<
-  AppSettings,
-  'has_api_key' | 'api_key_masked' | 'key_source' | 'kb_schema_version'
->
+/** Everything this form edits: not the two write-only API keys, not the
+ *  read-only fields that describe where they came from, not the KB schema
+ *  version the index reports about itself and not the shipped compile prompt.
+ *  `NotWritable` is the one list, shared with `SettingsUpdate` — a second copy
+ *  here is how a read-only field ends up in a PUT that then 422s the whole
+ *  form, because `SettingsUpdate` forbids extra fields. */
+type Draft = Omit<AppSettings, NotWritable>
 
 /** Listed field by field so that adding a setting to the API is a type error here
  *  until the form handles it. */
@@ -68,20 +70,20 @@ const toDraft = (settings: AppSettings): Draft => ({
   kb_capture_starred: settings.kb_capture_starred,
   kb_capture_notes: settings.kb_capture_notes,
   kb_min_snapshot_chars: settings.kb_min_snapshot_chars,
+  kb_embedding_model: settings.kb_embedding_model,
+  kb_capture_findings: settings.kb_capture_findings,
+  kb_compile_mode: settings.kb_compile_mode,
+  kb_compile_model: settings.kb_compile_model,
+  kb_compile_effort: settings.kb_compile_effort,
+  kb_compile_prompt: settings.kb_compile_prompt,
+  kb_compile_max_chars: settings.kb_compile_max_chars,
+  kb_compile_monthly_token_budget: settings.kb_compile_monthly_token_budget,
+  kb_auto_accept_suggestions: settings.kb_auto_accept_suggestions,
+  kb_reviewed_only: settings.kb_reviewed_only,
+  kb_recency_boost: settings.kb_recency_boost,
+  kb_rerank: settings.kb_rerank,
+  kb_duplicate_threshold: settings.kb_duplicate_threshold,
 })
-
-/**
- * The current value as an option of its own, when it is not one of ours.
- *
- * A `<select>` whose value matches no option renders as the first one, so a
- * stored "turbo" would show as "low" — and the next save would write that back
- * as though the user had chosen it. The API coerces an off-union value to the
- * default before it ever gets here; this is the second lock, for a response from
- * an older build or a hand-edited database.
- */
-function UnknownOption({ value, options }: { value: string; options: readonly string[] }) {
-  return options.includes(value) ? null : <option value={value}>{value} (unknown value)</option>
-}
 
 /** Settings looks the same in both panes: it edits app state, not a selection. */
 export default function SettingsPage(_props: EmbeddablePageProps) {
@@ -131,22 +133,43 @@ function SettingsForm({ settings }: { settings: AppSettings }) {
 
   const save = useMutation({
     mutationFn: (patch: SettingsUpdate) => updateSettings(patch),
-    onSuccess: (result) => {
+    onSuccess: async (result) => {
       const next = toDraft(result)
       setDraft(next)
       setSaved(next)
-      return queryClient.invalidateQueries({ queryKey: settingsQueryKey })
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: settingsQueryKey }),
+        // The Knowledge panel is on this same page and half of it is derived
+        // from settings the server acts on as it stores them: a changed
+        // embedding model empties the vector index inside this very PUT, and
+        // `kb_reviewed_only` / `kb_recency_boost` / `kb_duplicate_threshold`
+        // change what a search would answer. Without this the panel below the
+        // button keeps saying everything is embedded, with Embed now — the one
+        // control the user now needs — disabled.
+        queryClient.invalidateQueries({ queryKey: kbQueryKey }),
+      ])
     },
   })
 
-  const edit = <K extends keyof Draft>(key: K, value: Draft[K]) => {
+  const editMany = (patch: Partial<Draft>) => {
     save.reset()
-    setDraft((current) => ({ ...current, [key]: value }))
+    setDraft((current) => ({ ...current, ...patch }))
+  }
+
+  const edit = <K extends keyof Draft>(key: K, value: Draft[K]) => {
+    editMany({ [key]: value } as Partial<Draft>)
   }
 
   // Every value in a draft is a primitive, so key-by-key identity is the whole
   // comparison — no deep equality, and no false positives from a re-render.
   const dirty = (Object.keys(draft) as (keyof Draft)[]).some((key) => draft[key] !== saved[key])
+  // The one field a save must not be allowed to empty. The API refuses it too
+  // (a 422 since P2-24); this is the half that keeps the user from meeting that
+  // refusal as "could not save" over a form they cannot see the fault in.
+  const invalid = draft.kb_compile_prompt.trim() === '' || draft.kb_compile_model.trim() === ''
+  // A refusal the server explained. Only a 422 qualifies: it names the field,
+  // which is the part the reader needs and the part "could not save" throws away.
+  const refused = detailFor(save.error, 422)
   const models = modelsQuery.data ?? []
 
   return (
@@ -274,16 +297,7 @@ function SettingsForm({ settings }: { settings: AppSettings }) {
 
       <McpSection />
 
-      <KnowledgeSection
-        uid={uid}
-        captureStarred={draft.kb_capture_starred}
-        captureNotes={draft.kb_capture_notes}
-        minSnapshotChars={draft.kb_min_snapshot_chars}
-        schema={settings.kb_schema_version}
-        onCaptureStarred={(checked) => edit('kb_capture_starred', checked)}
-        onCaptureNotes={(checked) => edit('kb_capture_notes', checked)}
-        onMinSnapshotChars={(value) => edit('kb_min_snapshot_chars', value)}
-      />
+      <KnowledgeSection uid={uid} draft={draft} settings={settings} onEdit={editMany} />
 
       <SettingsSection title="Feeds">
         <NumberField
@@ -340,7 +354,7 @@ function SettingsForm({ settings }: { settings: AppSettings }) {
       <div className="flex flex-wrap items-center gap-3">
         <Button
           variant="primary"
-          disabled={!dirty}
+          disabled={!dirty || invalid}
           loading={save.isPending}
           onClick={() => save.mutate(draft)}
         >
@@ -348,7 +362,12 @@ function SettingsForm({ settings }: { settings: AppSettings }) {
         </Button>
         {save.isSuccess ? <span className="text-[11.5px] text-green">Saved</span> : null}
         {save.isError ? (
-          <span className="text-[11.5px] text-red">Could not save. Is the backend running?</span>
+          <span className="text-[11.5px] text-red">
+            {/* A 422 names the field it refused. "Is the backend running?" over
+                it is false and points at nothing — that wording belongs to the
+                failure that really is a dead backend. */}
+            {refused ?? 'Could not save. Is the backend running?'}
+          </span>
         ) : null}
       </div>
     </Shell>

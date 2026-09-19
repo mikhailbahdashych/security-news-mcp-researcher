@@ -6,6 +6,7 @@ Read `backend/CLAUDE.md` (app wiring, SSE table, test harness) and the root
 | File | What it holds |
 |---|---|
 | `runner.py` | `run(...)` — the loop. `sanitize_for_replay`, `parse_tool_input`, the server-tool result decoding. |
+| `oneshot.py` | `structured_call` / `structured_call_result` — the one LLM call that does **not** go through `run()`. |
 | `registry.py` | `ToolProvider` protocol, `RegisteredTool`, `ToolResult`, `ToolSource`, `ToolRegistry`, `sanitize_tool_name`. |
 | `builtin.py` | `BuiltinToolProvider` (3 local tools) and `ServerToolProvider` (Anthropic web_search/web_fetch). |
 | `providers.py` | `build_tool_providers(request, session, session_factory)` — the **only** place the provider list is built — and `turn_settings(session, app_settings)`, the **only** place a run's settings are read. |
@@ -290,6 +291,52 @@ rather than an error. `session_factory` is passed explicitly rather than read of
 `app.state` so a test overriding `get_session_factory` really redirects the built-ins'
 own transactions.
 
+## `oneshot.py` — the one exception to "every LLM call goes through `run()`"
+
+`structured_call(client, *, model, effort, system, user, schema) -> dict`, and
+`structured_call_result(...) -> StructuredResult(data, usage, model, stop_reason)`
+beside it when the caller also needs the turn's token counters. Compile needs a
+**parsed object** back; `run()` is an `AsyncIterator[AgentEvent]` with no
+structured-output parameter, so there is no path by which a caller receives one.
+That is the whole reason this module exists — nothing else in the app may call
+`messages.create` / `messages.stream` directly.
+
+The request is the loop's, minus `tools`, minus persistence, plus
+`output_config["format"] = {"type": "json_schema", "schema": …}`: the same
+`betas=[FALLBACK_BETA]`, `fallbacks=FALLBACKS`, `MAX_TOKENS` and `.stream()` +
+`get_final_message()`, and the same **`stop_reason` before `content`** rule —
+`refusal` → `RefusalError` carrying `stop_details.category`, with `content` never
+touched; `max_tokens`, `pause_turn` (a tool-free call has nothing to resume) and
+anything else → `OneshotError`; a body that is not a JSON *object* →
+`StructuredParseError` with a 200-character preview, never the whole thing.
+
+- **Citations are never enabled on a structured call.** `citations: {"enabled":
+  true}` on a `document` or `search_result` block *together with* an
+  `output_config.format` is a **400**. That binds every structured call this app
+  ever grows, digests included.
+- **No `cache_control`.** A one-shot call over a unique article writes a cache
+  entry at the 1.25× surcharge and never reads it back, so nothing here is
+  prompt-cache prefix and nothing here has to stay byte-stable.
+- A `fallbacks` switch is a plain 200 whose `model` differs from the one asked
+  for. `StructuredResult.model` records the model that answered; it is never
+  compared to the requested one. When the switch happened **mid-output** the
+  turn also carries a `fallback` content block, and only the text blocks
+  **after the last one** are the answer — the abandoned model's half-written
+  JSON sits ahead of the boundary and joining both halves is a parse error out
+  of a good 200. `runner.fallback_boundary()` is the one place that boundary is
+  found; `sanitize_for_replay` uses the same helper.
+- Callers catch **two** families: `OneshotError` and `anthropic.APIStatusError`.
+  The SDK's exceptions are deliberately not wrapped, so a 429 is still a 429 to
+  whoever decides whether to retry.
+- **A failed structured call is still a billed one.** A refusal and a
+  `max_tokens` stop are HTTP 200s Anthropic charges for, so every `OneshotError`
+  — `RefusalError` and `StructuredParseError` included — carries the turn's
+  `usage` dict in the same shape `StructuredResult.usage` has; it is `None` only
+  when the SDK raised before any response. `kb/compile.py` writes those tokens
+  onto the skip's `kb_activity` row, which is what the monthly compile budget is
+  summed from, so dropping them would leave the budget reading zero through the
+  most expected failure mode this app has.
+
 ## Turn ownership (`turns.py`, `turnlog.py`)
 
 A chat turn is a task this process owns, not a request. `TurnRegistry.start(...)` takes
@@ -365,3 +412,6 @@ see the same turn from the start.
 10. Do not cancel a turn because a client disconnected, and do not reach for
     `app.api.tasks` from here — the API layer imports this package, not the other way
     round (`CANCEL_WAIT_S` lives in `turns.py` for exactly that reason).
+11. Do not enable citations on a call that sets `output_config.format`, and do not
+    "helpfully" add `cache_control` to `oneshot.py`: the first is a 400, the second
+    buys a cache entry at a surcharge that nothing ever reads back.

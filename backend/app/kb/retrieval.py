@@ -11,7 +11,12 @@ Three legs, in this order:
 
 Each leg collapses to its **best chunk per entry before fusion**, so a 13-chunk
 advisory occupies one slot in each top-50 rather than thirteen, and reciprocal
-rank fusion then runs over entry ids rather than chunk ids.
+rank fusion then runs over entry ids rather than chunk ids. The two legs are the
+same size except when a topic filter widened the vector leg's ``k`` (see
+:func:`_vector_leg`): that leg is then longer, and RRF simply ranks its tail
+below everything the shorter leg found. A recency prior is
+the last thing applied to the fused score, because for a security-news knowledge
+base recency is most of the relevance signal rather than a tie-break.
 
 ``Hit.score`` is **opaque**. It orders the hits of one call and means nothing
 across calls — which is exactly what makes a reranker addable later without a
@@ -22,8 +27,9 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
+from app.db.models import utcnow
 from app.kb.embeddings import Embedder
 from app.kb.entities import CVE_PATTERN
 from app.kb.fts import fts_query
@@ -45,6 +51,25 @@ ENTITY_SCORE = 1.0
 #: How much of a chunk is shown as the snippet.
 SNIPPET_CHARS = 400
 
+#: Where the topic-widening loop gives up. Spec §4.4: start at ``leg_size``,
+#: double, stop at 512 — four extra KNNs over a brute-force index is already the
+#: point where a narrower query is the better answer than a wider scan.
+TOPIC_K_CAP = 512
+
+#: An entry newer than this is "recent" for the purpose of the prior.
+RECENCY_WINDOW_DAYS = 90
+
+#: The multiplier a recent entry's fused score gets. Deliberately far larger than
+#: a tie-break: consecutive RRF ranks differ by ~1.6 % at ``RRF_K = 60``
+#: (``1/61`` vs ``1/62``) and this is 25 %, so a recent single-leg hit as deep as
+#: **rank 16 comes out first** — fifteen places of displacement. That is spec
+#: §4.4's "recency is most of the relevance signal, not a tie-break", and
+#: ``test_the_recency_prior_displaces_a_bounded_number_of_rrf_ranks`` is where the
+#: number is pinned. What it can never do is cross the exact leg: RRF over two
+#: legs cannot exceed ``2/(RRF_K + 1)`` ≈ 0.033, so even boosted (× 1.25 ≈ 0.041) a
+#: fused hit stays ~24× below ``ENTITY_SCORE`` — a factor, not two orders.
+RECENCY_BOOST = 1.25
+
 #: ``(entry_id, chunk_id, score)`` — what a leg looks like once hydrated.
 ScoredChunk = tuple[int, int, float]
 
@@ -65,6 +90,45 @@ class Hit:
     score: float
     matched_by: str
     rerank_score: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SearchOutcome:
+    """The hits, plus the one thing about *how* they were found a caller may
+    have to say out loud.
+
+    ``topic_filter_truncated`` is an **internal** signal: the HTTP contract is
+    unchanged and ``Hit`` is unchanged on the wire. The sentence it is for —
+    "narrow filter — results may be incomplete" — is deferred (decision P2-14).
+    """
+
+    hits: list[Hit]
+    topic_filter_truncated: bool = False
+
+
+def apply_recency(
+    fused: list[tuple[int, float]],
+    dates: dict[int, datetime],
+    *,
+    now: datetime,
+    window_days: int = RECENCY_WINDOW_DAYS,
+    boost: float = RECENCY_BOOST,
+) -> list[tuple[int, float]]:
+    """Multiply the fused score of everything published inside the window.
+
+    For a security-news knowledge base recency is most of the relevance signal,
+    not a tie-break — but it is a *prior*, not an ordering: it is multiplicative
+    on a fused score that is already two orders of magnitude below
+    :data:`ENTITY_SCORE`, so nothing recent can ever climb over an exact hit.
+    *dates* is ``COALESCE(published_at, captured_at)`` per entry; an entry with
+    no date gets no boost.
+    """
+    cutoff = now - timedelta(days=window_days)
+    boosted = [
+        (entry_id, score * boost if (dates.get(entry_id) or cutoff) > cutoff else score)
+        for entry_id, score in fused
+    ]
+    return sorted(boosted, key=lambda row: (-row[1], row[0]))
 
 
 def collapse_best_per_entry(
@@ -127,7 +191,47 @@ def _entity_in(query: str, entity: tuple[str, str] | None) -> tuple[str, str] | 
     return ("cve", match.group(0).upper()) if match else None
 
 
-async def hybrid_search(
+async def _vector_leg(
+    store: KnowledgeStore,
+    query_vector: Sequence[float],
+    leg_size: int,
+    filters: SearchFilters,
+) -> tuple[list[tuple[int, float]], bool]:
+    """``([(chunk_id, distance)], topic_filter_truncated)``.
+
+    Topics are many-to-many and would over-shard vec0's partitioning, so they are
+    the one filter that cannot go inside the ``MATCH``. Narrowing the KNN's own
+    ``k`` rows afterwards is exactly the post-filter S1 forbids — so instead the
+    ``k`` widens: start at *leg_size*, double until enough entries survive the
+    topic join, and stop at :data:`TOPIC_K_CAP`. Running out of vectors first is
+    a complete answer; stopping at the cap is not, and says so.
+    """
+    k = leg_size
+    while True:
+        rows = await store.knn(query_vector, k, filters=filters)
+        if not filters.topic_ids:
+            return rows, False
+        _, chunks = await store.load([], [chunk_id for chunk_id, _ in rows])
+        allowed = set(
+            await store.filter_by_topics(
+                list({chunk.entry_id for chunk in chunks.values()}), filters.topic_ids
+            )
+        )
+        kept = [row for row in rows if row[0] in chunks and chunks[row[0]].entry_id in allowed]
+        enough = len({chunks[chunk_id].entry_id for chunk_id, _ in kept}) >= leg_size
+        if enough or len(rows) < k:
+            return kept, False
+        if k >= TOPIC_K_CAP:
+            return kept, True
+        k = min(k * 2, TOPIC_K_CAP)
+
+
+async def hybrid_search(store: KnowledgeStore, embedder: Embedder, q: str, **kwargs) -> list[Hit]:
+    """:func:`hybrid_search_outcome` without the outcome. See it for the contract."""
+    return (await hybrid_search_outcome(store, embedder, q, **kwargs)).hits
+
+
+async def hybrid_search_outcome(
     store: KnowledgeStore,
     embedder: Embedder,
     q: str,
@@ -141,12 +245,15 @@ async def hybrid_search(
     chunk_kinds: tuple[str, ...] = ("body",),
     limit: int = 20,
     leg_size: int = DEFAULT_LEG_SIZE,
-) -> list[Hit]:
+    recency_boost: bool = True,
+) -> SearchOutcome:
     """Search the knowledge base, exact hits first and the two legs fused after.
 
     ``store`` and ``embedder`` are passed in rather than resolved here so this
     stays a function over an interface — the service layer is what knows which
-    embedder the user has configured.
+    embedder the user has configured. ``recency_boost`` is a parameter for the
+    same reason: ``kb_recency_boost`` is a settings row and this module has no
+    session to read one with.
     """
     filters = SearchFilters(
         kinds=kinds,
@@ -167,9 +274,10 @@ async def hybrid_search(
         keyword_rows = await store.keyword(fts_query(q, join="OR"), leg_size, filters=filters)
 
     vector_rows: list[tuple[int, float]] = []
+    truncated = False
     if embedder is not None and embedder.dimensions > 0:
         query_vector = await embedder.embed_query(q)
-        vector_rows = await store.knn(query_vector, leg_size, filters=filters)
+        vector_rows, truncated = await _vector_leg(store, query_vector, leg_size, filters)
 
     # The legs deal in chunk ids; hydrate them so the collapse can be by entry.
     chunk_ids = [chunk_id for chunk_id, _ in keyword_rows] + [
@@ -187,16 +295,6 @@ async def hybrid_search(
         for chunk_id, score in vector_rows
         if chunk_id in chunks
     )
-    if filters.topic_ids and vector_leg:
-        # The KNN cannot express a many-to-many join, so the vector leg narrows on
-        # topics here instead. An adaptive `k` — widening the KNN until enough rows
-        # survive this join — arrives with the vector leg itself in Phase 2; until
-        # then a narrow topic can under-fill this leg.
-        allowed = set(
-            await store.filter_by_topics([row[0] for row in vector_leg], filters.topic_ids)
-        )
-        vector_leg = [row for row in vector_leg if row[0] in allowed]
-
     keyword_by_entry = {entry_id: (chunk_id, score) for entry_id, chunk_id, score in keyword_leg}
     vector_by_entry = {entry_id: (chunk_id, score) for entry_id, chunk_id, score in vector_leg}
 
@@ -204,6 +302,16 @@ async def hybrid_search(
 
     entry_ids = list(dict.fromkeys([*exact_ids, *(entry_id for entry_id, _ in fused)]))
     entries, _ = await store.load(entry_ids, [])
+
+    if recency_boost and fused:
+        fused = apply_recency(
+            fused,
+            {
+                entry_id: entry.published_at or entry.captured_at
+                for entry_id, entry in entries.items()
+            },
+            now=utcnow(),
+        )
 
     hits: list[Hit] = []
     seen: set[int] = set()
@@ -260,17 +368,23 @@ async def hybrid_search(
             )
         )
 
-    return hits[:limit]
+    return SearchOutcome(hits=hits[:limit], topic_filter_truncated=truncated)
 
 
 __all__ = [
     "ENTITY_SCORE",
     "MATCHED_BY",
+    "RECENCY_BOOST",
+    "RECENCY_WINDOW_DAYS",
     "RRF_K",
     "SNIPPET_CHARS",
+    "TOPIC_K_CAP",
     "Hit",
     "ScoredChunk",
+    "SearchOutcome",
+    "apply_recency",
     "collapse_best_per_entry",
     "hybrid_search",
+    "hybrid_search_outcome",
     "rrf",
 ]

@@ -355,6 +355,9 @@ async def post_message(
             client=client,
             prompt=payload.content,
             attachments=chips,
+            # Carried onto the turn for the one thing that happens after it: the
+            # finding capture builds its embedder when the request is long gone.
+            settings=app_settings,
         )
     except TurnAlreadyRunning:
         # The check above lost a race with another POST. The client this one built

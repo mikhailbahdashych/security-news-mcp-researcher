@@ -6,6 +6,7 @@ import hashlib
 import math
 from collections.abc import Sequence
 
+from app.kb.embeddings import EmbeddingError
 from app.kb.schema import VEC_DIMENSIONS
 
 
@@ -22,15 +23,32 @@ def _vector(text: str, dimensions: int) -> list[float]:
 
 
 class FakeEmbedder:
-    """Stands in for ``VoyageEmbedder`` in every test that needs vectors."""
+    """Stands in for ``VoyageEmbedder`` in every test that needs vectors.
 
-    def __init__(self, *, dimensions: int = VEC_DIMENSIONS, model: str = "fake-embed-1") -> None:
+    ``fail_after_batch`` makes the *next* ``embed_documents`` call raise the same
+    :class:`EmbeddingError` Voyage's 429 does, so a test can drive the case that
+    matters: a run that stops partway leaves exactly the chunks it did not reach
+    pending.
+    """
+
+    def __init__(
+        self,
+        *,
+        dimensions: int = VEC_DIMENSIONS,
+        model: str = "fake-embed-1",
+        fail_after_batch: int | None = None,
+    ) -> None:
         self.dimensions = dimensions
         self.model = model
         self.documents: list[str] = []
         self.queries: list[str] = []
+        self.calls = 0
+        self._fail_after_batch = fail_after_batch
 
     async def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
+        self.calls += 1
+        if self._fail_after_batch is not None and self.calls > self._fail_after_batch:
+            raise EmbeddingError(429, "rate limited")
         self.documents.extend(texts)
         return [_vector(text, self.dimensions) for text in texts]
 

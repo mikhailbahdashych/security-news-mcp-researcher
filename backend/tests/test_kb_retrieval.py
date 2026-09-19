@@ -4,16 +4,34 @@ Phase 1 is keyword-only: with :class:`NullEmbedder` the vector leg is skipped
 entirely, so every hit here is ``matched_by='keyword'`` or ``'entity'``.
 """
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import pytest
 from fakes.embedder import FakeEmbedder
 
 from app.db.models import utcnow
 from app.kb.embeddings import NullEmbedder
-from app.kb.models import KbChunk, KbEntry, KbEntryEntity
-from app.kb.retrieval import collapse_best_per_entry, hybrid_search, rrf
-from app.kb.store import SearchFilters, SqliteKnowledgeStore, VectorRow, published_day
+from app.kb.fts import fts_query
+from app.kb.models import KbChunk, KbEntry, KbEntryEntity, KbEntryTopic, Topic
+from app.kb.retrieval import (
+    ENTITY_SCORE,
+    RRF_K,
+    apply_recency,
+    collapse_best_per_entry,
+    hybrid_search,
+    hybrid_search_outcome,
+    rrf,
+)
+from app.kb.schema import VEC_DIMENSIONS
+from app.kb.service import KbService
+from app.kb.store import (
+    DEFAULT_LEG_SIZE,
+    SearchFilters,
+    SqliteKnowledgeStore,
+    VectorRow,
+    published_day,
+)
+from app.services import settings as settings_service
 
 # -- pure ----------------------------------------------------------------
 
@@ -478,3 +496,281 @@ async def test_an_entity_hit_with_no_body_chunk_falls_back_to_the_title(
     hits = await hybrid_search(store, NullEmbedder(), "CVE-2024-3094")
 
     assert hits[0].snippet == "A title and nothing else"
+
+
+# -- Phase 2: the adaptive k and the recency prior -----------------------
+
+
+def _ray(offset: float) -> list[float]:
+    """A vector whose L2 distance from ``_ray(0.0)`` is exactly *offset*."""
+    vector = [0.0] * VEC_DIMENSIONS
+    vector[0] = 1.0
+    vector[1] = offset
+    return vector
+
+
+class _RayEmbedder:
+    """Embeds every query as ``_ray(0.0)``, so a test owns the KNN's order."""
+
+    dimensions = VEC_DIMENSIONS
+    model = "ray"
+
+    async def embed_documents(self, texts):
+        return [_ray(0.0) for _ in texts]
+
+    async def embed_query(self, text: str) -> list[float]:
+        return _ray(0.0)
+
+
+class _CountingStore(SqliteKnowledgeStore):
+    """Records the ``k`` of every KNN, which is the adaptive loop's whole output."""
+
+    def __init__(self, session_factory) -> None:
+        super().__init__(session_factory)
+        self.ks: list[int] = []
+
+    async def knn(self, query_vec, k, *, filters):
+        self.ks.append(k)
+        return await super().knn(query_vec, k, filters=filters)
+
+
+async def _ranked(
+    db_session, store, count: int, *, topics: tuple[int, ...]
+) -> tuple[list[KbEntry], int]:
+    """*count* entries, one chunk each, at increasing distance from the origin.
+
+    ``topics`` are the indexes given the one topic this returns the id of — every
+    caller is a topic-widening test, so there is one return shape.
+    """
+    from sqlalchemy import select as sa_select
+
+    entries: list[KbEntry] = []
+    for n in range(count):
+        entry = await _entry(db_session, f"Entry {n}", f"passage number {n}")
+        chunk = (
+            (await db_session.execute(sa_select(KbChunk).where(KbChunk.entry_id == entry.id)))
+            .scalars()
+            .first()
+        )
+        await store.upsert_vectors(
+            [
+                VectorRow(
+                    chunk_id=chunk.id,
+                    entry_id=entry.id,
+                    entry_kind=entry.kind,
+                    chunk_kind=chunk.kind,
+                    reviewed=False,
+                    authorship=entry.authorship,
+                    published_day=published_day(entry.captured_at),
+                    embedding=_ray(0.01 * (n + 1)),
+                )
+            ]
+        )
+        entries.append(entry)
+
+    topic = Topic(name="supply chain")
+    db_session.add(topic)
+    await db_session.flush()
+    for index in topics:
+        db_session.add(KbEntryTopic(entry_id=entries[index].id, topic_id=topic.id))
+    await db_session.commit()
+    return entries, topic.id
+
+
+def test_the_recency_prior_reorders_two_otherwise_equal_hits():
+    now = datetime(2026, 9, 18)
+    dates = {1: now - timedelta(days=400), 2: now - timedelta(days=3)}
+
+    boosted = apply_recency([(1, 0.03), (2, 0.03)], dates, now=now)
+
+    assert [entry_id for entry_id, _ in boosted] == [2, 1]
+    assert boosted[0][1] > boosted[1][1]
+
+
+def test_the_recency_prior_is_off_when_the_setting_is_off():
+    now = datetime(2026, 9, 18)
+    fused = [(1, 0.03), (2, 0.02)]
+    dates = {1: now - timedelta(days=400), 2: now}
+
+    assert apply_recency(fused, dates, now=now, boost=1.0) == fused
+
+
+def test_the_recency_prior_displaces_a_bounded_number_of_rrf_ranks():
+    """How far from a tie-break the prior is, pinned in arithmetic.
+
+    Spec §4.4 wants recency to be "most of the relevance signal, not a tie-break",
+    so the boost is deliberately much larger than the ~1.6 % gap between
+    consecutive RRF ranks. This is the number that gets read by whoever
+    recalibrates it: a recent hit from one leg reaches the top from this far down,
+    and no further.
+    """
+    now = datetime(2026, 9, 18)
+    stale = now - timedelta(days=400)
+    ranks = list(range(1, 41))
+    fused = rrf([ranks])  # entry id == its rank in the single leg
+
+    def leader(recent: int) -> int:
+        dates = {entry_id: stale for entry_id in ranks} | {recent: now}
+        return apply_recency(fused, dates, now=now)[0][0]
+
+    # Rank 16 still wins; rank 17 does not. Fifteen places of displacement, which
+    # is what ``RECENCY_BOOST``'s comment has to say.
+    assert [rank for rank in ranks if leader(rank) == rank] == list(range(1, 17))
+
+
+def test_the_recency_prior_never_lifts_a_hit_over_an_exact_entity_hit():
+    """RRF over two legs cannot exceed ``2/(k+1)``; ``ENTITY_SCORE`` is 1.0."""
+    now = datetime(2026, 9, 18)
+
+    boosted = apply_recency([(1, 2 / (RRF_K + 1))], {1: now}, now=now)
+
+    assert boosted[0][1] < ENTITY_SCORE
+
+
+def test_the_recency_prior_ignores_an_entry_it_has_no_date_for():
+    now = datetime(2026, 9, 18)
+
+    assert apply_recency([(1, 0.03)], {}, now=now) == [(1, 0.03)]
+
+
+async def test_the_recency_prior_reaches_hybrid_search(session_factory, db_session):
+    old = await _entry(
+        db_session, "Old", "liblzma everywhere", published_at=utcnow() - timedelta(days=400)
+    )
+    new = await _entry(db_session, "New", "liblzma everywhere", published_at=utcnow())
+    store = SqliteKnowledgeStore(session_factory)
+
+    boosted = await hybrid_search(store, NullEmbedder(), "liblzma")
+    plain = await hybrid_search(store, NullEmbedder(), "liblzma", recency_boost=False)
+
+    assert [hit.entry.id for hit in boosted][0] == new.id
+    # Without the prior the keyword leg's own order stands, whatever bm25 makes
+    # of two identical passages — asserted against the leg rather than against
+    # today's tie-break, which is by rowid and is not a promise.
+    rows = await store.keyword(fts_query("liblzma"), DEFAULT_LEG_SIZE, filters=SearchFilters())
+    _, chunks = await store.load([], [chunk_id for chunk_id, _ in rows])
+    leg_order = list(dict.fromkeys(chunks[chunk_id].entry_id for chunk_id, _ in rows))
+    assert set(leg_order) == {old.id, new.id}
+    assert [hit.entry.id for hit in plain] == leg_order
+
+
+async def test_the_service_honours_the_recency_setting_on_both_search_paths(
+    session_factory, db_session
+):
+    """``kb_recency_boost`` is a settings row; ``hybrid_search`` only takes a flag.
+
+    The service is where the two meet, and it searches from two places — the
+    chat tools and the Knowledge page. A setting wired into one of them is a
+    setting that works half the time.
+    """
+    old = await _entry(
+        db_session, "Old", "liblzma everywhere", published_at=utcnow() - timedelta(days=400)
+    )
+    new = await _entry(db_session, "New", "liblzma everywhere", published_at=utcnow())
+    old_id, new_id = old.id, new.id  # the commit below expires both rows
+    service = KbService(session_factory, embedder=NullEmbedder())
+
+    assert [h.entry.id for h in await service.search_for_model("liblzma")][0] == new_id
+    assert [h.entry.id for h in await service.search_for_user("liblzma")][0] == new_id
+
+    await settings_service.set_value(db_session, "kb_recency_boost", "false")
+    await db_session.commit()
+
+    assert [h.entry.id for h in await service.search_for_model("liblzma")] == [old_id, new_id]
+    assert [h.entry.id for h in await service.search_for_user("liblzma")] == [old_id, new_id]
+
+
+async def test_the_adaptive_k_doubles_until_the_topic_join_is_satisfied(
+    session_factory, db_session
+):
+    store = _CountingStore(session_factory)
+    entries, topic_id = await _ranked(db_session, store, 12, topics=(2, 3))
+
+    outcome = await hybrid_search_outcome(
+        store, _RayEmbedder(), "zzzqqq", topic_ids=(topic_id,), leg_size=2
+    )
+
+    assert store.ks == [2, 4]
+    assert sorted(hit.entry.id for hit in outcome.hits) == sorted(
+        [entries[2].id, entries[3].id]
+    )
+    assert outcome.topic_filter_truncated is False
+
+
+async def test_the_adaptive_k_stops_at_the_cap_and_reports_it(
+    session_factory, db_session, monkeypatch
+):
+    monkeypatch.setattr("app.kb.retrieval.TOPIC_K_CAP", 4)
+    store = _CountingStore(session_factory)
+    _, topic_id = await _ranked(db_session, store, 12, topics=(11,))
+
+    outcome = await hybrid_search_outcome(
+        store, _RayEmbedder(), "zzzqqq", topic_ids=(topic_id,), leg_size=2
+    )
+
+    assert store.ks == [2, 4]
+    assert max(store.ks) <= 4
+    assert outcome.topic_filter_truncated is True
+    assert outcome.hits == []
+
+
+async def test_a_narrow_topic_that_the_base_exhausts_is_not_called_truncated(
+    session_factory, db_session
+):
+    """Running out of vectors is a complete answer, not a truncated one."""
+    store = _CountingStore(session_factory)
+    entries, topic_id = await _ranked(db_session, store, 3, topics=(2,))
+
+    outcome = await hybrid_search_outcome(
+        store, _RayEmbedder(), "zzzqqq", topic_ids=(topic_id,), leg_size=2
+    )
+
+    assert [hit.entry.id for hit in outcome.hits] == [entries[2].id]
+    assert outcome.topic_filter_truncated is False
+
+
+async def test_hybrid_search_is_the_outcomes_hits(session_factory, db_session):
+    await _entry(db_session, "One", "liblzma everywhere")
+    store = SqliteKnowledgeStore(session_factory)
+
+    outcome = await hybrid_search_outcome(store, NullEmbedder(), "liblzma")
+    hits = await hybrid_search(store, NullEmbedder(), "liblzma")
+
+    # Each call hydrates its own ORM rows, so compare what the hit says, not the
+    # identity of the objects it carries.
+    assert [(hit.entry.id, hit.score, hit.matched_by) for hit in hits] == [
+        (hit.entry.id, hit.score, hit.matched_by) for hit in outcome.hits
+    ]
+    assert outcome.topic_filter_truncated is False
+
+
+async def test_a_summary_chunk_never_reaches_an_evidence_result(session_factory, db_session):
+    """Spec S5, on the vector leg: an embedded summary is still not evidence."""
+    entry = await _entry(db_session, "One", "the captured body text")
+    summary = KbChunk(
+        entry_id=entry.id, ord=1, text="a compiled summary", token_estimate=1, kind="summary"
+    )
+    db_session.add(summary)
+    await db_session.commit()
+    store = SqliteKnowledgeStore(session_factory)
+    body = await _only_chunk(db_session, entry)
+    for chunk in (body, summary):
+        await store.upsert_vectors(
+            [
+                VectorRow(
+                    chunk_id=chunk.id,
+                    entry_id=entry.id,
+                    entry_kind=entry.kind,
+                    chunk_kind=chunk.kind,
+                    reviewed=False,
+                    authorship=entry.authorship,
+                    published_day=published_day(entry.captured_at),
+                    embedding=_ray(0.0 if chunk is summary else 0.5),
+                )
+            ]
+        )
+
+    hits = await hybrid_search(store, _RayEmbedder(), "zzzqqq")
+
+    assert [hit.chunk.id for hit in hits] == [body.id]
+    assert "compiled summary" not in hits[0].snippet

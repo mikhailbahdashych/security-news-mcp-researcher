@@ -14,6 +14,7 @@ from app.kb import schema as kb_schema
 from app.services import settings as settings_service
 
 RAW_KEY = "sk-ant-api03-supersecretvalue-a1b2"
+RAW_VOYAGE_KEY = "pa-voyagesupersecretvalue-c3d4"
 
 
 @pytest.fixture
@@ -48,6 +49,24 @@ async def test_get_settings_returns_seeded_defaults(client: httpx2.AsyncClient) 
         "kb_capture_notes": True,
         "kb_min_snapshot_chars": 400,
         "kb_schema_version": kb_schema.current_schema_version(),
+        "has_voyage_key": False,
+        "voyage_api_key_masked": "",
+        "voyage_key_source": "none",
+        "kb_embedding_model": "voyage-4",
+        "kb_embedding_models": ["voyage-4", "voyage-4-lite", "voyage-4-large"],
+        "kb_capture_findings": False,
+        "kb_compile_mode": "manual",
+        "kb_compile_model": "claude-sonnet-5",
+        "kb_compile_effort": "low",
+        "kb_compile_prompt": settings_service.DEFAULT_COMPILE_PROMPT,
+        "kb_compile_prompt_default": settings_service.DEFAULT_COMPILE_PROMPT,
+        "kb_compile_max_chars": 24_000,
+        "kb_compile_monthly_token_budget": 5_000_000,
+        "kb_auto_accept_suggestions": True,
+        "kb_reviewed_only": False,
+        "kb_recency_boost": True,
+        "kb_rerank": True,
+        "kb_duplicate_threshold": 0.92,
     }
 
 
@@ -389,3 +408,176 @@ async def test_key_source_is_stored_once_a_key_is_saved(client: httpx2.AsyncClie
     await client.put("/api/settings", json={"anthropic_api_key": RAW_KEY})
 
     assert (await client.get("/api/settings")).json()["key_source"] == "stored"
+
+
+# ------------------------------------------------- the Voyage key and Phase 2
+
+
+async def test_the_voyage_key_is_only_ever_read_back_masked(client: httpx2.AsyncClient) -> None:
+    put_response = await client.put("/api/settings", json={"voyage_api_key": RAW_VOYAGE_KEY})
+    get_response = await client.get("/api/settings")
+
+    assert put_response.status_code == 200
+    for response in (put_response, get_response):
+        body = response.json()
+        assert body["has_voyage_key"] is True
+        assert body["voyage_key_source"] == "stored"
+        assert body["voyage_api_key_masked"] == "…c3d4"
+        assert RAW_VOYAGE_KEY not in response.text
+        assert "voyagesupersecret" not in response.text
+
+    await client.put("/api/settings", json={"voyage_api_key": ""})
+    cleared = (await client.get("/api/settings")).json()
+    assert cleared["has_voyage_key"] is False
+    assert cleared["voyage_api_key_masked"] == ""
+
+
+async def test_the_voyage_env_override_wins_over_the_stored_key(
+    client: httpx2.AsyncClient, app_factory, tmp_path, monkeypatch
+) -> None:
+    """``has_voyage_key`` keeps meaning "stored here"; the source explains the rest."""
+    monkeypatch.setenv(settings_service.VOYAGE_KEY_ENV_VAR, "pa-from-the-environment-0001")
+
+    body = (await client.get("/api/settings")).json()
+    assert body["has_voyage_key"] is False
+    assert body["voyage_key_source"] == "env"
+
+    await client.put("/api/settings", json={"voyage_api_key": RAW_VOYAGE_KEY})
+    stored_too = (await client.get("/api/settings")).json()
+    assert stored_too["has_voyage_key"] is True
+    assert stored_too["voyage_key_source"] == "env"
+
+    # The other spelling of "configured outside the app": a key in `.env`, which
+    # reaches the app as `Settings` and never as an environment variable.
+    monkeypatch.delenv(settings_service.VOYAGE_KEY_ENV_VAR, raising=False)
+    dotenv_app = app_factory(
+        Settings(
+            db_path=tmp_path / "app.db",
+            static_dir=tmp_path / "absent",
+            anthropic_api_key="",
+            voyage_api_key="pa-from-the-dotenv-0002",
+        )
+    )
+    async with httpx2.AsyncClient(
+        transport=ASGITransport(app=dotenv_app), base_url="http://test"
+    ) as http:
+        from_dotenv = (await http.get("/api/settings")).json()
+    assert from_dotenv["voyage_key_source"] == "env"
+    assert "pa-from-the-dotenv-0002" not in str(from_dotenv)
+
+
+PHASE_TWO_SETTINGS = {
+    "kb_embedding_model": "voyage-4-lite",
+    "kb_capture_findings": True,
+    "kb_compile_mode": "auto",
+    "kb_compile_model": "claude-opus-5",
+    "kb_compile_effort": "medium",
+    "kb_compile_prompt": "# Summarise it",
+    "kb_compile_max_chars": 32_000,
+    "kb_compile_monthly_token_budget": 250_000,
+    "kb_auto_accept_suggestions": False,
+    "kb_reviewed_only": True,
+    "kb_recency_boost": False,
+    "kb_rerank": False,
+    "kb_duplicate_threshold": 0.75,
+}
+
+
+async def test_every_phase_two_setting_round_trips(client: httpx2.AsyncClient) -> None:
+    response = await client.put("/api/settings", json=PHASE_TWO_SETTINGS)
+
+    assert response.status_code == 200, response.text
+    for body in (response.json(), (await client.get("/api/settings")).json()):
+        for key, value in PHASE_TWO_SETTINGS.items():
+            assert body[key] == value, key
+            assert isinstance(body[key], type(value)), key
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"kb_compile_mode": "sometimes"},
+        {"kb_compile_effort": "turbo"},
+        {"kb_duplicate_threshold": 1.5},
+        {"kb_compile_max_chars": 10},
+        {"kb_embedding_model": ""},
+        {"kb_compile_monthly_token_budget": -1},
+    ],
+)
+async def test_put_rejects_out_of_range_phase_two_values(
+    client: httpx2.AsyncClient, payload: dict
+) -> None:
+    assert (await client.put("/api/settings", json=payload)).status_code == 422
+
+
+async def test_put_refuses_an_embedding_model_the_embedder_does_not_know(
+    client: httpx2.AsyncClient,
+) -> None:
+    """A typo used to be stored, which made ``update_settings`` see a model change
+    and empty the vector index — after which Embed now 502s on Voyage's 400 and
+    recovery costs a full paid re-embed. The 422 lands before anything is wiped."""
+    response = await client.put("/api/settings", json={"kb_embedding_model": "voyage-3.5"})
+
+    assert response.status_code == 422
+    assert "voyage-4" in str(response.json()["detail"])
+    body = (await client.get("/api/settings")).json()
+    assert body["kb_embedding_model"] == "voyage-4"
+
+
+async def test_the_allowed_embedding_models_are_on_the_wire_and_come_from_the_embedder(
+    client: httpx2.AsyncClient,
+) -> None:
+    """The UI renders a select from this list rather than hard-coding one, so the
+    embedder's own table stays the single source of what is selectable."""
+    from app.kb import embeddings
+
+    body = (await client.get("/api/settings")).json()
+
+    assert body["kb_embedding_models"] == list(embeddings.EMBEDDING_MODELS)
+    assert body["kb_embedding_model"] in body["kb_embedding_models"]
+
+
+async def test_a_hand_edited_embedding_model_is_reported_rather_than_hidden(
+    client: httpx2.AsyncClient, db_session
+) -> None:
+    """A value written straight into SQLite (or left by a newer build) must not
+    break the page: it is read back verbatim, next to the list of what is
+    accepted, so the user can see what is there and pick something valid."""
+    await settings_service.set_many(db_session, {"kb_embedding_model": "voyage-3.5"})
+    await db_session.commit()
+
+    body = (await client.get("/api/settings")).json()
+
+    assert body["kb_embedding_model"] == "voyage-3.5"
+    assert "voyage-3.5" not in body["kb_embedding_models"]
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\n\n", "\t"])
+async def test_put_refuses_to_empty_the_compile_prompt(
+    client: httpx2.AsyncClient, blank: str
+) -> None:
+    # It used to be stored, and the getter falls back to the shipped prompt only
+    # when the *row is absent* — so one save with an empty textarea destroyed the
+    # default for good and every compile afterwards went out with no
+    # instructions. A whitespace-only prompt is the same thing typed slower.
+    assert (await client.put("/api/settings", json={"kb_compile_prompt": blank})).status_code == 422
+    body = (await client.get("/api/settings")).json()
+    assert body["kb_compile_prompt"] == settings_service.DEFAULT_COMPILE_PROMPT
+
+
+async def test_the_shipped_compile_prompt_is_readable_beside_the_stored_one(
+    client: httpx2.AsyncClient,
+) -> None:
+    await client.put("/api/settings", json={"kb_compile_prompt": "# Mine"})
+
+    body = (await client.get("/api/settings")).json()
+
+    assert body["kb_compile_prompt"] == "# Mine"
+    # What "Reset to default" puts back. It is on the wire nowhere else.
+    assert body["kb_compile_prompt_default"] == settings_service.DEFAULT_COMPILE_PROMPT
+
+
+async def test_the_shipped_compile_prompt_is_not_writable(client: httpx2.AsyncClient) -> None:
+    response = await client.put("/api/settings", json={"kb_compile_prompt_default": "# No"})
+
+    assert response.status_code == 422

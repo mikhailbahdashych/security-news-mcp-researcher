@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from itertools import product
 from typing import Protocol
 
@@ -40,6 +40,18 @@ EPOCH = datetime(1970, 1, 1)
 DEFAULT_LEG_SIZE = 50
 
 
+def naive_utc(moment: datetime) -> datetime:
+    """The app's one datetime spelling: naive UTC (``app.db.models.utcnow``).
+
+    Every stored ``DATETIME`` is naive UTC, but ``POST /api/kb/search`` accepts
+    ``since=2026-01-01T00:00:00Z`` and FastAPI hands that over as an *aware*
+    datetime. Subtracting the naive epoch from it raises, and binding it to a
+    ``DateTime`` column silently drops the offset instead — so both legs
+    normalise here first rather than each discovering it separately.
+    """
+    return moment.astimezone(UTC).replace(tzinfo=None) if moment.tzinfo is not None else moment
+
+
 def published_day(moment: datetime | None) -> int:
     """Days since the epoch, the only time unit vec0 can compare.
 
@@ -50,7 +62,7 @@ def published_day(moment: datetime | None) -> int:
     to the epoch, which every ``since`` filter excludes; that is a dropped row, not
     a preserved one, and the fix is to give the caller a date, not to change this.
     """
-    return 0 if moment is None else (moment - EPOCH).days
+    return 0 if moment is None else (naive_utc(moment) - EPOCH).days
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +72,10 @@ class SearchFilters:
     ``include_model_authored`` is set **only** by the Knowledge page, which shows
     the user everything they have captured. The chat tool and the notes generator
     never pass it, which is what makes the authorship gate unconditional for them.
+
+    ``exclude_entry_id`` and ``exclude_model_authored`` are honoured by
+    :meth:`SqliteKnowledgeStore.knn` alone — both are vec0 metadata columns, and
+    the near-duplicate check is the only leg that needs either of them.
     """
 
     kinds: tuple[str, ...] | None = None
@@ -68,6 +84,11 @@ class SearchFilters:
     since: datetime | None = None
     reviewed_only: bool = False
     include_model_authored: bool = False
+    exclude_entry_id: int | None = None
+    #: Drop model-authored candidates outright — *not* the authorship gate, which
+    #: lets a **reviewed** finding through. The near-duplicate check wants neither,
+    #: because a merge keeps the older entry (see ``capture._nearest_by_vector``).
+    exclude_model_authored: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,6 +111,8 @@ class KnowledgeStore(Protocol):
     async def upsert_vectors(self, rows: Sequence[VectorRow]) -> None: ...
 
     async def delete_vectors(self, chunk_ids: Sequence[int]) -> None: ...
+
+    async def set_reviewed(self, entry_id: int, reviewed: bool) -> int: ...
 
     async def knn(
         self, query_vec: Sequence[float], k: int, *, filters: SearchFilters
@@ -119,6 +142,12 @@ class SqliteKnowledgeStore:
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._session_factory = session_factory
+        #: Memoised :meth:`_has_model_authored_entries`. A store is built per
+        #: ``KbService.store`` access and lives for one search, so there is no
+        #: invalidation to get wrong — and one search runs the KNN up to five
+        #: times (the adaptive ``k``: 50, 100, 200, 400, 512), which is what the
+        #: cache is for.
+        self._model_authored: bool | None = None
 
     # -- vectors ---------------------------------------------------------
 
@@ -184,8 +213,9 @@ class SqliteKnowledgeStore:
           which is the default.
 
         ``topic_ids`` is **not** applied here: topics are many-to-many and would
-        over-shard vec0's partitioning. ``hybrid_search`` filters the returned
-        rows instead (an adaptive ``k`` arrives with the vector leg in Phase 2).
+        over-shard vec0's partitioning. ``retrieval._vector_leg`` widens *k* until
+        enough rows survive the topic join instead, which is the one thing that
+        makes narrowing after the KNN safe.
         """
         if not query_vec:
             return []
@@ -197,8 +227,24 @@ class SqliteKnowledgeStore:
         }
         if filters.reviewed_only:
             shared.append("reviewed = 1")
+        if filters.exclude_entry_id is not None:
+            # Inside the MATCH, not after it: an entry with fourteen body chunks
+            # is fourteen of its own nearest neighbours, and filtering them out
+            # afterwards leaves k slots that never held a candidate.
+            shared.append("entry_id != :exclude_entry_id")
+            params["exclude_entry_id"] = filters.exclude_entry_id
+        if filters.exclude_model_authored:
+            # ``!=`` is one of the four operators vec0's WHERE accepts, so this
+            # is a clause and not a post-filter: a finding's chunks would
+            # otherwise use up the k the real candidates needed.
+            shared.append("authorship != 'model'")
         if filters.since is not None:
             # vec0 has no >=; for integers "> day - 1" is the same thing.
+            # Whole days, because ``published_day`` is an integer column and the
+            # schema is frozen: a ``since`` with a time of day is rounded down
+            # here and compared exactly by the keyword and entity legs, so the
+            # three agree at a date boundary and the vector leg is the generous
+            # one within a day.
             shared.append("published_day > :day")
             params["day"] = published_day(filters.since) - 1
 
@@ -239,13 +285,32 @@ class SqliteKnowledgeStore:
         return ordered[:k]
 
     async def _has_model_authored_entries(self) -> bool:
+        if self._model_authored is None:
+            async with self._session_factory() as session:
+                found = await session.scalar(
+                    select(KbEntry.id)
+                    .where(KbEntry.authorship == "model", KbEntry.deleted_at.is_(None))
+                    .limit(1)
+                )
+            self._model_authored = found is not None
+        return self._model_authored
+
+    async def set_reviewed(self, entry_id: int, reviewed: bool) -> int:
+        """Rewrite one entry's ``reviewed`` metadata; returns the rows changed.
+
+        vec0 metadata is written once, at upsert, so without this a finding the
+        user has just reviewed stays invisible to the vector leg until something
+        re-embeds it. ``authorship`` never changes after capture, and a delete
+        takes the chunks (and their vectors, by trigger) with it, so ``reviewed``
+        is the only column with anything to sync.
+        """
         async with self._session_factory() as session:
-            found = await session.scalar(
-                select(KbEntry.id)
-                .where(KbEntry.authorship == "model", KbEntry.deleted_at.is_(None))
-                .limit(1)
+            result = await session.execute(
+                text("UPDATE kb_chunk_vec SET reviewed = :reviewed WHERE entry_id = :entry_id"),
+                {"reviewed": int(reviewed), "entry_id": entry_id},
             )
-        return found is not None
+            await session.commit()
+        return result.rowcount or 0
 
     # -- keywords --------------------------------------------------------
 
@@ -307,7 +372,7 @@ class SqliteKnowledgeStore:
             clauses.append("e.review_status = 'reviewed'")
         if filters.since is not None:
             clauses.append("COALESCE(e.published_at, e.captured_at) >= :since")
-            params["since"] = filters.since
+            params["since"] = naive_utc(filters.since)
         if filters.topic_ids:
             names = {f"topic_{n}": value for n, value in enumerate(filters.topic_ids)}
             clauses.append(
@@ -422,5 +487,6 @@ __all__ = [
     "SearchFilters",
     "SqliteKnowledgeStore",
     "VectorRow",
+    "naive_utc",
     "published_day",
 ]

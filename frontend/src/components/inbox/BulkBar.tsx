@@ -8,6 +8,8 @@ interface BulkBarProps {
   onRestore: () => void
   onGenerateNotes: () => void
   onResearch: () => void
+  /** Opens the bulk-capture panel over this selection. */
+  onSaveToKnowledge: () => void
   onClear: () => void
 }
 
@@ -26,6 +28,7 @@ export default function BulkBar({
   onRestore,
   onGenerateNotes,
   onResearch,
+  onSaveToKnowledge,
   onClear,
 }: BulkBarProps) {
   return (
@@ -49,6 +52,9 @@ export default function BulkBar({
       </Button>
       <Button size="sm" disabled={busy} onClick={onResearch}>
         Research these
+      </Button>
+      <Button size="sm" disabled={busy} onClick={onSaveToKnowledge}>
+        Save to knowledge base
       </Button>
 
       <Button size="sm" variant="ghost" className="ml-auto" onClick={onClear}>

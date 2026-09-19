@@ -70,12 +70,23 @@ async def set_item_status(
     Starring is also the knowledge base's main capture trigger. It runs **after**
     the status has committed and swallows its own failures into a ``kb_activity``
     row, so a paywall or a 403 can never cost the user the star they pressed.
+
+    **In ``kb_compile_mode: auto`` this response waits for an Anthropic call.**
+    The capture compiles the new entry inline (spec §4.5 sanctions it: one
+    capture, one click, one call), so a star that normally answers in
+    milliseconds takes seconds instead — longer at ``kb_compile_effort: high``.
+    The default mode is ``manual``, where nothing here calls out at all.
     """
     item = await _load_item(session, item_id)
     item.status = payload.status
     await session.commit()
     await session.refresh(item)
     read = _to_read(item, await items_service.feed_titles(session))
+    # The response is built; this session has nothing left to do. Committing it
+    # here rather than at the end of the request is what keeps the read
+    # transaction ``refresh`` reopened from spanning the capture's outbound
+    # embedding call — the rule ``app/kb/capture.py``'s header states.
+    await session.commit()
     if payload.status == "starred":
         await capture_star_if_enabled(kb, item_id)
     return read

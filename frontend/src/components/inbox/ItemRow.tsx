@@ -11,6 +11,9 @@ interface ItemRowProps {
   busy: boolean
   /** This row's article is being fetched right now. */
   extracting?: boolean
+  /** This row's star is in flight. In `auto` compile mode the request waits for
+   *  the model, so it is seconds rather than milliseconds and needs to show. */
+  starring?: boolean
   /** The row a search result pointed at — called out so it is findable on a long page. */
   highlighted?: boolean
   onToggleSelect: (id: number, selected: boolean) => void
@@ -56,6 +59,7 @@ export default function ItemRow({
   selecting,
   busy,
   extracting = false,
+  starring = false,
   highlighted = false,
   onToggleSelect,
   onStar,
@@ -145,8 +149,12 @@ export default function ItemRow({
 
       <div className="flex shrink-0 items-start gap-0.5">
         <IconButton
-          icon={starred ? 'starFilled' : 'star'}
-          label={starred ? 'Unstar' : 'Star'}
+          icon={starring ? 'spinner' : starred ? 'starFilled' : 'star'}
+          // The spinner is `aria-hidden`, so without these the control is simply
+          // dead for the seconds an `auto`-mode capture takes: same name, no
+          // state, no reason. `label` is both the tooltip and the a11y name.
+          label={starring ? 'Saving…' : starred ? 'Unstar' : 'Star'}
+          aria-busy={starring}
           tone={starred ? 'amber' : 'default'}
           disabled={busy}
           onClick={() => onStar(item)}

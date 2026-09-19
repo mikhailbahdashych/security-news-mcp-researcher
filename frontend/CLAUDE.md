@@ -31,7 +31,7 @@ is on screen in either pane, because the rail carries the chat history now.
 | `/notes` | `pages/Notes.tsx` | Note list + the generate dialog |
 | `/notes/:id` | `pages/NoteDetail.tsx` | Markdown viewer/editor, sources, copy/download |
 | `/knowledge`, `/knowledge/:id` | `pages/Knowledge.tsx` | The captured timeline, its search, and one entry in full |
-| `/settings` | `pages/Settings.tsx` | Layout, archived chats, API key, model, toggles, MCP panel |
+| `/settings` | `pages/Settings.tsx` | Layout, archived chats, API key, model, toggles, the Knowledge panel (Voyage key, embedding model, the compile fields and prompt, the budget meter, retrieval priors, index stats, Embed now, activity log), MCP panel |
 
 `components/ui/ErrorBoundary.tsx` is the **only class component** in the app — catching
 a render error is the one thing hooks cannot do. `App` wraps **each pane** in one (the routed
@@ -79,10 +79,14 @@ identical in both modes. `Settings` is the sanctioned exception: it ignores `emb
 entirely, because it edits app state rather than a selection, and its Layout section
 navigates on purpose.
 
-Settings' "Left pane" select is the one sanctioned router use from an embedded page: it
-steers the *other*, routed pane, so it reads `pageFromPath(location.pathname)` via
-`useLocation` and navigates. Do not reintroduce a stored left pane — an earlier version
-compared against the last render and navigated a deep link back to a stale stored pane.
+Settings' "Left pane" select is the **original** sanctioned router use from an embedded
+page: it steers the *other*, routed pane, so it reads `pageFromPath(location.pathname)`
+via `useLocation` and navigates. Do not reintroduce a stored left pane — an earlier
+version compared against the last render and navigated a deep link back to a stale
+stored pane. Two more have joined it, both inside Settings and both steering the routed
+pane rather than leaving the page in split view: `ArchivedChatsDialog`'s Open, and the
+`<Link to="/chat">` in the Knowledge panel's budget hint. Settings is the exception;
+**no other page may navigate**.
 
 ### Stored preferences (`ui/storage.ts`)
 
@@ -169,7 +173,7 @@ constants/factories, never inline literals: `feedsQueryKey`, `itemsQueryKey(filt
 `settingsQueryKey`, `modelsQueryKey`, `mcpServersQueryKey`, `mcpToolsQueryKey`,
 `runningSessionsKey` (`['sessions', 'running']`),
 `kbQueryKey`/`kbEntriesKey(filters)`/`kbSearchKey(q, filters)`/`kbEntryKey(id)`/
-`kbStatsKey`/`kbTopicsKey`.
+`kbStatsKey`/`kbTopicsKey`/`kbBudgetKey`/`kbActivityKey(limit)`.
 A bare prefix (`['sessions']`, `['notes']`) exists so one `invalidateQueries` refreshes
 every filtered variant under it — a rename or a delete cannot know which filter is on
 screen.
@@ -555,7 +559,18 @@ the client mints `generation_id` (`crypto.randomUUID()`) so Stop works before th
 first frame is read and the server echoes it on `turn_start`; **`done` means "saved"**
 and carries `{note_id}`, while a failed generation ends on `error` with **no `done` at
 all** — do not wait for one; and Stop needs both halves here too (abort the reader
-*and* `POST /api/notes/generate/cancel`).
+*and* `POST /api/notes/generate/cancel`) — **while the dialog still owns the stream**.
+
+**`done` is an event, not the end of the body.** The server sends `done` and *then*
+captures the note into the knowledge base, which embeds and may compile, so the response
+stays open for seconds after the frame the user is waiting for.
+`components/notes/generationPhase.ts` holds the two decisions, pure and tested:
+`ownsStream(phase)` (may I abort, and may I still set my own state — the same question)
+and `noteIdOnDone(phase, payload)` (the id to hand over, ignoring a second `done`, a
+`done` for a stream that is not ours, and a payload with no integer `note_id`, which used
+to navigate to `/notes/undefined`). Closing the dialog past `done` must **not** abort:
+the capture is what is still running, and the server's guard catches `Exception`, not the
+`CancelledError` an abort delivers — the capture would die with no activity row.
 
 `components/notes/excerpt.ts::excerptFromMarkdown` strips line-leading markers and
 inline emphasis from the API's excerpt so a two-line clamp reads as prose. It is
@@ -564,10 +579,11 @@ deliberately **not** a parser — it runs on a preview usually cut mid-sentence.
 
 ## Knowledge (`pages/Knowledge.tsx`, `components/kb/`, `api/kb.ts`)
 
-The captured layer: everything the app kept a searchable copy of. Phase 1 of
-`docs/superpowers/specs/2026-09-17-knowledge-base-design.md` — a keyword knowledge base;
-the vector leg and the compile step arrive later and the page is already built to show
-which leg answered.
+The captured layer: everything the app kept a searchable copy of, per
+`docs/superpowers/specs/2026-09-17-knowledge-base-design.md`. Phase 1 was keyword-only;
+Phase 2 added the vector leg (a Voyage key in Settings makes search hybrid, and the rows
+already say which leg answered), the bulk save from the Inbox, compile with its budget,
+and model-authored findings.
 
 - **One page, two modes.** `/knowledge` is the timeline and `/knowledge/:id` is one
   entry; embedded, the selection is `openId` in React state and `EntryDetail` renders in
@@ -644,8 +660,63 @@ which leg answered.
   restore it." to the one refusal that needs explaining.
 - **The snapshot is captured Markdown** and goes through `components/chat/Markdown.tsx`
   like everything else. Never `dangerouslySetInnerHTML` — this is somebody else's page.
-- **Settings → Knowledge** (`components/settings/KnowledgeSection.tsx`) holds the two
-  capture toggles and `kb_min_snapshot_chars` as part of the settings draft, and reads
+- **"Needs attention" is a derivation, not an endpoint.** `components/kb/attention.ts::
+  needsAttention` is the whole rule and the only thing tested: a row for a flagged
+  duplicate (`possible_duplicate_of !== null`), for an unreviewed **model-authored**
+  entry, for a recent `kb_activity` failure and for a soft-deleted entry — one row per
+  entry, in that order, and **never** a row for an ordinary captured article (ruling I16,
+  and the headline test). A failure is told from a success by what `app/kb/compile.py`
+  writes into `detail`, plus `action: 'skip'` and `action: 'budget_hit'` — a compile
+  *success* writes JSON into the same column, so for `compile`/`recompile` rows "the detail
+  is not JSON" **is** the failure test (all six outcomes pinned). `attention.ts::retryAction`
+  picks the row's action: a capture failure (`skip`) offers **Retry** (re-read the source), a
+  compile failure offers **Compile** — re-fetching an article cannot fix a refusal or a
+  spent budget. A failure row outlives the action that fixes it until it ages out of the
+  trail window (known, accepted). The strip only sees entries the page has loaded: correct
+  for what is on screen, incomplete as a worklist.
+- **A duplicate flag has a Dismiss.** `POST /entries/{id}/not-a-duplicate` clears it and
+  is idempotent, which is what lets the strip and the entry banner both offer it. With no
+  Voyage key the flag is the title trigram alone, so the row says so; before the route
+  existed the only exits were merging two unrelated entries or deleting one.
+- **The compile dialog prices the batch first.** `POST /kb/compile?estimate=1` makes no
+  model call, so the estimate is free and always asked for, and the confirm is disabled
+  when the budget is spent. A **404 from the batch means nothing was compiled** (every id
+  is validated before the first token); every other outcome is a 200 whose `reason_code`
+  becomes a sentence through `api/kb.ts::compileOutcome`. `new_topic` is a *proposal* —
+  `POST /kb/topics` is what creates it, and a 409's own detail is the message shown.
+- **Two token counters, never added.** `budgetLabel` derives the bar from `anthropic_total`
+  against `limit` (`exhausted` flips exactly at the limit; a limit of 0 does not divide),
+  and the Voyage figure sits beside it labelled *estimated* — it is our own
+  `ceil(chars / 3.6)`, not a billed number. The help text says in as many words that this
+  counts compile tokens only and that chat spend is counted per session.
+  `summaryStale(entry)` (`compiled_at` vs `updated_at`) is an invitation to recompile, not
+  a claim that the summary is wrong: a notes edit bumps `updated_at` and recompiles
+  nothing.
+- **The bulk save is the third streamed call.** `components/kb/bulkSave.ts` is its reducer
+  and `components/inbox/SaveToKnowledge.tsx` the panel: `total` comes from the frames and
+  **never** from `itemIds.length` (the server de-duplicates), `done` is terminal and
+  nothing after it moves the state, and an `error` is kept *beside* the counts because a
+  cancelled run still ends on `done`. **Stop is the cancel endpoint alone** — an abort
+  would throw that ending away, the same reason the chat's Stop does not abort either.
+  **Leaving the panel is the opposite**: an undelivered run is cancelled *and* the reader
+  aborted, because no page can re-attach to a bulk stream and a job nobody can see, stop
+  or resume is worse than one that ended.
+- **Three lessons from one phase, all of them silent when broken.** Act on the `done`
+  *event*, not on the end of the body. Never abort a stream that has already delivered
+  `done` — the server is still working (`generationPhase.ts`, `bulkSave.ts::bulkDelivered`).
+  And **never gate a state update on an "am I still mounted" ref**: a ref initialised to
+  `true` at its declaration is never set again, StrictMode's mount→cleanup→mount runs the
+  cleanup while the refs survive it, so the flag is `false` for the component's whole life
+  — it killed the bulk panel outright and jammed **Embed now** after one batch. A
+  `setState` after unmount has been a silent no-op since React 18; there is nothing to
+  guard against.
+- **`auto` compile mode makes two ordinary actions slow.** Starring an item and saving a
+  URL wait for the Anthropic call inside the request that caused them, so `ItemRow` takes
+  a `starring` prop and Save-a-URL says what it is waiting for. The only brake on `auto`
+  is the monthly budget.
+- **Settings → Knowledge** (`components/settings/KnowledgeSection.tsx`) holds the three
+  capture toggles (starred, notes and — Phase 2 — findings) and `kb_min_snapshot_chars`
+  as part of the settings draft, and reads
   `GET /kb/stats` live beside them: the index counts are facts about the database, not
   preferences, so Save has nothing to do with them. `kb_schema_version` is read-only and
   is therefore omitted from `Draft` and from `SettingsUpdate`. Every read of that payload
@@ -653,7 +724,17 @@ which leg answered.
   facts about a *database* reported by a backend of possibly another version. The vector
   row goes through `vecVersionLabel`: a missing extension is reported as the **empty
   string**, not `null` (`extension_status` catches the `OperationalError`), so `??` never
-  fired and the row drew a label with nothing beside it.
+  fired and the row drew a label with nothing beside it. Phase 2 put the rest of the
+  knowledge base's settings in the same draft (the embedding model, findings capture,
+  the four compile fields, the monthly budget, auto-accept, reviewed-only, the recency
+  prior, the rerank flag and the duplicate threshold) and reads `GET /kb/budget` and
+  `GET /kb/activity` live beside `GET /kb/stats`. **The Voyage key is written on its own
+  button** like the Anthropic one and read back only masked, and the hint reads
+  `voyage_key_source`, not `has_voyage_key`: a key from the environment is a working app
+  with nothing stored. **Embed now** loops `POST /kb/embed-pending` while `pending > 0`
+  — `components/settings/embedNow.ts::embedAgain` is the decision that ends it, tested on
+  its own, including the case that used to spin. It is a loop the user started and can
+  stop, not a poller.
 
 ## Markdown rendering
 
@@ -666,7 +747,7 @@ hand-rolled `.prose-chat` block in `src/index.css`, deliberately instead of
 
 ## Tests
 
-`npx vitest run` — **16 files, 263 tests**, `environment: 'node'` with
+`npx vitest run` — **20 files, 327 tests**, `environment: 'node'` with
 **`TZ` pinned to `UTC`** (`test.env` in `vite.config.ts`: the backend sends naive UTC and
 the app renders the viewer's *local* day of it, so a test that asserts an instant would
 otherwise assert the machine's offset, and UTC+13/+14 roll a midday stamp over to the next
@@ -686,14 +767,31 @@ the `activity` transitions, turn scoping, `activityLabel`, `showsProgress`,
 `components/ui/searchKeys.test.ts` (the shared overlay keyboard model),
 `components/ui/menuPosition.test.ts` (fits below, flips above, clamps — there is no DOM
 here, which is the point: the caller measures, the function decides),
-`api/client.test.ts` (`isNotFound`, `conflictDetail`),
+`api/client.test.ts` (`isNotFound`, `conflictDetail`, `detailFor` — the status-specific
+`detail` reader the settings form uses for a 422),
+`components/ui/errorBoundaryState.test.ts` (`nextBoundaryState`: when a caught error is
+cleared by a new `resetKey` and when it is kept),
 `lib/dates.test.ts` (`parseUtc`, `dayLabel`, `groupByDay`),
 `lib/highlight.test.ts` (`splitOnQuery`, `splitOnTerms`),
 `api/kb.test.ts` (`kbEntryLink`, `parseEntryId`, `entryTimestamp`, the day grouping,
 `matchMarker`, `hitSnippet`, `cveChips`, `entityChips`, `sourceLabel`, `kindLabel`,
 `sinceDaysAgo`, `entityFilter`/`entityHint`, `vecVersionLabel`,
-`refreshMessage`/`refreshFailed`),
+`refreshMessage`/`refreshFailed`, and Phase 2's `formatTokens`, `budgetLabel` (`>=` at
+the limit, and `limit === 0` not dividing), `embeddingStatus`, `searchModeLabel` (the
+three-way split between a missing key, nothing embedded and a real hybrid answer),
+`duplicateLabel`, `compileOutcome` (including the unknown `reason_code`, which is the
+version-skew case), `compileMetaLabel` and `summaryStale`),
 `components/kb/autosave.test.ts` (`autosaveDecision`, `autosaveLabel`, `flushPlan`),
+`components/kb/attention.test.ts` (`needsAttention`/`retryAction`: an ordinary captured
+article produces **no** row, all six `compile.py` outcomes including the two bare-`reason`
+ones, the cap, one row per entry, and a deleted entry only in the bin),
+`components/kb/bulkSave.test.ts` (`bulkFrame`/`bulkSummary`/`bulkDelivered`: `total` off
+the frames rather than the ids, the terminal `done`, cancel-then-`done`, a second `done`
+ignored, and a malformed frame returning the *same* object so React does not re-render),
+`components/notes/generationPhase.test.ts` (`noteIdOnDone`, `ownsStream` — the
+never-abort-past-`done` rule),
+`components/settings/embedNow.test.ts` (`embedAgain`'s four ways out, including the
+zero-progress spin, and `embedProblem`'s 409/502),
 `components/notes/excerpt.test.ts` and `lib/ids.test.ts`.
 
 Component and E2E tests are deliberately out of scope — **do not add a jsdom

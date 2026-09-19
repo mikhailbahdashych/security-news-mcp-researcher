@@ -25,20 +25,21 @@ its own short transactions.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Literal
 
 import httpx2
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db.models import Note, utcnow
-from app.kb.chunking import split_markdown
-from app.kb.embeddings import Embedder
+from app.kb.chunking import estimate_tokens, split_markdown
+from app.kb.embeddings import Embedder, max_tokens_for, plan_batches
 from app.kb.entities import extract_entities
 from app.kb.models import (
     KbActivity,
@@ -50,7 +51,13 @@ from app.kb.models import (
     KbEntryTopic,
     KbSnapshot,
 )
-from app.kb.store import SqliteKnowledgeStore, VectorRow, published_day
+from app.kb.store import (
+    KnowledgeStore,
+    SearchFilters,
+    SqliteKnowledgeStore,
+    VectorRow,
+    published_day,
+)
 from app.kb.urls import canonical_url
 from app.services import extract as extract_service
 
@@ -64,6 +71,15 @@ DEFAULT_MIN_SNAPSHOT_CHARS = 400
 #: every write. Read at call time so a test can lower it.
 ACTIVITY_MAX_ROWS = 10_000
 
+#: The actions whose token counters the compile budget is **derived** from
+#: (``compile.month_usage``: ``compile``/``recompile`` for Anthropic, ``embed``
+#: for Voyage — a refusal or an unusable answer is a ``compile`` row too, and
+#: carries the tokens it was billed). These are exempt from the prune inside the
+#: window ``month_usage`` can still read, because pruning is oldest-first and the
+#: oldest rows of a month are exactly the spend already made: the ceiling would
+#: silently lift itself on a busy month. Everything else is trail.
+METERED_ACTIONS = ("compile", "recompile", "embed")
+
 #: What separates two entries' notes when they are merged.
 NOTE_SEPARATOR = "\n\n---\n\n"
 
@@ -71,6 +87,33 @@ NOTE_SEPARATOR = "\n\n---\n\n"
 SKIP_NOT_A_URL = "not_a_url"
 SKIP_FETCH_FAILED = "fetch_failed"
 SKIP_TOO_SHORT = "too_short"
+
+#: The title similarity a near-duplicate needs as well as a close vector
+#: (spec §4.5). Fixed, unlike the cosine threshold, which is a setting.
+TITLE_TRIGRAM_MIN = 0.8
+
+#: The cosine a near-duplicate needs — the default of ``kb_duplicate_threshold``.
+#: **Unvalidated** (spec §9): calibrate it on the first 200 entries.
+DEFAULT_DUPLICATE_THRESHOLD = 0.92
+
+#: The kinds near-duplicate flagging looks at, on both legs and at the entry
+#: gate: something the user starred (``article``) and something the user pasted
+#: (``manual``) are the same story arriving twice, which is the duplicate this
+#: app actually gets. A note generated from one inbox item is titled with that
+#: item's headline and quotes it, so on either leg it sits on top of the article
+#: it was written from — and a merge keeps the *older* entry, which would throw
+#: the note away. Notes stay out; findings are kept out by authorship as well.
+DUPLICATE_KINDS = ("article", "manual")
+
+#: How many neighbours the near-duplicate KNN asks for. A duplicate that is not
+#: in the nearest handful is not a duplicate.
+NEAR_DUPLICATE_K = 5
+
+#: How many titles the *embedder-less* leg compares against. There is no index on
+#: trigram similarity and no FTS5 table over titles, so this is a scan.
+#: ponytail: newest-N scan; give it an index only if a knowledge base ever gets
+#: big enough for the scan to show up.
+NEAR_DUPLICATE_TITLE_SCAN = 2_000
 
 
 class KbConflict(Exception):
@@ -168,11 +211,13 @@ async def log_activity(
     output_tokens: int = 0,
     detail: str | None = None,
 ) -> KbActivity:
-    """Append one row to the trail and prune it back to its ceiling.
+    """Append one row to the trail and prune it back towards its ceiling.
 
     The prune runs on write rather than on a timer because there is no timer in
     this application; a ``count(*)`` over at most ten thousand rows is cheaper
-    than the alternative of an unbounded table nobody ever looks at.
+    than the alternative of an unbounded table nobody ever looks at. *Towards*
+    its ceiling, because the rows the compile budget is metered by are exempt
+    while the budget can still read them — see :data:`METERED_ACTIONS`.
     """
     row = KbActivity(
         action=action,
@@ -189,6 +234,16 @@ async def log_activity(
     return row
 
 
+def budget_floor() -> datetime:
+    """Midnight UTC on the first of **last** month — the prune's keep-line.
+
+    ``month_usage`` only ever reads the current month, so one full month of slack
+    is enough to cover a prune that runs at 00:00:01 on the first.
+    """
+    this_month = utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    return (this_month - timedelta(days=1)).replace(day=1)
+
+
 async def _prune_activity(session: AsyncSession) -> None:
     total = await session.scalar(select(func.count()).select_from(KbActivity)) or 0
     if total <= ACTIVITY_MAX_ROWS:
@@ -197,7 +252,19 @@ async def _prune_activity(session: AsyncSession) -> None:
         select(KbActivity.id).order_by(KbActivity.id.desc()).offset(ACTIVITY_MAX_ROWS - 1).limit(1)
     )
     if oldest_kept is not None:
-        await session.execute(delete(KbActivity).where(KbActivity.id < oldest_kept))
+        await session.execute(
+            delete(KbActivity).where(
+                KbActivity.id < oldest_kept,
+                # The ledger is not trail: a metered row inside the window the
+                # budget can still read stays, however old it is by id. The table
+                # is still bounded — everything else goes, and a metered row from
+                # before last month goes with it.
+                or_(
+                    KbActivity.action.not_in(METERED_ACTIONS),
+                    KbActivity.at < budget_floor(),
+                ),
+            )
+        )
 
 
 # ------------------------------------------------------------------ capture
@@ -223,11 +290,24 @@ async def capture_article(
     lang: str | None = None,
     min_chars: int = DEFAULT_MIN_SNAPSHOT_CHARS,
     trigger: str = "manual",
+    duplicate_threshold: float = DEFAULT_DUPLICATE_THRESHOLD,
+    defer_embedding: bool = False,
 ) -> CaptureResult:
     """Capture one piece of text as an entry, or recognise it as one already held.
 
     *published_at* is the **source's** date. Callers pass the feed item's date,
     or the extractor's if it exposes one, or nothing — never ``utcnow()``.
+
+    *duplicate_threshold* is passed in rather than read here, like *min_chars*:
+    settings are the caller's to resolve, and a bulk run would otherwise read the
+    same row once per item.
+
+    *defer_embedding* hands both pieces of vector work — the embed and the
+    near-duplicate check that needs its result — to the caller. It exists for the
+    bulk job (:mod:`app.kb.bulk`), where embedding per entry would be one Voyage
+    call and one ``kb_activity`` row per article instead of one of each per run.
+    A caller that sets it **must** embed and flag afterwards, or the entry is
+    left keyword-only and unchecked.
     """
     canonical = canonical_url(url)
     body = (text or "").strip()
@@ -326,9 +406,19 @@ async def capture_article(
         await session.commit()
         entry_id = entry.id
 
+    if defer_embedding:
+        return CaptureResult(entry_id=entry_id, created=True)
+
     # Outside every transaction, on purpose — see the module docstring.
-    await _embed_pending_quietly(session_factory, embedder, entry_id, trigger=trigger)
-    return CaptureResult(entry_id=entry_id, created=True)
+    await embed_pending_quietly(session_factory, embedder, entry_id, trigger=trigger)
+    # After the embed, because the check reads the vector that embed just wrote.
+    return CaptureResult(
+        entry_id=entry_id,
+        created=True,
+        possible_duplicate_of=await flag_near_duplicate(
+            session_factory, embedder, entry_id, threshold=duplicate_threshold, trigger=trigger
+        ),
+    )
 
 
 async def capture_note(
@@ -338,6 +428,7 @@ async def capture_note(
     *,
     min_chars: int = DEFAULT_MIN_SNAPSHOT_CHARS,
     trigger: str = "note",
+    duplicate_threshold: float = DEFAULT_DUPLICATE_THRESHOLD,
 ) -> CaptureResult:
     """Capture a note's body, or bring its existing entry up to date.
 
@@ -361,7 +452,7 @@ async def capture_note(
         result = await _replace_snapshot(
             session_factory, existing_id, body, title=title, trigger=trigger
         )
-        await _embed_pending_quietly(session_factory, embedder, existing_id, trigger=trigger)
+        await embed_pending_quietly(session_factory, embedder, existing_id, trigger=trigger)
         return CaptureResult(entry_id=existing_id, created=False, skipped_reason=result.reason)
 
     return await capture_article(
@@ -380,6 +471,7 @@ async def capture_note(
         captured_by="auto",
         min_chars=min_chars,
         trigger=trigger,
+        duplicate_threshold=duplicate_threshold,
     )
 
 
@@ -395,6 +487,7 @@ async def capture_url(
     timeout_s: int = 15,
     trigger: str = "url",
     transport: httpx2.AsyncBaseTransport | None = None,
+    duplicate_threshold: float = DEFAULT_DUPLICATE_THRESHOLD,
 ) -> CaptureResult:
     """Fetch *url* and capture what the extractor makes of it.
 
@@ -443,6 +536,7 @@ async def capture_url(
         kind=kind,
         min_chars=min_chars,
         trigger=trigger,
+        duplicate_threshold=duplicate_threshold,
     )
 
 
@@ -501,7 +595,7 @@ async def refresh_snapshot(
         session_factory, entry_id, result.text.strip(), trigger=trigger
     )
     if outcome.changed:
-        await _embed_pending_quietly(session_factory, embedder, entry_id, trigger=trigger)
+        await embed_pending_quietly(session_factory, embedder, entry_id, trigger=trigger)
     return outcome
 
 
@@ -622,7 +716,7 @@ async def undelete(
                 "Merge the two, or delete the newer one first."
             ) from exc
 
-    await _embed_pending_quietly(session_factory, embedder, entry_id, trigger=trigger)
+    await embed_pending_quietly(session_factory, embedder, entry_id, trigger=trigger)
 
 
 async def purge(session_factory: async_sessionmaker[AsyncSession], ids: Sequence[int]) -> int:
@@ -701,6 +795,56 @@ async def merge_entries(
         )
         await session.commit()
         return kept.id
+
+
+async def dismiss_duplicate(
+    session_factory: async_sessionmaker[AsyncSession], entry_id: int
+) -> bool:
+    """Clear one entry's near-duplicate flag; ``True`` when there was one to clear.
+
+    Beside :func:`merge_entries` because until this existed a merge was the only
+    thing that cleared ``possible_duplicate_of`` — and with no Voyage key the flag
+    is raised on the title trigram alone, so the first thing a new user met was a
+    false positive whose only exits were folding two unrelated entries together or
+    deleting one of them (plan decision P2-23).
+
+    Idempotent: an entry that carries no flag is a success with nothing to do, and
+    writes no trail row — a dismissal that did not dismiss anything is not an event.
+    ``updated_at`` is deliberately **not** bumped: nothing the entry *says* changed,
+    and moving it past ``compiled_at`` would make a perfectly current summary
+    announce itself as stale.
+
+    The row is filed under ``merge`` because that is the family it belongs to and
+    ``kb_activity.action`` is a CHECK constraint on a database this application
+    never migrates: a new value would be rejected outright on every install that
+    predates it.
+    """
+    async with session_factory() as session:
+        entry = await session.get(KbEntry, entry_id)
+        if entry is None:
+            raise LookupError(f"No knowledge-base entry with id {entry_id}")
+        flagged = entry.possible_duplicate_of
+        if flagged is None:
+            return False
+        # A Core UPDATE that pins ``updated_at`` to itself, not an attribute write:
+        # the column is ``onupdate=utcnow``, which fires for any ORM flush of this
+        # row — and re-assigning the old value does not help, because an unchanged
+        # attribute stays out of the SET clause. ``turns.mark_interrupted`` does
+        # the same for the same reason.
+        await session.execute(
+            update(KbEntry)
+            .where(KbEntry.id == entry_id)
+            .values(possible_duplicate_of=None, updated_at=KbEntry.updated_at)
+        )
+        await log_activity(
+            session,
+            "merge",
+            entry_id=entry_id,
+            source="user",
+            detail=f"dismissed the possible-duplicate flag against entry {flagged}",
+        )
+        await session.commit()
+        return True
 
 
 async def _union_entities(session: AsyncSession, keep_id: int, drop_id: int) -> None:
@@ -815,15 +959,39 @@ async def embed_pending(
     embedder: Embedder,
     *,
     entry_id: int | None = None,
+    entry_ids: Sequence[int] | None = None,
     limit: int = 500,
+    source: str = "",
 ) -> int:
     """Embed chunks that have no vector yet, and return how many were embedded.
 
     ``embedded_at IS NULL`` is the one definition of "pending", so this is also
-    what Re-index resumes from. With an embedder that cannot embed —
-    :class:`~app.kb.embeddings.NullEmbedder`, the only one in Phase 1 — it is a
-    no-op and the chunks stay pending, which is a normal state of the knowledge
-    base rather than a failure.
+    what Re-index resumes from.
+
+    **The selection is the whole backlog unless it is narrowed.** *entry_id* is
+    one entry and also what the activity row is attributed to; *entry_ids* is a
+    set of them and attributes nothing, which is what a bulk run wants: it must
+    embed the entries it just created and leave a pre-existing backlog — nine
+    thousand chunks captured before a Voyage key existed — for **Embed now**,
+    which is the explicit button that exists for exactly that. With an embedder that cannot embed —
+    :class:`~app.kb.embeddings.NullEmbedder`, used whenever no Voyage key is
+    configured — it is a no-op and the chunks stay pending, which is a normal
+    state of the knowledge base rather than a failure.
+
+    **Written per batch, not once at the end.** The selection is grouped by
+    :func:`~app.kb.embeddings.plan_batches` at the configured model's own ceiling
+    (:func:`~app.kb.embeddings.max_tokens_for`), so that one group is exactly one
+    request the embedder sends — and each group's vectors, ``embedded_at`` and
+    ``embedding_model`` are committed before the next group is sent. So a provider
+    that 429s on the fifth request leaves exactly the chunks it never reached
+    pending, the entry's "8 of 11" is derived from counting them, and the next run
+    resumes from there instead of re-embedding what was already paid for.
+
+    Whatever it did manage is counted: one ``kb_activity`` row per call, with the
+    model and the estimated token count of the batches that landed, written even
+    when a later batch raised. The estimate is ``ceil(chars / 3.6)`` — the same one
+    the batcher packs with — because the count has to be attributable to the chunks
+    it was spent on, which a provider's reply about one request is not.
     """
     if embedder is None or embedder.dimensions <= 0:
         return 0
@@ -848,44 +1016,66 @@ async def embed_pending(
         )
         if entry_id is not None:
             statement = statement.where(KbChunk.entry_id == entry_id)
+        if entry_ids is not None:
+            statement = statement.where(KbChunk.entry_id.in_(list(entry_ids)))
         rows = (await session.execute(statement)).all()
 
     if not rows:
         return 0
 
-    # No session is open here: an embedder call is a network round trip, and
-    # SQLite has exactly one writer.
-    vectors = await embedder.embed_documents([row[1] for row in rows])
-
     store = SqliteKnowledgeStore(session_factory)
-    await store.upsert_vectors(
-        [
-            VectorRow(
-                chunk_id=row[0],
-                entry_id=row[3],
-                entry_kind=row[4],
-                chunk_kind=row[2],
-                reviewed=row[5] == "reviewed",
-                authorship=row[6],
-                published_day=published_day(row[7] or row[8]),
-                embedding=vector,
+    embedded = 0
+    tokens = 0
+    try:
+        for group in plan_batches(
+            [row[1] for row in rows], max_tokens=max_tokens_for(embedder.model)
+        ):
+            batch = [rows[index] for index in group]
+            # No session is open here: an embedder call is a network round trip,
+            # and SQLite has exactly one writer.
+            vectors = await embedder.embed_documents([row[1] for row in batch])
+
+            await store.upsert_vectors(
+                [
+                    VectorRow(
+                        chunk_id=row[0],
+                        entry_id=row[3],
+                        entry_kind=row[4],
+                        chunk_kind=row[2],
+                        reviewed=row[5] == "reviewed",
+                        authorship=row[6],
+                        published_day=published_day(row[7] or row[8]),
+                        embedding=vector,
+                    )
+                    for row, vector in zip(batch, vectors, strict=True)
+                ]
             )
-            for row, vector in zip(rows, vectors, strict=True)
-        ]
-    )
 
-    embedded_at = utcnow()
-    async with session_factory() as session:
-        for row in rows:
-            chunk = await session.get(KbChunk, row[0])
-            if chunk is not None:
-                chunk.embedded_at = embedded_at
-                chunk.embedding_model = embedder.model
-        await session.commit()
-    return len(rows)
+            embedded_at = utcnow()
+            async with session_factory() as session:
+                for row in batch:
+                    chunk = await session.get(KbChunk, row[0])
+                    if chunk is not None:
+                        chunk.embedded_at = embedded_at
+                        chunk.embedding_model = embedder.model
+                await session.commit()
+            embedded += len(batch)
+            tokens += sum(estimate_tokens(row[1]) for row in batch)
+    finally:
+        if embedded:
+            await _log_in_new_session(
+                session_factory,
+                "embed",
+                entry_id=entry_id,
+                source=source,
+                model=embedder.model,
+                input_tokens=tokens,
+                detail=f"{embedded} chunks",
+            )
+    return embedded
 
 
-async def _embed_pending_quietly(
+async def embed_pending_quietly(
     session_factory: async_sessionmaker[AsyncSession],
     embedder: Embedder,
     entry_id: int,
@@ -901,7 +1091,9 @@ async def _embed_pending_quietly(
     with a 500, and ``embedded_at IS NULL`` is exactly what Re-index resumes from.
     """
     try:
-        return await embed_pending(session_factory, embedder, entry_id=entry_id)
+        return await embed_pending(
+            session_factory, embedder, entry_id=entry_id, source=trigger
+        )
     except Exception as exc:  # noqa: BLE001 - the capture already committed
         logger.exception("Embedding entry %s failed", entry_id)
         await _log_in_new_session(
@@ -912,6 +1104,338 @@ async def _embed_pending_quietly(
             detail=f"embedding failed, chunks stay pending: {type(exc).__name__}: {exc}",
         )
         return 0
+
+
+# ----------------------------------------------------- near-duplicates
+
+
+@dataclass(frozen=True, slots=True)
+class DuplicateMatch:
+    """The older entry a capture looks like, and how much it looked like it.
+
+    The scores travel with the id so the activity row can name both of them: a
+    threshold nobody can see the evidence for is a threshold nobody can calibrate,
+    and ``kb_duplicate_threshold``'s 0.92 is explicitly unvalidated (spec §9).
+    """
+
+    entry_id: int
+    cosine: float | None
+    title_score: float
+
+
+def trigrams(value: str) -> set[str]:
+    """Character trigrams of the normalised text, padded the way ``pg_trgm`` does.
+
+    The padding (two spaces in front, one behind) is what gives a two-word title
+    enough trigrams to score against, and it makes the first and last characters
+    count as much as the middle ones.
+    """
+    cleaned = normalise_text(value)
+    if not cleaned:
+        return set()
+    padded = f"  {cleaned} "
+    return {padded[index : index + 3] for index in range(len(padded) - 2)}
+
+
+def dice(left: set[str], right: set[str]) -> float:
+    """The Dice coefficient of two trigram sets; ``0.0`` if either is empty.
+
+    Taken over the *sets* rather than the strings so a scan can build one side
+    once — :func:`_nearest_by_title` compares one title against two thousand.
+    """
+    if not left or not right:
+        return 0.0
+    return 2 * len(left & right) / (len(left) + len(right))
+
+
+def title_similarity(a: str, b: str) -> float:
+    """Dice coefficient over character trigrams: ``1.0`` identical, ``0.0`` unrelated.
+
+    Dice rather than Jaccard because the interesting case is a title that gained
+    or lost a few words ("The xz backdoor" / "The xz backdoor, explained"), and
+    Jaccard punishes that twice over.
+    """
+    return dice(trigrams(a), trigrams(b))
+
+
+def cosine_from_distance(distance: float) -> float:
+    """vec0's ``distance`` as a cosine similarity.
+
+    ``kb_chunk_vec`` is created without ``distance_metric=``, and sqlite-vec's
+    default is **L2**, not cosine — so the conversion is ``1 - d²/2`` and *not*
+    the ``1 - d`` that a cosine-metric table would want. Getting this backwards
+    flags everything or nothing, silently, which is why it is one named function
+    with a test on it rather than an expression inside the lookup.
+
+    **Precondition: both vectors are L2-normalised**, which is the identity's
+    whole basis. It is not assumed of the provider: every embedder in this
+    application normalises what it returns
+    (:func:`app.kb.embeddings.l2_normalise`, applied in ``VoyageEmbedder._post``
+    and stated in the :class:`~app.kb.embeddings.Embedder` protocol). Without it
+    the answer is an under-estimate that never invents a duplicate but quietly
+    stops finding one: at norm 0.5 a true cosine of 1.0 reads 0.875, and above
+    norm 2.41 it reads negative and can never clear any threshold.
+    """
+    return 1.0 - (distance * distance) / 2.0
+
+
+def is_near_duplicate(cosine: float | None, title_score: float, *, threshold: float) -> bool:
+    """Spec §4.5's rule: a close vector **and** a title trigram ≥ 0.8.
+
+    ``cosine is None`` means no embedder could produce a vector, and then the
+    trigram test runs alone — it still only ever *flags*, never merges.
+    """
+    if title_score < TITLE_TRIGRAM_MIN:
+        return False
+    return cosine is None or cosine >= threshold
+
+
+async def near_duplicate(
+    store: KnowledgeStore,
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    first_body_vector: Sequence[float],
+    title: str,
+    threshold: float,
+    entry_id: int,
+) -> DuplicateMatch | None:
+    """The older entry *entry_id* is probably a re-run of, or ``None``.
+
+    The vector is the **first body chunk's**, which is the only one that exists at
+    capture time — the summary chunk does not exist until a compile. An empty
+    vector is the no-embedder case and runs the trigram leg on its own.
+
+    Only entries **older** than *entry_id* are candidates, which is what makes the
+    flag point backwards at the copy that was already there (spec §4.5). A bulk
+    run flags after capturing its whole selection, so without that rule the first
+    article of a run would be flagged against the last one of the same run and the
+    two would point at each other.
+    """
+    if first_body_vector:
+        return await _nearest_by_vector(
+            store,
+            session_factory,
+            vector=first_body_vector,
+            title=title,
+            threshold=threshold,
+            entry_id=entry_id,
+        )
+    return await _nearest_by_title(
+        session_factory, title=title, threshold=threshold, entry_id=entry_id
+    )
+
+
+async def _nearest_by_vector(
+    store: KnowledgeStore,
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    vector: Sequence[float],
+    title: str,
+    threshold: float,
+    entry_id: int,
+) -> DuplicateMatch | None:
+    """The nearest older body chunk whose entry's title agrees as well.
+
+    The entry is excluded **inside** the KNN (``exclude_entry_id``), not after
+    it: a long advisory contributes every one of its body chunks as a candidate —
+    fourteen of them for a 40 000-character article — and dropping them in Python
+    afterwards would leave a *k* that held nothing but the entry itself. The
+    ``id < entry_id`` rule below still applies, because it says something else:
+    the flag points backwards, at the copy that was already there.
+
+    ``include_model_authored`` is set: this is the user's own knowledge base
+    checking itself for duplicates, not the authorship gate that governs what the
+    model is fed. ``exclude_model_authored`` is then set on top of it, which is a
+    different rule and not the same one twice — the gate would still let a
+    *reviewed* finding through, and a finding must never be a candidate at all.
+    A finding quotes the article it cites, so it pairs with that article on the
+    vector leg; and a merge keeps the **older** entry, so accepting the
+    suggestion would soft-delete the user's own research and keep its source.
+    ``capture_finding`` already refuses to flag in the other direction, and this
+    is the reverse leg of the same rule.
+    """
+    rows = await store.knn(
+        list(vector),
+        NEAR_DUPLICATE_K,
+        filters=SearchFilters(
+            kinds=DUPLICATE_KINDS,
+            chunk_kinds=("body",),
+            include_model_authored=True,
+            exclude_model_authored=True,
+            exclude_entry_id=entry_id,
+        ),
+    )
+    chunk_ids = [chunk_id for chunk_id, _ in rows]
+    if not chunk_ids:
+        return None
+    async with session_factory() as session:
+        found = (
+            await session.execute(
+                select(KbChunk.id, KbEntry.id, KbEntry.title)
+                .join(KbEntry, KbEntry.id == KbChunk.entry_id)
+                .where(
+                    KbChunk.id.in_(chunk_ids),
+                    KbEntry.deleted_at.is_(None),
+                    KbEntry.id < entry_id,
+                )
+            )
+        ).all()
+    by_chunk = {chunk_id: (found_id, other) for chunk_id, found_id, other in found}
+
+    for chunk_id, distance in rows:
+        candidate = by_chunk.get(chunk_id)
+        if candidate is None:
+            continue
+        cosine = cosine_from_distance(distance)
+        score = title_similarity(title, candidate[1])
+        if is_near_duplicate(cosine, score, threshold=threshold):
+            return DuplicateMatch(entry_id=candidate[0], cosine=cosine, title_score=score)
+    return None
+
+
+async def _nearest_by_title(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    title: str,
+    threshold: float,
+    entry_id: int,
+) -> DuplicateMatch | None:
+    """The best-matching title among the older entries — the no-embedder leg.
+
+    Walked newest-first and compared with ``>=`` so that a tie resolves to the
+    **oldest** entry: the flag points backwards, at the copy that was already
+    there. Model-authored entries are excluded for the reason
+    :func:`_nearest_by_vector` gives, and this leg needs it more: a finding is
+    titled with the user's own question, and with no Voyage key the title is the
+    whole test.
+    """
+    async with session_factory() as session:
+        candidates = (
+            await session.execute(
+                select(KbEntry.id, KbEntry.title)
+                .where(
+                    KbEntry.deleted_at.is_(None),
+                    KbEntry.id < entry_id,
+                    KbEntry.authorship != "model",
+                    KbEntry.kind.in_(DUPLICATE_KINDS),
+                )
+                .order_by(KbEntry.id.desc())
+                .limit(NEAR_DUPLICATE_TITLE_SCAN)
+            )
+        ).all()
+
+    # Built once, not once per candidate: this leg is the default whenever no
+    # Voyage key is configured, and it walks up to NEAR_DUPLICATE_TITLE_SCAN rows.
+    wanted = trigrams(title)
+    best: DuplicateMatch | None = None
+    for candidate_id, other in candidates:
+        score = dice(wanted, trigrams(other))
+        if not is_near_duplicate(None, score, threshold=threshold):
+            continue
+        if best is None or score >= best.title_score:
+            best = DuplicateMatch(entry_id=candidate_id, cosine=None, title_score=score)
+    return best
+
+
+async def flag_near_duplicate(
+    session_factory: async_sessionmaker[AsyncSession],
+    embedder: Embedder,
+    entry_id: int,
+    *,
+    threshold: float = DEFAULT_DUPLICATE_THRESHOLD,
+    trigger: str = "manual",
+) -> int | None:
+    """Set ``possible_duplicate_of`` on *entry_id* if it looks like an older entry.
+
+    **Flag, never merge** — merging is a button the user presses, because the two
+    legs together are a heuristic and the one thing a heuristic must not do is
+    destroy the evidence it was wrong about.
+
+    Called after the entry has committed and after whatever was going to embed it
+    has run, so like every other post-commit consequence its failure is a row in
+    the trail rather than a failed capture (the module docstring's rule, spec §5).
+    """
+    try:
+        store = SqliteKnowledgeStore(session_factory)
+        async with session_factory() as session:
+            entry = await session.get(KbEntry, entry_id)
+            if entry is None or entry.deleted_at is not None:
+                return None
+            if entry.kind not in DUPLICATE_KINDS:
+                return None
+            title = entry.title
+
+        vector: list[float] = []
+        if embedder.dimensions > 0:
+            vector = await _first_body_vector(session_factory, store, entry_id)
+            if not vector:
+                # An embedder is configured but this entry has no vector: the
+                # embed did not reach it (Voyage was down, or a bulk run was
+                # cancelled). There is nothing to compare, and falling back to the
+                # title alone here would be a different rule than the spec's.
+                return None
+
+        found = await near_duplicate(
+            store,
+            session_factory,
+            first_body_vector=vector,
+            title=title,
+            threshold=threshold,
+            entry_id=entry_id,
+        )
+        if found is None:
+            return None
+
+        async with session_factory() as session:
+            entry = await session.get(KbEntry, entry_id)
+            if entry is None:
+                return None
+            entry.possible_duplicate_of = found.entry_id
+            cosine = "n/a" if found.cosine is None else f"{found.cosine:.3f}"
+            await log_activity(
+                session,
+                "capture",
+                entry_id=entry_id,
+                source=trigger,
+                detail=(
+                    f"possible duplicate of entry {found.entry_id}"
+                    f" (cosine {cosine}, title {found.title_score:.2f})"
+                ),
+            )
+            await session.commit()
+        return found.entry_id
+    except Exception as exc:  # noqa: BLE001 - the capture already committed
+        logger.exception("The near-duplicate check for entry %s failed", entry_id)
+        await _log_in_new_session(
+            session_factory,
+            "skip",
+            entry_id=entry_id,
+            source=trigger,
+            detail=f"near-duplicate check failed: {type(exc).__name__}: {exc}",
+        )
+        return None
+
+
+async def _first_body_vector(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: KnowledgeStore,
+    entry_id: int,
+) -> list[float]:
+    """The stored vector of the entry's lowest-``ord`` body chunk, or ``[]``.
+
+    Read back out of ``kb_chunk_vec`` rather than re-embedded: the text was
+    embedded moments ago, and a second Voyage call per capture would double the
+    bill of every bulk run to buy a number the database already holds.
+    """
+    chunk = (await store.first_body_chunks([entry_id])).get(entry_id)
+    if chunk is None:
+        return []
+    async with session_factory() as session:
+        raw = await session.scalar(
+            text("SELECT vec_to_json(embedding) FROM kb_chunk_vec WHERE chunk_id = :chunk_id"),
+            {"chunk_id": chunk.id},
+        )
+    return list(json.loads(raw)) if raw else []
 
 
 # ----------------------------------------------------------------- internals
@@ -1092,23 +1616,36 @@ def entry_ids(rows: Iterable[KbEntry]) -> list[int]:
 
 __all__ = [
     "ACTIVITY_MAX_ROWS",
+    "DEFAULT_DUPLICATE_THRESHOLD",
     "DEFAULT_MIN_SNAPSHOT_CHARS",
+    "NEAR_DUPLICATE_K",
+    "NEAR_DUPLICATE_TITLE_SCAN",
     "NOTE_SEPARATOR",
+    "TITLE_TRIGRAM_MIN",
     "CaptureResult",
+    "DuplicateMatch",
     "KbConflict",
     "RefreshResult",
     "capture_article",
     "capture_note",
     "capture_url",
     "content_hash",
+    "cosine_from_distance",
+    "dismiss_duplicate",
     "embed_pending",
+    "embed_pending_quietly",
     "entry_ids",
+    "flag_near_duplicate",
+    "is_near_duplicate",
     "log_activity",
     "merge_entries",
+    "near_duplicate",
     "normalise_text",
     "purge",
     "refresh_snapshot",
     "snapshot_hash",
     "soft_delete",
+    "title_similarity",
+    "trigrams",
     "undelete",
 ]

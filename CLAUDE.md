@@ -3,14 +3,16 @@
 ## What this is
 
 A **local-only, single-user** web app for one security engineer who runs a weekly
-security meeting with team leads. It has four jobs: an **RSS security-news inbox**
+security meeting with team leads. It has five jobs: an **RSS security-news inbox**
 (manual refresh, star/dismiss triage, on-demand article extraction), a **streaming
 research chat** that can call local inbox tools, Anthropic's server-side web
 search/fetch, and any configured MCP server, a **meeting-notes generator** that
-turns starred items and chat sessions into structured Markdown, and a **global
-search** over all three histories. FastAPI + SQLite backend, React/Vite SPA, one
-Docker container, one port. Nothing leaves the machine except the outbound calls
-the user asks for.
+turns starred items and chat sessions into structured Markdown, a **knowledge base**
+of captured articles, notes and findings — versioned snapshots, hybrid FTS5 +
+`sqlite-vec` retrieval over Voyage embeddings, and an on-demand **compile** step that
+has a model summarise and tag one entry — and a **global search** over the first three
+histories. FastAPI + SQLite backend, React/Vite SPA, one Docker container, one port.
+Nothing leaves the machine except the outbound calls the user asks for.
 
 The core build is **complete**. Read `docs/DESIGN.md` for the product decisions and
 the design record (each section carries an "Implementation notes" block where the
@@ -35,7 +37,7 @@ enrichment, ...). `docs/CLAUDE.md` is the doc map.
 | `backend/` | FastAPI app, uv-managed. See `backend/CLAUDE.md`. |
 | `backend/app/agent/` | The manual Anthropic agent loop + tool registry. See `backend/app/agent/CLAUDE.md`. |
 | `backend/app/mcp/` | MCP client: config, connection manager, tool provider. See `backend/app/mcp/CLAUDE.md`. |
-| `backend/app/kb/` | The knowledge base: the **frozen** virtual-table DDL and its versions (`schema.py`), capture, chunking, FTS, entities, store, retrieval, and `KbService` — the one door. No `CLAUDE.md` of its own: it is documented in `backend/CLAUDE.md`. |
+| `backend/app/kb/` | The knowledge base: the **frozen** virtual-table DDL and its versions (`schema.py`), capture, chunking, FTS, entities, embeddings, store, retrieval, the bulk job, compile, findings, and `KbService` — the one door. No `CLAUDE.md` of its own: it is documented in `backend/CLAUDE.md`. |
 | `frontend/` | Vite + React 19 + TS + Tailwind v4 SPA. See `frontend/CLAUDE.md`. |
 | `docs/` | `DESIGN.md` (design record), `ROADMAP.md` (backlog). See `docs/CLAUDE.md`. |
 | `Dockerfile` | Two stages: node builds the SPA, python runs it. Node binary is copied into the runtime so stdio MCP servers can `npx`. Wheels are hash-verified. `docker/entrypoint.sh` starts as root, chowns `/data` to the non-root user `app` only when an older root-owned volume needs it, then drops privileges with `setpriv`; `CMD` is `python -m app --host 0.0.0.0`. `PORT` must be ≥ 1024. |
@@ -91,14 +93,12 @@ history.
 **`.env`.** Copy `.env.example` → `.env`. `app.config.Settings` reads it via
 pydantic-settings (`env_file=("../.env", ".env")`, so it works whether you run from
 the repo root or from `backend/`). Fields: `DB_PATH`, `PORT`, `STATIC_DIR`,
-`CORS_ORIGINS`, `ANTHROPIC_API_KEY`, `LOG_LEVEL`. `PORT` is honoured by `make dev-api`,
+`CORS_ORIGINS`, `ANTHROPIC_API_KEY`, `VOYAGE_API_KEY`, `LOG_LEVEL`. `PORT` is honoured by `make dev-api`,
 by the image's `CMD` and by `docker compose` (which publishes `${PORT:-8000}`), because
 both go through `python -m app` (`backend/app/__main__.py`), which reads `Settings.port`.
 `CORS_ORIGINS` accepts a comma-separated list as well as a JSON array; `*` is refused
 (a `ValidationError` at startup) and the middleware never allows credentials, because
-this API has no auth to protect. `.env.example` carries one more, commented out:
-`VOYAGE_API_KEY`, for the knowledge base's embeddings — it is **Phase 2** and no field
-reads it yet, so uncommenting it does nothing (`Settings` is `extra="ignore"`).
+this API has no auth to protect.
 
 **API-key precedence: process environment → `.env` (i.e. `Settings.anthropic_api_key`)
 → the key stored in the DB.** `app/services/settings.py::external_api_key` reads
@@ -108,6 +108,14 @@ environment alone would silently ignore a key written into `.env`. Neither exter
 value is ever written back to the DB. `GET /api/settings` reports the winner as
 `key_source` (`env` / `stored` / `none`); `has_api_key` means only "a key is stored
 in *this database*".
+
+**The Voyage key mirrors it exactly** (`external_voyage_key` /
+`get_effective_voyage_key` / `get_voyage_key_source`, same module): process environment
+`VOYAGE_API_KEY` → `.env` (`Settings.voyage_api_key`) → the row in the DB, written over
+the API and read back only as `voyage_api_key_masked`, reported as `voyage_key_source`,
+with `has_voyage_key` again meaning only "stored in *this database*". With no key the
+knowledge base is a keyword index and everything still works; entering one and pressing
+**Embed now** (`POST /api/kb/embed-pending`) embeds the backlog.
 
 **`LOG_LEVEL`** is applied by `app/logging_config.py::configure_logging`, called from
 `create_app` before anything else. It is idempotent (one named handler, re-levelled)
@@ -228,6 +236,29 @@ handler and was dropped.
   and closes it in the stream's `finally`. Both streaming routes share
   `app/api/streaming.py` (`stream_turn_log` for a chat turn, `pump_agent_events` for a
   note generation, `SSE_PING_S`, `SSE_HEADERS`).
+- **The knowledge base, Phase 2** (details in `backend/CLAUDE.md`):
+  - `kb_chunk_vec` was created with no `distance_metric=`, so sqlite-vec's default
+    **L2** is the metric and a cosine is `1 − d²/2`
+    (`app/kb/capture.py::cosine_from_distance`) — true only for unit vectors, which is
+    why every embedder L2-normalises what it returns (`app/kb/embeddings.py`).
+  - Voyage rejects a request that breaks **either** its text or its token ceiling, and
+    the token ceiling is per model, so batches are planned against
+    `embeddings.max_tokens_for(model)` — the one place it is decided. `input_type` is
+    `document` for chunks and `query` for a search.
+  - **Never hold a DB transaction across a fetch, an embed or an Anthropic call** —
+    one SQLite writer. `deps.get_kb_service` commits the read transaction it opens for
+    exactly that reason, and a route that captures finishes its own DB work first.
+  - **Compile is the only Anthropic call that is not a chat turn**
+    (`app/agent/oneshot.py`). Its JSON schema carries **no size keywords** —
+    `maxItems`/`maxLength` are refused when the API compiles a structured-output schema,
+    so every cap is enforced in `app/kb/compile.py` (P2-22). The monthly budget is
+    *derived* from `kb_activity`, so metered rows (`compile`/`recompile`/`embed`) are
+    exempt from that table's row prune.
+  - With `kb_compile_mode: auto` a star and a Save **wait** for the compile call inside
+    the request that caused them (P2-19); a bulk run never auto-compiles.
+  - **Findings are off by default** (`kb_capture_findings`): a kept chat turn is a
+    model-authored entry, never fed back to a model until a human reviews it, never
+    auto-compiled, and never flagged as a near-duplicate.
 - **The outbound `User-Agent` must never claim to be a browser.** It is the honest
   robot form `Mozilla/5.0 (compatible; SecurityNewsResearcher/0.1; +<repo>)`
   (`app/services/http.py::USER_AGENT`). A Chrome string over an OpenSSL handshake is

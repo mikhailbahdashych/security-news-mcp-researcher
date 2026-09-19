@@ -337,6 +337,101 @@ a gap is an entry folded into a neighbour.
   rebuild stay in Task 4.4. — Why: without it, entries captured before the Voyage key was entered
   would stay keyword-only until Phase 4, and Task 2.7's acceptance ("enter a key → a semantic query
   finds the entry") is unreachable. Cost: one small endpoint Task 4.4 later subsumes.
+- **P2-17. `POST /api/kb/search` is user-facing and returns unreviewed model-authored entries**,
+  labelled by `authorship` / `review_status`. The authorship gate (S5) governs what the *model* is
+  fed — the two chat tools and the notes generator, through `search_for_model` — not what the user
+  sees of their own knowledge base. The Phase 2 contract first said otherwise; it is amended in the
+  same commit. — Cost if wrong: one filter flag on one route.
+- **P2-18. Known gap, owned by Task 4.4: an embed that straddles an embedding-model change.** A
+  `PUT /api/settings` that changes `kb_embedding_model` empties `kb_chunk_vec` in one transaction
+  (C1), but an `embed_pending` run already in flight — a second tab, a bulk job — still holds an
+  embedder for the *old* model and can upsert its vectors after the wipe, putting two vector spaces
+  in one KNN with nothing on screen to say so. It needs two concurrent user actions in a
+  single-user app, so Phase 2 accepts it; Task 4.4 (re-index / rebuild, which owns the model-change
+  path) must close it — e.g. `embed_pending` re-reads the configured model before each batch's
+  write and drops the batch on a mismatch. — Cost if forgotten: silently degraded similarity for
+  the chunks of one run, repaired only by a full re-index.
+- **P2-8 (done, 05c42ab).** `KbService` carries an optional client factory; `_auto_compile` runs inside
+  the capture's own `guarded` envelope, only for a newly created entry, and is a no-op without a
+  factory. **The bulk job opts out**: 200 selected items would otherwise be 200 Anthropic calls from
+  one click; compiling a selection stays the explicit `POST /api/kb/compile` with its estimate.
+- **P2-19. In `auto` mode the star and Save requests wait for the compile call — accepted.** Spec §4.5
+  says a single capture runs inside the request that caused it, and `auto` is opt-in. Moving it to a
+  background task would be a second job system for one setting. It is documented (contract, route
+  docstrings) and Task 2.7 gives those two actions a pending state and the toggle a sentence that says
+  so, and that the only brake on `auto` is the monthly budget. — Cost if wrong: a slow star.
+- **P2-20. The embedder L2-normalises every vector it returns.** `kb_chunk_vec` was created with
+  sqlite-vec's default metric, which is **L2** (the frozen DDL names none), so the near-duplicate check
+  converts with `cosine = 1 − d²/2` — exact only for unit vectors. Voyage's already are; normalising is
+  idempotent and makes the invariant ours rather than a vendor default, so re-opening
+  `output_dimension` later cannot silently switch duplicate flagging off. The plan's own brief had
+  assumed a cosine metric (`1 − d`), under which nothing would ever have been flagged.
+- **P2-21. Near-duplicate calibration is unvalidated.** `kb_duplicate_threshold = 0.92` (cosine) and
+  the title-trigram floor of 0.8 are reasoned, not measured: "The xz backdoor" vs "The xz backdoor,
+  explained" scores 0.698 and does not flag. With no Voyage key the trigram leg runs alone and
+  near-identical *headlines* over different stories can flag; it only ever flags, never merges.
+  Recalibrate from real use — one setting and one constant.
+- **P2-22. The compile schema carries no size keywords; every cap is enforced in code.** The
+  structured-output subset of JSON Schema does not accept `maxItems` / `maxLength` (or the numeric
+  bounds), and a schema that carries one is refused when the API compiles it — a 400 on every compile,
+  invisible to a suite whose scripted client never validates a schema. Tags (8), entities (24 × 120
+  chars) and the summary (6 000 chars) are cut in `compile.py` and *stated* in the schema's
+  descriptions; a test walks the schema for the forbidden keywords. **Still owed: one live compile in
+  the Phase 2 browser pass**, because no test can prove the API accepts the schema. — Cost if wrong:
+  none; the keywords were never the load-bearing cap.
+- **P2-23. A duplicate flag is dismissable.** `possible_duplicate_of` was cleared only by a merge. With
+  no Voyage key the flag comes from the title trigram alone, so the first thing a new user met was a
+  false positive whose only exits were merging two unrelated entries or deleting one.
+  `POST /api/kb/entries/{id}/not-a-duplicate` clears it (idempotent, one activity row), and the strip
+  and the entry banner offer a one-click Dismiss. A model-authored finding neither flags nor is
+  flagged, in either direction: merging keeps the *older* entry, so a suggested merge could otherwise
+  delete the user's research and keep the article it quotes. — Cost if wrong: one small route.
+- **P2-24. `SettingsRead` exposes the shipped compile prompt, and an empty prompt is refused.** "Reset
+  to default" could only restore the last *saved* prompt, and saving a blank one destroyed the default
+  for good (the getter falls back only when the row is absent).
+- **P2-25. Known limit, accepted for Phase 2: a "Needs attention" failure row outlives the action
+  that fixes it.** Failure rows are derived client-side from the last rows of `kb_activity`; a later
+  successful compile adds a row but does not retire the earlier failure, so the row lingers until it
+  ages out of the window. The clean fix is a server-side outcome (a `reason_code` column or distinct
+  actions) — but `kb_activity.action` is a CHECK constraint and this app has no migrations beyond
+  `ADDED_COLUMNS`, which is also why a dismissed duplicate is filed under `action: "merge"`. Task 4.1
+  (curation) owns giving the trail a proper outcome and the strip a server-side source. — Cost: a
+  stale row in a strip the user can ignore.
+- **P2-26. Only an article can be a duplicate, and only of another article.** The Phase 2 browser
+  pass generated a note from one inbox item; the note carries the item's headline and quotes it, so it
+  was flagged as a possible duplicate of the article it was written from — and a merge keeps the older
+  entry. Both near-duplicate legs now offer only `kind = 'article'` candidates and only an article is
+  checked. — Cost if wrong: two manual entries with the same title are never flagged.
+- **P2-26 (amended by the final review).** "Only an article" was one kind too narrow: Save-a-URL
+  writes `kind = 'manual'`, so pasted-URL saves had silently stopped being flagged. The rule is
+  `DUPLICATE_KINDS = ("article", "manual")`; notes and findings stay out.
+
+### Phase 2 — follow-ups handed to later phases
+
+Found by the Phase 2 reviews and the browser pass, judged not worth holding the phase for. Each
+names its owner so it is picked up rather than rediscovered.
+
+- **Task 3.5 (inbox / global search):** `extract_item(session, …)` still holds a database session
+  across its network fetch at three pre-existing call sites (`api/items.py`, `agent/builtin.py`'s
+  `fetch_article`, `services/notes.py`). The root fix is a `session_factory` signature; it spans three
+  subsystems and their tests. The knowledge base's own capture path already fetches outside a session.
+- **Task 3.3 (citations UI):** the entry's and Settings' activity lists print a compile row's raw JSON
+  `detail`; the duplicate banner on an entry does not name the other entry or carry the
+  "title alone" caveat the strip has.
+- **Task 4.1 (curation):** creating a proposed topic does not attach it to the entry that proposed it
+  (a recompile does); a note edit never recompiles; `new_topic` name/description are uncapped; a
+  cancelled capture leaves no trail row; the trail needs a real outcome column (P2-25);
+  `_prune_activity` runs `COUNT(*)` and an `OFFSET` walk on every activity write; the bulk panel's
+  "N saved" counts items that were already saved; "Needs attention" shows one shared error line for
+  seven actions; the two progress bars lack `role="progressbar"`; the bulk panel latches on
+  "Stopping…" if the cancel request itself fails.
+- **Task 4.4 (re-index):** P2-18; `embed_query` on every search is a paid Voyage call that writes no
+  metered row, so the Voyage counter under-reports searches.
+- **Anywhere it is cheap:** the compile estimate counts the user message only and came in about a
+  third under the real input (1.4K estimated, 2.1K billed) because the system prompt and the schema
+  are not in it — label it approximate, or count the real request; do **not** blind-add
+  `output_config` to `count_tokens` (P2-22 is that lesson). A refusal's token cost is recorded in the
+  trail but is not on the compile response.
 
 ---
 

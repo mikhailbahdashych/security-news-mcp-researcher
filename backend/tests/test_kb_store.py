@@ -6,16 +6,19 @@ the ``MATCH`` is the whole reason those six metadata columns exist, and the time
 find out they cannot express a filter is before the DDL ships, not after.
 """
 
-from datetime import datetime, timedelta
+from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 from fakes.embedder import FakeEmbedder
-from sqlalchemy import text
+from sqlalchemy import event, text
 
 from app.db.models import utcnow
+from app.kb.capture import capture_article, soft_delete, undelete
 from app.kb.fts import fts_query
 from app.kb.models import KbChunk, KbEntry, KbEntryTopic, Topic
 from app.kb.schema import VEC_DIMENSIONS
+from app.kb.service import KbService
 from app.kb.store import SearchFilters, SqliteKnowledgeStore, VectorRow, published_day
 
 
@@ -414,3 +417,292 @@ async def test_rebuild_goes_through_the_schema_module(session_factory, db_sessio
     result = await store.rebuild(VEC_DIMENSIONS)
 
     assert result.dimensions == VEC_DIMENSIONS
+
+
+# -- Phase 2: the vector leg --------------------------------------------
+
+
+def _ray(offset: float) -> list[float]:
+    """A vector whose L2 distance from ``_ray(0.0)`` is exactly *offset*.
+
+    Hand-built rather than embedded: a filter test has to know which row is
+    nearest, and a digest-derived vector does not let it.
+    """
+    vector = [0.0] * VEC_DIMENSIONS
+    vector[0] = 1.0
+    vector[1] = offset
+    return vector
+
+
+async def _vec_row(store, db_session, entry: KbEntry, text_: str, **overrides) -> int:
+    """One chunk with one vector. *overrides* are the vec0 metadata columns."""
+    chunk = KbChunk(
+        entry_id=entry.id,
+        ord=0,
+        text=text_,
+        token_estimate=1,
+        kind=overrides.pop("chunk_kind_row", "body"),
+    )
+    db_session.add(chunk)
+    await db_session.commit()
+    values = {
+        "chunk_id": chunk.id,
+        "entry_id": entry.id,
+        "entry_kind": entry.kind,
+        "chunk_kind": chunk.kind,
+        "reviewed": entry.review_status == "reviewed",
+        "authorship": entry.authorship,
+        "published_day": published_day(entry.published_at or entry.captured_at),
+        "embedding": _ray(0.01),
+    }
+    values.update(overrides)
+    await store.upsert_vectors([VectorRow(**values)])
+    return chunk.id
+
+
+@contextmanager
+def _statements(db_engine):
+    """Every SQL statement the engine executes while the block runs."""
+    seen: list[str] = []
+
+    def record(conn, cursor, statement, parameters, context, executemany):
+        seen.append(statement)
+
+    event.listen(db_engine.sync_engine, "before_cursor_execute", record)
+    try:
+        yield seen
+    finally:
+        event.remove(db_engine.sync_engine, "before_cursor_execute", record)
+
+
+def test_published_day_accepts_a_tz_aware_datetime():
+    """``POST /kb/search`` takes ``since=2026-01-01T00:00:00Z``; FastAPI parses
+    that to an aware datetime and subtracting the naive epoch from it raises."""
+    naive = datetime(2026, 1, 1, 0, 0)
+    aware = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
+
+    assert published_day(aware) == published_day(naive)
+    # An offset that crosses midnight still lands on the UTC day.
+    assert published_day(datetime(2026, 1, 1, 1, 0, tzinfo=timezone(timedelta(hours=2)))) == (
+        published_day(datetime(2025, 12, 31, 23, 0))
+    )
+    assert published_day(None) == 0
+
+
+async def test_a_since_filter_matches_on_both_legs_whether_or_not_it_is_tz_aware(
+    session_factory, db_session
+):
+    old = await _entry(db_session, published_at=datetime(2020, 1, 1))
+    new = await _entry(db_session, published_at=datetime(2026, 6, 1))
+    store = SqliteKnowledgeStore(session_factory)
+    wanted = await _vec_row(store, db_session, new, "liblzma backdoor")
+    await _vec_row(store, db_session, old, "liblzma backdoor", embedding=_ray(0.02))
+
+    naive = SearchFilters(since=datetime(2026, 1, 1))
+    aware = SearchFilters(since=datetime(2026, 1, 1, tzinfo=UTC))
+
+    for filters in (naive, aware):
+        assert [chunk_id for chunk_id, _ in await store.knn(_ray(0.0), 10, filters=filters)] == [
+            wanted
+        ]
+        keyword = await store.keyword(fts_query("liblzma"), 10, filters=filters)
+        assert [chunk_id for chunk_id, _ in keyword] == [wanted]
+
+
+async def test_a_filtered_knn_with_a_small_k_returns_rows_a_post_filter_would_have_lost(
+    session_factory, db_session
+):
+    """The S1 regression: the twenty nearest vectors are all the wrong kind."""
+    article = await _entry(db_session, kind="article")
+    note = await _entry(db_session, kind="note")
+    store = SqliteKnowledgeStore(session_factory)
+    for n in range(20):
+        await _vec_row(store, db_session, article, f"article {n}", embedding=_ray(0.001 * (n + 1)))
+    notes = [
+        await _vec_row(store, db_session, note, f"note {n}", embedding=_ray(0.1 * (n + 1)))
+        for n in range(10)
+    ]
+
+    found = await store.knn(_ray(0.0), 5, filters=SearchFilters(kinds=("note",)))
+
+    # A post-filter over the top five would have returned nothing at all.
+    assert [chunk_id for chunk_id, _ in found] == notes[:5]
+
+
+@pytest.mark.parametrize(
+    "filters, wanted",
+    [
+        (SearchFilters(kinds=("note",)), "note"),
+        (SearchFilters(chunk_kinds=("summary",)), "summary"),
+        (SearchFilters(reviewed_only=True), "reviewed"),
+        (SearchFilters(since=datetime(2026, 1, 1)), "recent"),
+    ],
+)
+async def test_each_metadata_column_filters_inside_the_knn(
+    session_factory, db_session, filters, wanted
+):
+    """``k = 1`` throughout: only a filter the index applied can find these."""
+    entry = await _entry(db_session)
+    store = SqliteKnowledgeStore(session_factory)
+    old, recent = published_day(datetime(2020, 1, 1)), published_day(datetime(2026, 6, 1))
+    rows = {
+        "nearest": {"embedding": _ray(0.01), "published_day": old},
+        "note": {"embedding": _ray(0.02), "entry_kind": "note", "published_day": old},
+        "summary": {"embedding": _ray(0.03), "chunk_kind": "summary", "published_day": old},
+        "reviewed": {"embedding": _ray(0.04), "reviewed": True, "published_day": old},
+        "recent": {"embedding": _ray(0.05), "published_day": recent},
+    }
+    ids = {
+        name: await _vec_row(store, db_session, entry, f"passage {name}", **values)
+        for name, values in rows.items()
+    }
+
+    found = await store.knn(_ray(0.0), 1, filters=filters)
+
+    assert [chunk_id for chunk_id, _ in found] == [ids[wanted]]
+
+
+async def test_leg_b_is_skipped_when_the_base_holds_no_model_authored_entry(
+    session_factory, db_session, db_engine
+):
+    entry = await _entry(db_session)
+    store = SqliteKnowledgeStore(session_factory)
+    await _vec_row(store, db_session, entry, "passage")
+
+    with _statements(db_engine) as seen:
+        await store.knn(_ray(0.0), 5, filters=SearchFilters())
+    assert sum("kb_chunk_vec" in statement for statement in seen) == 1
+
+    model = await _entry(db_session, kind="finding", authorship="model")
+    await _vec_row(store, db_session, model, "another passage", embedding=_ray(0.02))
+
+    with _statements(db_engine) as seen:
+        await SqliteKnowledgeStore(session_factory).knn(_ray(0.0), 5, filters=SearchFilters())
+    assert sum("kb_chunk_vec" in statement for statement in seen) == 2
+
+
+async def test_the_model_authorship_count_is_cached_for_the_life_of_the_store(
+    session_factory, db_session, db_engine
+):
+    """The adaptive ``k`` re-runs the KNN up to four times per search; the gate's
+    probe must not run once per attempt."""
+    entry = await _entry(db_session)
+    store = SqliteKnowledgeStore(session_factory)
+    await _vec_row(store, db_session, entry, "passage")
+
+    with _statements(db_engine) as seen:
+        await store.knn(_ray(0.0), 5, filters=SearchFilters())
+        await store.knn(_ray(0.0), 5, filters=SearchFilters())
+
+    assert sum("FROM kb_entries" in statement for statement in seen) == 1
+
+
+async def test_reviewing_an_entry_updates_its_vector_rows(session_factory, db_session):
+    """C2: vec0 metadata is written once, at upsert, and review changes after."""
+    finding = await _entry(db_session, kind="finding", authorship="model")
+    store = SqliteKnowledgeStore(session_factory)
+    chunk_id = await _vec_row(store, db_session, finding, "model conclusions")
+
+    assert await store.knn(_ray(0.0), 5, filters=SearchFilters()) == []
+
+    assert await store.set_reviewed(finding.id, True) == 1
+
+    assert [row[0] for row in await store.knn(_ray(0.0), 5, filters=SearchFilters())] == [chunk_id]
+
+
+async def test_un_reviewing_an_entry_hides_it_again(session_factory, db_session):
+    finding = await _entry(
+        db_session, kind="finding", authorship="model", review_status="reviewed"
+    )
+    store = SqliteKnowledgeStore(session_factory)
+    await _vec_row(store, db_session, finding, "model conclusions")
+    assert await store.knn(_ray(0.0), 5, filters=SearchFilters())
+
+    await store.set_reviewed(finding.id, False)
+
+    assert await store.knn(_ray(0.0), 5, filters=SearchFilters()) == []
+
+
+async def test_set_reviewed_leaves_every_other_entry_alone(session_factory, db_session):
+    one = await _entry(db_session)
+    two = await _entry(db_session)
+    store = SqliteKnowledgeStore(session_factory)
+    await _vec_row(store, db_session, one, "first")
+    await _vec_row(store, db_session, two, "second", embedding=_ray(0.02))
+
+    assert await store.set_reviewed(one.id, True) == 1
+
+    rows = await store.knn(_ray(0.0), 5, filters=SearchFilters(reviewed_only=True))
+    assert len(rows) == 1
+
+
+#: Long enough to clear ``kb_min_snapshot_chars`` without being a fixture file.
+CAPTURED_TEXT = (
+    "A malicious commit in liblzma introduced a backdoor tracked as CVE-2024-3094. "
+    "The payload hooks RSA_public_decrypt through the IFUNC resolver, which is why it "
+    "only activates inside an sshd process linked against the notification library. "
+) * 3
+
+
+async def _vectors(db_session) -> int:
+    return (await db_session.execute(text("SELECT count(*) FROM kb_chunk_vec"))).scalar_one()
+
+
+async def test_reviewing_an_entry_through_the_service_updates_its_vector_rows(
+    session_factory, db_session
+):
+    """C2 end to end: ``PATCH /api/kb/entries/{id}`` is the only review path."""
+    finding = await _entry(db_session, kind="finding", authorship="model")
+    store = SqliteKnowledgeStore(session_factory)
+    chunk_id = await _vec_row(store, db_session, finding, "model conclusions")
+    service = KbService(session_factory, embedder=FakeEmbedder())
+
+    assert await store.knn(_ray(0.0), 5, filters=SearchFilters()) == []
+
+    await service.update_entry(finding.id, review_status="reviewed")
+    assert [row[0] for row in await store.knn(_ray(0.0), 5, filters=SearchFilters())] == [chunk_id]
+
+    await service.update_entry(finding.id, review_status="unreviewed")
+    assert await store.knn(_ray(0.0), 5, filters=SearchFilters()) == []
+
+
+async def test_an_edit_that_does_not_touch_the_review_status_leaves_the_vectors_alone(
+    session_factory, db_session, db_engine
+):
+    entry = await _entry(db_session, review_status="reviewed")
+    store = SqliteKnowledgeStore(session_factory)
+    await _vec_row(store, db_session, entry, "passage", reviewed=True)
+    service = KbService(session_factory, embedder=FakeEmbedder())
+
+    with _statements(db_engine) as seen:
+        await service.update_entry(entry.id, title="A better title")
+        await service.update_entry(entry.id, review_status="reviewed")
+
+    assert not any("UPDATE kb_chunk_vec" in statement for statement in seen)
+    assert await store.knn(_ray(0.0), 5, filters=SearchFilters(reviewed_only=True))
+
+
+async def test_a_soft_delete_removes_the_vectors_and_undelete_puts_them_back(
+    session_factory, db_session
+):
+    """C2 names delete/undelete, but the chunks already carry the vectors: the
+    delete drops them through ``kb_chunks_ad_vec`` and the undelete re-embeds."""
+    embedder = FakeEmbedder()
+    captured = await capture_article(
+        session_factory,
+        embedder,
+        url="https://example.test/xz",
+        title="The xz backdoor",
+        source_name="Example",
+        text=CAPTURED_TEXT,
+        published_at=None,
+        feed_item_id=None,
+        captured_by="user",
+    )
+    assert await _vectors(db_session) > 0
+
+    await soft_delete(session_factory, captured.entry_id)
+    assert await _vectors(db_session) == 0
+
+    await undelete(session_factory, embedder, captured.entry_id)
+    assert await _vectors(db_session) > 0

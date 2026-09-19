@@ -70,6 +70,14 @@ because `KbService.embedder.dimensions > 0` once a Voyage key is configured
 `embeddings_configured: bool` already exists and now flips to `true` with a key configured.
 `pending_chunks` is the count the UI's "waiting for an embedding" line reads. No shape change.
 
+### `POST /api/kb/entries/{id}/not-a-duplicate` → `200 EntryRead` *(plan decision P2-23)*
+
+Clears `possible_duplicate_of` on that entry. Idempotent: an entry with no flag is a `200` too; an
+unknown id is a `404`. Writes one `kb_activity` row. Until this existed a flag could only be cleared
+by a merge — and with no Voyage key a flag is raised on the title alone, so a false positive had no
+exit but merging two unrelated entries or deleting one. The "Needs attention" strip and the entry's
+duplicate banner both offer it as a one-click **Dismiss**.
+
 ### `POST /api/kb/embed-pending` → `200` *(2.1, plan decision P2-15)*
 
 ```
@@ -106,7 +114,13 @@ An ordinary captured article never produces a row. That rule is I16 and is the s
 has_voyage_key: boolean          # a key is stored IN THIS DATABASE — not "a key is usable"
 voyage_api_key_masked: string    # mask_key() output, e.g. "…a1b2"; "" when nothing is stored
 voyage_key_source: 'env'|'stored'|'none'   # mirrors key_source exactly
+kb_embedding_models: string[]    # what kb_embedding_model may be set to, in this build
 ```
+
+`kb_embedding_models` is `app.kb.embeddings.EMBEDDING_MODELS` — the default plus every model with a
+ceiling of its own — so the Settings select is built from it instead of hard-coding a list. A value
+already stored that is **not** in it (hand-edited, or left by a newer build) is still reported
+verbatim in `kb_embedding_model`; the page shows both.
 
 Precedence, mirroring the Anthropic key: **process environment `VOYAGE_API_KEY` → `.env` (i.e.
 `Settings.voyage_api_key`) → the key stored in the DB.** Neither external value is ever written back
@@ -116,7 +130,7 @@ to the DB. `voyage_key_source === 'env'` with `has_voyage_key === false` is a no
 
 | field | type | default | validation | read by |
 |---|---|---|---|---|
-| `kb_embedding_model` | string | `"voyage-4"` | 1–200 chars | 2.1 |
+| `kb_embedding_model` | string | `"voyage-4"` | one of `kb_embedding_models`; anything else is a **422**, before the vector index is touched | 2.1 |
 | `kb_capture_findings` | boolean | `false` | — | 2.6 |
 | `kb_compile_mode` | `'manual'\|'auto'` | `"manual"` | closed set | 2.5 |
 | `kb_compile_model` | string | `"claude-sonnet-5"` | 1–200 chars | 2.5 |
@@ -129,6 +143,12 @@ to the DB. `voyage_key_source === 'env'` with `has_voyage_key === false` is a no
 | `kb_recency_boost` | boolean | `true` | — | 2.2 |
 | `kb_rerank` | boolean | `true` | — | **nobody in Phase 2** (Task 3.6) |
 | `kb_duplicate_threshold` | number (float) | `0.92` | 0.0–1.0 | 2.3 |
+
+### The shipped compile prompt *(plan decision P2-24)*
+
+`SettingsRead.kb_compile_prompt_default: string` — read-only, the prompt the app ships with, so
+"Reset to default" restores *that* and not whatever was saved last. An empty or whitespace-only
+`kb_compile_prompt` is a `422` on write: it used to be stored, which silently destroyed the default.
 
 ### New write-only field on `SettingsUpdate`
 
@@ -157,18 +177,28 @@ Request:
 `item_ids` 1–200 feed-item ids; `job_id` optional (the server generates one — but the client should
 send it, because Cancel needs it before the first frame arrives).
 
-`409 {detail}` when a job with that key is already running (`kb:bulk:{job_id}`).
+`409 {detail}` when a job with that key is already running (`kb:bulk:{job_id}`); `422` for an empty
+list or more than 200 ids. **`item_ids` is de-duplicated server-side**, so `total` in the frames can be
+smaller than the number of ids sent — key a progress bar on `total`, never on `item_ids.length`.
 Headers: `Cache-Control: no-cache`, `X-Accel-Buffering: no`, `ping` every 15 s.
 
 Frames, in order:
 
 | event | data | meaning |
 |---|---|---|
-| `turn_start` | `{"turn": 0}` | the job started |
+| `turn_start` | `{"turn": 0, "job_id": "5f3c…"}` | the job started; `job_id` is how Cancel reaches a server-generated id (the way note generation carries `generation_id`) |
 | `text_delta` | `{"text": "<json>"}` where `<json>` is `{"item_id":int,"entry_id":int\|null,"created":bool,"skipped_reason":string\|null,"possible_duplicate_of":int\|null,"done":int,"total":int}` | **one per finished item, in completion order, not submission order** |
-| `error` | `{"error_type":"cancelled","message":"The turn was stopped before it finished."}` | emitted by `pump_agent_events` when the job was cancelled or the client went away |
-| `error` | `{"error_type":"api_error","message":"A turn is already running."}` | a duplicate key lost the race; the stream then ends |
+| `error` | `{"type":"cancelled","message":"The turn was stopped before it finished."}` | emitted by `pump_agent_events` when the job was cancelled or the client went away |
+| `error` | `{"type":"api_error","message":"A turn is already running."}` | a duplicate key lost the race; the stream then ends |
 | `done` | `{"saved":int,"skipped":int,"duplicates":int,"entry_ids":[int]}` | **terminal**, emitted after the pump finishes — including after a cancel, so the page can show what was saved |
+
+**As built (amended 2026-09-18):** the `error` frame's key is `type`, the shape every stream in the app
+shares (`app/agent/events.py`). `possible_duplicate_of` is **always `null` in a `text_delta`**: a bulk run
+defers every embedding to one call at the end and flags near-duplicates only after it, so the flags
+arrive in `done.duplicates` — refetch the entries then. A **cancelled** run skips that tail: its entries
+stay captured and keyword-searchable, with their chunks pending and no duplicate check until
+`POST /api/kb/embed-pending` (or a re-save) embeds them. A bulk run **never auto-compiles**, whatever
+`kb_compile_mode` says (plan decision P2-8).
 
 The payload rides inside `text_delta` because the SSE vocabulary (`app/agent/events.py`) is the
 agent package's and Phase 2 does not widen it. The client parses `JSON.parse(frame.text)`.
@@ -215,14 +245,18 @@ CompileResponse {
 
 ### `POST /api/kb/compile` (batch)
 
-Request `{ "entry_ids": [1,2,3] }` (1–100 ids).
+Request `{ "entry_ids": [1,2,3] }` (1–100 ids). **Repeats are dropped, order preserved**, in the
+request model itself — an id sent twice is one compile and one charge, and the estimate and the
+batch cannot quote different numbers for the same list.
 
 - With **`?estimate=1`** → `200`, **no model call**:
   ```
   { "entries": 3, "input_tokens": 41230, "budget_remaining": 4958770, "would_exceed": false }
   ```
   `input_tokens` comes from `messages.count_tokens` on the prompt the batch would send.
-- Without it → `200 { "results": CompileResponse[] }`, one per entry, in request order.
+- Without it → `200 { "results": CompileResponse[] }`, one per entry, in request order. **Every id is
+  validated before anything is compiled**: one unknown id is a `404` for the whole batch, with no model
+  call made and nothing billed.
 
 ### `GET /api/kb/budget` → `200`
 
@@ -234,11 +268,23 @@ Request `{ "entry_ids": [1,2,3] }` (1–100 ids).
   "anthropic_total": 129146,
   "remaining": 4870854,
   "exhausted": false,
-  "voyage": 412000 }                     # month-to-date Voyage tokens, COUNTED SEPARATELY
+  "voyage": 412000,                      # month-to-date Voyage tokens, COUNTED SEPARATELY
+  "voyage_estimated": true }             # our own ceil(chars/3.6) per embedded batch, NOT Voyage's billed usage
 ```
 
 Derived from `kb_activity`: Anthropic from `action IN ('compile','recompile')`, Voyage from
 `action = 'embed'`. **The two counters are never added together.**
+
+A refusal, an unparseable answer and a `max_tokens` stop are billed responses: their tokens count
+against the month exactly like a successful compile.
+
+**`kb_compile_mode: auto`** (plan decisions P2-8, P2-19): a single capture — star, Save a URL, a saved
+note — compiles the entry it just created, *inside the request that caused it*. So in `auto` mode
+`PATCH /api/items/{id}` (star) and `POST /api/kb/entries` **wait for the Anthropic call** before they
+answer, and the `201` can already carry `summary_md` / `compile_model`. The UI needs a pending state on
+those two actions and a sentence on the toggle saying so, and that the only brake on `auto` is the
+monthly budget. A compile failure never fails the capture. `kb_activity.source` gains `auto` (the
+compile row) and `auto-compile` (a guarded failure).
 
 **Settings label (prescribed by I6 and the acceptance).** The budget control must say, in as many
 words, that *this counts compile tokens only and does not include chat spend*, and link to the
@@ -255,8 +301,10 @@ kind: 'finding', authorship: 'model', review_status: 'unreviewed', captured_by: 
 url: null, published_at: null, links.session_id: <the chat>, snapshot_md: "## Question … ## Answer … ## Sources …"
 ```
 
-- `GET /api/kb/entries` (the Knowledge page, `search_for_user`) **shows it immediately**.
-- `POST /api/kb/search` and the two chat tools (`search_for_model`) **never return it** until
+- `GET /api/kb/entries` **and `POST /api/kb/search`** (both the Knowledge page, `search_for_user`)
+  **show it immediately**, labelled by `authorship` / `review_status` — it is the user's own
+  knowledge base (plan decision P2-17).
+- The two chat tools and the notes generator (`search_for_model`) **never return it** until
   `review_status === 'reviewed'`, whatever `kb_reviewed_only` says. After review, the chat tool's
   rendered title carries `[AI finding, reviewed] ` — applied at read time by
   `app/agent/builtin.py::MODEL_TITLE_PREFIX`, **not stored in `title`**.

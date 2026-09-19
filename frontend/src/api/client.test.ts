@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { ApiError, conflictDetail, isNotFound } from './client'
+import { ApiError, conflictDetail, detailFor, detailText, isNotFound } from './client'
 
 describe('isNotFound', () => {
   it('is true for a 404 from the API', () => {
@@ -39,5 +39,42 @@ describe('conflictDetail', () => {
     expect(conflictDetail(new ApiError(404, 'Entry not found'))).toBeNull()
     expect(conflictDetail(new TypeError('Failed to fetch'))).toBeNull()
     expect(conflictDetail(null)).toBeNull()
+  })
+})
+
+describe('detailFor', () => {
+  it('hands back the detail of the status the caller named', () => {
+    // The settings form's case: a 422 names the field that was refused, and
+    // "Is the backend running?" over it points at nothing.
+    expect(detailFor(new ApiError(422, 'kb_compile_model: too short'), 422)).toBe(
+      'kb_compile_model: too short',
+    )
+  })
+
+  it('is nothing for another status, or for a failure that never reached the API', () => {
+    expect(detailFor(new ApiError(500, 'Internal Server Error'), 422)).toBeNull()
+    expect(detailFor(new TypeError('Failed to fetch'), 422)).toBeNull()
+    expect(detailFor(undefined, 422)).toBeNull()
+  })
+})
+
+describe('detailText', () => {
+  it('passes a string detail through', () => {
+    expect(detailText('Entry not found')).toBe('Entry not found')
+  })
+
+  it("reads a validation error's messages instead of printing the array", () => {
+    const detail = [
+      { type: 'value_error', loc: ['body', 'kb_embedding_model'], msg: 'Value error, must be one of voyage-4', input: 'x' },
+      { loc: ['body', 'kb_compile_prompt'], msg: 'must not be blank' },
+    ]
+    expect(detailText(detail)).toBe(
+      'kb_embedding_model: Value error, must be one of voyage-4; kb_compile_prompt: must not be blank',
+    )
+  })
+
+  it('falls back to JSON for a shape it does not know', () => {
+    expect(detailText({ reason: 'busy' })).toBe('{"reason":"busy"}')
+    expect(detailText([{ nothing: true }])).toBe('[{"nothing":true}]')
   })
 })

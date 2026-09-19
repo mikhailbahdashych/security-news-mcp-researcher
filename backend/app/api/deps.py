@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agent.turns import TurnRegistry
 from app.config import Settings
-from app.kb.service import KbService, searchable
+from app.kb.service import KbService, for_request
 from app.mcp.manager import McpManager
 from app.services import settings as settings_service
 
@@ -60,21 +60,6 @@ def get_session_factory(request: Request) -> async_sessionmaker[AsyncSession]:
 SessionFactory = Annotated[async_sessionmaker[AsyncSession], Depends(get_session_factory)]
 
 
-def get_kb_service(session_factory: SessionFactory) -> KbService:
-    """The knowledge base, over this app's database.
-
-    A service rather than a bare session because capture opens **its own** short
-    transactions: the request's session is held for the whole request, and a
-    capture that borrowed it would keep a SQLite write transaction open across an
-    outbound fetch. Built per request (it holds nothing) and overridden wholesale
-    in tests, which is also where its HTTP transport comes from.
-    """
-    return searchable(session_factory)
-
-
-KbServiceDep = Annotated[KbService, Depends(get_kb_service)]
-
-
 def get_mcp_manager(request: Request) -> McpManager:
     """The app's MCP manager, created by ``create_app`` and closed by the lifespan.
 
@@ -106,6 +91,43 @@ def get_app_settings(request: Request) -> Settings:
 
 
 AppSettings = Annotated[Settings, Depends(get_app_settings)]
+
+
+async def get_kb_service(
+    session: DbSession,
+    session_factory: SessionFactory,
+    settings: AppSettings,
+    client_factory: ChatClientFactory,
+) -> KbService:
+    """The knowledge base, over this app's database.
+
+    A service rather than a bare session because capture opens **its own** short
+    transactions: the request's session is held for the whole request, and a
+    capture that borrowed it would keep a SQLite write transaction open across an
+    outbound fetch. Built per request (it holds nothing) and overridden wholesale
+    in tests, which is also where its HTTP transport comes from.
+
+    The request's session is taken as well, to read which embedder this database
+    is configured for — so entering a Voyage key in Settings makes the very next
+    search hybrid, with no restart and nothing cached.
+
+    That read opens a transaction on a session the request keeps until it ends,
+    so it is ended here: ``capture.py``'s rule — no transaction across an embed
+    call — would otherwise be broken by every ``/api/kb`` route, and worst by
+    ``POST /kb/embed-pending``, the largest embed there is. Nothing is pending at
+    this point (dependencies run before the route), so the commit writes nothing.
+
+    The chat client **factory** rather than a client: auto-compile (``compile_if_auto``)
+    is a consequence of a capture, one of which runs in the tail of an open SSE
+    stream, and a yield-dependency's client is already closed by then. The factory
+    is a plain function, holds nothing, and compile closes what it builds.
+    """
+    service = await for_request(session_factory, session, settings, client_factory)
+    await session.commit()
+    return service
+
+
+KbServiceDep = Annotated[KbService, Depends(get_kb_service)]
 
 
 def build_anthropic_client(api_key: str) -> AsyncAnthropic:

@@ -325,6 +325,48 @@ def turn_refusal(category: str | None = "cyber", explanation: str = "declined") 
     )
 
 
+def turn_text_after_fallback(before: str, after: str) -> ScriptedTurn:
+    """Text, a mid-output ``fallback`` block, then the answering model's text.
+
+    What a ``fallbacks`` switch looks like when the first model had already
+    started writing: both halves are in ``content`` and only the half **after**
+    the boundary is the answer. ``message.model`` is the model that answered.
+    """
+    from anthropic.types.beta import (
+        BetaFallbackBlock,
+        BetaFallbackInfo,
+        BetaFallbackRefusalTrigger,
+    )
+
+    block = BetaFallbackBlock(
+        type="fallback",
+        **{"from": BetaFallbackInfo(model="claude-opus-5")},
+        to=BetaFallbackInfo(model="claude-opus-4-8"),
+        trigger=BetaFallbackRefusalTrigger(type="refusal", category="cyber"),
+    )
+    message = _message(
+        [
+            BetaTextBlock(type="text", text=before),
+            block,
+            BetaTextBlock(type="text", text=after),
+        ],
+        "end_turn",
+    )
+    message.model = "claude-opus-4-8"
+    return ScriptedTurn(
+        events=[
+            *_text_events(before, 0),
+            BetaRawContentBlockStartEvent(
+                type="content_block_start", index=1, content_block=block
+            ),
+            BetaRawContentBlockStopEvent(type="content_block_stop", index=1),
+            *_text_events(after, 2),
+            BetaRawMessageStopEvent(type="message_stop"),
+        ],
+        message=message,
+    )
+
+
 def turn_pause(text: str = "searching") -> ScriptedTurn:
     """A ``pause_turn``: the server hit its own tool-iteration cap."""
     return ScriptedTurn(
@@ -360,16 +402,35 @@ class _ScriptedStream:
         return self._turn.message
 
 
+@dataclass
+class FakeTokenCount:
+    """What ``messages.count_tokens`` answers with."""
+
+    input_tokens: int
+
+
 class _ScriptedMessages:
     def __init__(self, turns: list[ScriptedTurn], calls: list[dict[str, Any]]) -> None:
         self._turns = list(turns)
         self.calls = calls
+        #: Every ``count_tokens`` call's kwargs, kept apart from ``calls`` on
+        #: purpose: counting tokens generates no completion and is billed
+        #: nothing, so a test that asserts "no model call was made" must not see
+        #: one here.
+        self.token_counts: list[dict[str, Any]] = []
+        #: What each count answers. A plain number rather than a tokenizer: the
+        #: point of the endpoint here is *that it is used*, not what it returns.
+        self.tokens_per_count = 1_000
 
     def stream(self, **kwargs: Any) -> _ScriptedStream:
         self.calls.append(kwargs)
         if not self._turns:
             raise AssertionError(f"ScriptedAnthropic ran out of turns on call {len(self.calls)}")
         return _ScriptedStream(self._turns.pop(0))
+
+    async def count_tokens(self, **kwargs: Any) -> FakeTokenCount:
+        self.token_counts.append(kwargs)
+        return FakeTokenCount(input_tokens=self.tokens_per_count)
 
 
 class _ScriptedBeta:

@@ -25,16 +25,18 @@ held open for the whole request.
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
 import httpx2
+from anthropic import AsyncAnthropic
 from sqlalchemy import Select, case, delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.config import Settings
 from app.db.engine import extension_status
 from app.db.models import Feed, FeedItem, utcnow
 from app.kb import capture as capture_module
@@ -45,7 +47,8 @@ from app.kb.capture import (
     capture_article,
     log_activity,
 )
-from app.kb.embeddings import Embedder, NullEmbedder
+from app.kb.compile import compile_if_auto
+from app.kb.embeddings import Embedder, NullEmbedder, build_embedder
 from app.kb.models import (
     KbActivity,
     KbChunk,
@@ -75,6 +78,14 @@ MAX_SEARCH_LIMIT = 50
 
 DEFAULT_ACTIVITY_LIMIT = 200
 MAX_ACTIVITY_LIMIT = 1_000
+
+#: How many pending chunks one ``POST /api/kb/embed-pending`` embeds. A backlog
+#: of thousands is a series of calls the client repeats while the response still
+#: says chunks are pending, rather than one request that either finishes or times
+#: out. The bound is on **chunks, not time**: typical chunks make 200 one or two
+#: Voyage requests, but 200 chunks at the token ceiling would be a couple of dozen
+#: sequential ones inside a single HTTP request the user cannot cancel.
+EMBED_PENDING_LIMIT = 200
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,6 +144,15 @@ class KbService:
     #: ``None`` is the real one; the tests hand in an ``httpx2.MockTransport``,
     #: which is why there is exactly one fetching seam rather than one per route.
     transport: httpx2.AsyncBaseTransport | None = None
+    #: How auto-compile builds its Anthropic client — the streaming routes'
+    #: factory, never ``get_anthropic_client`` (a yield-dependency is finalised
+    #: before a streamed body is sent, and one capture trigger lives in the tail
+    #: of an SSE stream). ``None`` means "no compile from this service": the agent's
+    #: ``searchable()`` fallback and every test that builds one by hand.
+    client_factory: Callable[[str], AsyncAnthropic] | None = None
+    #: This app's :class:`Settings`, for the documented key precedence
+    #: (process environment → ``.env`` → the key stored in the database).
+    settings: Settings | None = None
 
     @property
     def store(self) -> SqliteKnowledgeStore:
@@ -156,29 +176,80 @@ class KbService:
         async with self.session_factory() as session:
             return await settings_service.get_bool(session, "kb_reviewed_only")
 
+    async def recency_boost(self) -> bool:
+        async with self.session_factory() as session:
+            return await settings_service.get_bool(session, "kb_recency_boost")
+
     # -- capture ---------------------------------------------------------
 
-    async def guarded(self, operation: Awaitable[Any], *, source: str) -> CaptureResult | None:
+    async def guarded(
+        self, operation: Awaitable[Any], *, source: str, what: str = "capture"
+    ) -> CaptureResult | None:
         """Run a capture whose failure must not reach the user.
 
         Every trigger runs **after** the write that caused it has committed, so
         there is nothing left to roll back and nothing the user can do about a
         Voyage outage or a 403. The failure becomes a row in the trail, where the
         Knowledge page's "Needs attention" strip can show it.
+
+        *what* names the operation in that row. It is not decoration: an
+        auto-compile that raised used to be filed as ``skip / auto-compile /
+        "capture failed: …"`` on a page whose whole job is telling the user what
+        did not get captured, and the capture had in fact succeeded.
         """
         try:
             return await operation
         except Exception as exc:  # noqa: BLE001 - a capture must not fail the request
-            logger.exception("Knowledge-base capture from %s failed", source)
+            logger.exception("Knowledge-base %s from %s failed", what, source)
             async with self.session_factory() as session:
                 await log_activity(
                     session,
                     "skip",
                     source=source,
-                    detail=f"capture failed: {type(exc).__name__}: {exc}",
+                    detail=f"{what} failed: {type(exc).__name__}: {exc}",
                 )
                 await session.commit()
             return None
+
+    async def _auto_compile(self, result: CaptureResult) -> None:
+        """Compile what was just captured, when ``kb_compile_mode`` is ``auto``.
+
+        Only a **newly created** entry: a save that recognised an entry already
+        held is not new text, and paying for the same summary twice because the
+        user clicked twice is exactly the surprise the budget exists to prevent.
+        A skipped capture has nothing to compile.
+
+        **The caller waits for it.** A single capture runs inline in the request
+        that triggered it, so in ``auto`` mode ``PATCH /api/items/{id}`` and
+        ``POST /api/kb/entries`` both hold their response open for a full
+        Anthropic round trip — a star goes from about 200 ms to several seconds,
+        more at ``kb_compile_effort: high``. That is spec §4.5's rule ("a single
+        capture runs inline … then compile if the compile mode says so") and not
+        an oversight; ``kb_compile_mode`` defaults to ``manual``, so it is off
+        until the user turns it on, and the bulk job opts out because two hundred
+        articles is not one click's worth of calls.
+
+        Inside ``guarded``, and after the capture's own commit, because a compile
+        is a *consequence* of the capture and not part of it — a refusal, a spent
+        budget, a 429 or a missing key must never turn a saved entry into a failed
+        request. Everything else compile enforces (the budget check before the
+        call, the activity row for each outcome) is compile's own and is not
+        repeated here.
+        """
+        if self.client_factory is None or not result.created or result.entry_id is None:
+            return
+        await self.guarded(
+            compile_if_auto(
+                self.session_factory,
+                self.client_factory,
+                result.entry_id,
+                settings=self.settings,
+                embedder=self.embedder,
+                source="auto",
+            ),
+            source="auto-compile",
+            what="compile",
+        )
 
     async def capture_feed_item(
         self,
@@ -187,6 +258,8 @@ class KbService:
         captured_by: str = "auto",
         trigger: str = "star",
         transport: httpx2.AsyncBaseTransport | None = None,
+        defer_embedding: bool = False,
+        auto_compile: bool = True,
     ) -> CaptureResult:
         """Capture the article behind a feed item.
 
@@ -195,6 +268,12 @@ class KbService:
         through ``extract_item``, so the URL guard and the body caps apply — and
         only if that fails does the RSS summary stand in, and only if it is long
         enough to clear ``kb_min_snapshot_chars``.
+
+        *defer_embedding* is passed straight through to ``capture_article``: the
+        bulk job (:mod:`app.kb.bulk`) embeds and flags duplicates once for a whole
+        run instead of once per article. *auto_compile* is the same job's other
+        opt-out: ``kb_compile_mode: auto`` is one call for one click, and a
+        two-hundred-item run is still one click.
         """
         min_chars = await self.min_snapshot_chars()
 
@@ -202,16 +281,27 @@ class KbService:
             item = await session.get(FeedItem, item_id)
             if item is None:
                 raise LookupError(f"No feed item with id {item_id}")
-            needs_extraction = not (item.content_text or "").strip() and bool(item.url)
+            missing_text = not (item.content_text or "").strip()
+            fetch_url = item.url if missing_text else None
             timeout_s = await settings_service.get_int(session, "feed_timeout_s")
 
-        if needs_extraction:
-            async with self.session_factory() as session:
-                result = await extract_service.extract_item(
-                    session, item_id, timeout_s=timeout_s, transport=transport or self.transport
-                )
-                await session.commit()
-                item = result.item
+        if fetch_url:
+            # ``extract_article`` rather than ``extract_item``: the latter takes a
+            # session, reads the row on it and only *then* goes to the network, so
+            # a pooled connection sits on the fetch for the whole
+            # ``feed_timeout_s``. One at a time that is untidy; a bulk run has
+            # MAX_KB_EXTRACTIONS = 8 of them at once, against a pool the rest of
+            # the application shares. Fetch first, then a short write.
+            extracted = await extract_service.extract_article(
+                fetch_url, timeout_s=timeout_s, transport=transport or self.transport
+            )
+            if extracted.ok and extracted.text:
+                async with self.session_factory() as session:
+                    item = await session.get(FeedItem, item_id)
+                    if item is not None:
+                        item.content_text = extracted.text
+                        item.extracted_at = utcnow()
+                    await session.commit()
 
         # Read inside the session and carried out as plain values. The ORM object
         # survives ``close()`` today because it expunges without expiring, but
@@ -219,12 +309,16 @@ class KbService:
         # ``expire_on_commit=True`` away from a ``DetachedInstanceError``.
         async with self.session_factory() as session:
             item = await session.get(FeedItem, item_id)
+            if item is None:
+                # Deleted while its article was being fetched, between the two
+                # short transactions above.
+                raise LookupError(f"No feed item with id {item_id}")
             source_name = await session.scalar(select(Feed.title).where(Feed.id == item.feed_id))
             url, title = item.url, item.title
             published_at = item.published_at
             body = (item.content_text or "").strip() or (item.summary or "").strip()
 
-        return await capture_article(
+        result = await capture_article(
             self.session_factory,
             self.embedder,
             url=url,
@@ -238,7 +332,12 @@ class KbService:
             source_ref=f"feed item {item_id}: {title}",
             min_chars=min_chars,
             trigger=trigger,
+            defer_embedding=defer_embedding,
+            duplicate_threshold=await self.duplicate_threshold(),
         )
+        if auto_compile:
+            await self._auto_compile(result)
+        return result
 
     async def capture_url(
         self,
@@ -251,7 +350,7 @@ class KbService:
         """Capture a pasted URL, fetched through the guard."""
         async with self.session_factory() as session:
             timeout_s = await settings_service.get_int(session, "feed_timeout_s")
-        return await capture_module.capture_url(
+        result = await capture_module.capture_url(
             self.session_factory,
             self.embedder,
             url,
@@ -261,17 +360,23 @@ class KbService:
             timeout_s=timeout_s,
             trigger=trigger,
             transport=transport or self.transport,
+            duplicate_threshold=await self.duplicate_threshold(),
         )
+        await self._auto_compile(result)
+        return result
 
     async def capture_note(self, note_id: int, *, trigger: str = "note") -> CaptureResult:
         """Capture (or bring up to date) the entry for one note."""
-        return await capture_module.capture_note(
+        result = await capture_module.capture_note(
             self.session_factory,
             self.embedder,
             note_id,
             min_chars=await self.min_snapshot_chars(),
             trigger=trigger,
+            duplicate_threshold=await self.duplicate_threshold(),
         )
+        await self._auto_compile(result)
+        return result
 
     async def refresh(
         self, entry_id: int, *, transport: httpx2.AsyncBaseTransport | None = None
@@ -297,6 +402,10 @@ class KbService:
 
     async def merge(self, keep_id: int, drop_id: int) -> int:
         return await capture_module.merge_entries(self.session_factory, keep_id, drop_id)
+
+    async def dismiss_duplicate(self, entry_id: int) -> bool:
+        """Dismiss a near-duplicate flag. Idempotent; ``LookupError`` on an unknown id."""
+        return await capture_module.dismiss_duplicate(self.session_factory, entry_id)
 
     # -- retrieval -------------------------------------------------------
 
@@ -326,6 +435,7 @@ class KbService:
             since=since,
             reviewed_only=await self.reviewed_only(),
             include_model_authored=False,
+            recency_boost=await self.recency_boost(),
             limit=limit,
         )
 
@@ -351,6 +461,7 @@ class KbService:
             since=since,
             reviewed_only=reviewed_only,
             include_model_authored=True,
+            recency_boost=await self.recency_boost(),
             limit=limit,
         )
 
@@ -610,6 +721,46 @@ class KbService:
                 .all()
             )
 
+    async def embed_pending(self, *, limit: int = EMBED_PENDING_LIMIT) -> dict[str, int]:
+        """Embed a bounded slice of the backlog; report it and what is left.
+
+        ``pending`` is counted afterwards and is the same number ``stats`` reports,
+        so the page that asked and the page that shows the badge cannot disagree.
+        The token count is read back from the ``kb_activity`` row the run wrote
+        rather than recomputed here: the month-to-date Voyage counter adds up those
+        rows, and a second definition of "what this cost" would drift from it.
+
+        An embedding failure propagates — the route answers 502 and the chunks it
+        never reached are still pending, which is exactly what the next call
+        resumes from.
+        """
+        async with self.session_factory() as session:
+            before = (
+                await session.scalar(
+                    select(func.max(KbActivity.id)).where(KbActivity.action == "embed")
+                )
+                or 0
+            )
+
+        embedded = await capture_module.embed_pending(
+            self.session_factory, self.embedder, limit=limit, source="settings"
+        )
+
+        async with self.session_factory() as session:
+            pending = await session.scalar(
+                select(func.count()).select_from(KbChunk).where(KbChunk.embedded_at.is_(None))
+            )
+            tokens = await session.scalar(
+                select(func.coalesce(func.sum(KbActivity.input_tokens), 0)).where(
+                    KbActivity.action == "embed", KbActivity.id > before
+                )
+            )
+        return {
+            "embedded": embedded,
+            "pending": int(pending or 0),
+            "tokens": int(tokens or 0),
+        }
+
     async def stats(self) -> dict[str, Any]:
         """What the Knowledge page and the Settings index panel report.
 
@@ -663,11 +814,18 @@ class KbService:
         summary_md: str | None = None,
         review_status: str | None = None,
     ) -> KbEntry | None:
-        """Apply the hand edits the detail page makes. Only what is sent changes."""
+        """Apply the hand edits the detail page makes. Only what is sent changes.
+
+        A review change is the one edit that reaches past ``kb_entries``: vec0
+        metadata is written once, at upsert, so reviewing a model-authored finding
+        has to rewrite the entry's ``reviewed`` column or the vector leg keeps the
+        finding hidden until something re-embeds it (decision C2).
+        """
         async with self.session_factory() as session:
             entry = await session.get(KbEntry, entry_id)
             if entry is None:
                 return None
+            reviewed_changed = review_status is not None and review_status != entry.review_status
             if title is not None:
                 entry.title = title
             if notes_md is not None:
@@ -678,6 +836,8 @@ class KbService:
                 entry.review_status = review_status
             entry.updated_at = utcnow()
             await session.commit()
+            if reviewed_changed:
+                await self.store.set_reviewed(entry_id, review_status == "reviewed")
             return entry
 
     async def list_topics(self) -> list[tuple[Topic, int]]:
@@ -787,6 +947,22 @@ class KbService:
             await session.commit()
             return entry
 
+    # -- bulk capture (Task 2.3) -----------------------------------------
+
+    async def duplicate_threshold(self) -> float:
+        """``kb_duplicate_threshold`` — the cosine a near-duplicate needs.
+
+        ``capture_article`` takes it as an argument the way it takes
+        ``min_chars`` rather than reading it itself, so the value a capture used
+        is visible at the call site. A bulk run reads the row **once**, in the
+        route before the stream opens, and hands the same number to every item;
+        the three single-capture paths read it per capture, which is one extra
+        settings row read on a click that is about to make an HTTP request
+        anyway.
+        """
+        async with self.session_factory() as session:
+            return await settings_service.get_float(session, "kb_duplicate_threshold")
+
 
 async def capture_note_if_enabled(
     service: KbService, note_id: int, *, trigger: str = "note"
@@ -839,14 +1015,43 @@ def parse_entity(raw: str | None) -> tuple[str, str] | None:
 
 
 def searchable(session_factory: async_sessionmaker[AsyncSession]) -> KbService:
-    """A service with the Phase 1 embedder. One place to change in Phase 2."""
+    """A keyword-only service, for callers that cannot await an embedder.
+
+    ``BuiltinToolProvider.__post_init__`` is one: a dataclass hook cannot await, so
+    it falls back to this when nobody handed it a service. Everything with a
+    session in hand uses :func:`for_request` instead and gets the vector leg.
+    """
     return KbService(session_factory=session_factory, embedder=NullEmbedder())
+
+
+async def for_request(
+    session_factory: async_sessionmaker[AsyncSession],
+    session: AsyncSession,
+    settings: Settings | None = None,
+    client_factory: Callable[[str], AsyncAnthropic] | None = None,
+) -> KbService:
+    """The service for one request: keyword-only, or hybrid if a key is configured.
+
+    The embedder is read per request rather than cached on the app, so entering a
+    Voyage key in Settings takes effect on the next call instead of on the next
+    restart.
+
+    *client_factory* is what makes ``kb_compile_mode: auto`` real. It is optional
+    because one caller — the chat turn's tool providers — captures nothing.
+    """
+    return KbService(
+        session_factory=session_factory,
+        embedder=await build_embedder(session, settings),
+        client_factory=client_factory,
+        settings=settings,
+    )
 
 
 __all__ = [
     "DEFAULT_ACTIVITY_LIMIT",
     "DEFAULT_LIMIT",
     "DEFAULT_SEARCH_LIMIT",
+    "EMBED_PENDING_LIMIT",
     "MAX_ACTIVITY_LIMIT",
     "MAX_LIMIT",
     "MAX_SEARCH_LIMIT",
@@ -858,6 +1063,7 @@ __all__ = [
     "capture_note_if_enabled",
     "capture_star_if_enabled",
     "effective_at",
+    "for_request",
     "parse_entity",
     "searchable",
 ]

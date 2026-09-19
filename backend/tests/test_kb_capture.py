@@ -8,6 +8,9 @@ ships no other one and "chunks stay pending" is the normal state.
 
 from __future__ import annotations
 
+import hashlib
+import math
+import re
 from datetime import datetime, timedelta
 
 import httpx2
@@ -33,7 +36,7 @@ from app.kb.capture import (
     soft_delete,
     undelete,
 )
-from app.kb.embeddings import NullEmbedder
+from app.kb.embeddings import EmbeddingError, NullEmbedder
 from app.kb.models import (
     KbActivity,
     KbChunk,
@@ -46,9 +49,11 @@ from app.kb.models import (
     Topic,
 )
 from app.kb.retrieval import hybrid_search
+from app.kb.schema import VEC_DIMENSIONS
 from app.kb.service import KbService
 from app.kb.store import SqliteKnowledgeStore
 from app.kb.urls import canonical_url
+from app.services import settings as settings_service
 
 ARTICLE = (
     "# The xz backdoor\n\n"
@@ -937,3 +942,574 @@ async def test_a_pasted_url_is_a_manual_entry(session_factory, db_session):
 
     entry = await db_session.get(KbEntry, result.entry_id)
     assert entry.kind == "manual"
+
+
+# ------------------------------------------------------------ near-duplicates
+
+
+class MarkerEmbedder:
+    """Unit vectors whose pairwise cosine is decided by a ``@@marker@@`` in the text.
+
+    Two texts carrying the same marker embed to the *same* one-hot unit vector
+    (cosine 1.0); two carrying different markers embed to orthogonal ones (cosine
+    0.0). ``FakeEmbedder`` cannot do this — it hashes the whole text, so a
+    near-copy is as far away as an unrelated article — and "close vector" has to
+    be exact for a threshold test to mean anything.
+    """
+
+    model = "marker-embed-1"
+    dimensions = VEC_DIMENSIONS
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def embed_documents(self, texts):
+        self.calls += 1
+        return [self._vector(text) for text in texts]
+
+    async def embed_query(self, text):
+        return self._vector(text)
+
+    @staticmethod
+    def _vector(text: str) -> list[float]:
+        found = re.search(r"@@(\w+)@@", text)
+        key = found.group(1) if found else text
+        axis = int(hashlib.sha256(key.encode()).hexdigest(), 16) % VEC_DIMENSIONS
+        vector = [0.0] * VEC_DIMENSIONS
+        vector[axis] = 1.0
+        return vector
+
+
+#: Two spellings of one headline, as two feeds would carry it.
+HEADLINE = "Backdoor found in xz utils, tracked as CVE-2024-3094"
+HEADLINE_RETITLED = "Backdoor found in xz-utils, tracked as CVE-2024-3094"
+
+
+def _marked(marker: str) -> str:
+    """The standard article body, tagged so :class:`MarkerEmbedder` can place it."""
+    return f"@@{marker}@@ {ARTICLE}"
+
+
+def test_title_similarity_is_one_for_identical_titles_and_low_for_unrelated_ones():
+    assert capture_module.title_similarity("The xz backdoor", "the  XZ   Backdoor") == 1.0
+    assert capture_module.title_similarity("The xz backdoor", "Quarterly revenue report") < 0.2
+    # The case the whole rule exists for: the same headline, punctuated differently
+    # by two feeds. 0.8 is strict — a title that gained a clause does not clear it.
+    assert (
+        capture_module.title_similarity(HEADLINE, HEADLINE_RETITLED)
+        >= capture_module.TITLE_TRIGRAM_MIN
+    )
+    assert capture_module.title_similarity("The xz backdoor", "The xz backdoor, explained") < (
+        capture_module.TITLE_TRIGRAM_MIN
+    )
+    assert capture_module.title_similarity("", "anything") == 0.0
+
+
+def test_cosine_from_distance_is_not_inverted():
+    """vec0 defaults to **L2**, so the conversion is ``1 - d²/2``, not ``1 - d``.
+
+    Pinned with the three distances an L2 KNN over unit vectors actually returns:
+    0 for the same vector, sqrt(2) for orthogonal ones, 2 for opposite ones.
+    """
+    assert capture_module.cosine_from_distance(0.0) == pytest.approx(1.0)
+    assert capture_module.cosine_from_distance(math.sqrt(2)) == pytest.approx(0.0, abs=1e-9)
+    assert capture_module.cosine_from_distance(2.0) == pytest.approx(-1.0)
+    # The inverted reading would call this a duplicate; the right one does not.
+    assert capture_module.cosine_from_distance(0.5) == pytest.approx(0.875)
+
+
+def test_a_high_cosine_with_a_dissimilar_title_does_not_flag():
+    """Both legs must hold. Syndicated text under two different headlines is two
+    articles, and merging them is the user's call, not a threshold's."""
+    assert capture_module.is_near_duplicate(0.99, 0.95, threshold=0.92) is True
+    assert capture_module.is_near_duplicate(0.99, 0.30, threshold=0.92) is False
+    assert capture_module.is_near_duplicate(0.50, 0.95, threshold=0.92) is False
+    # Exactly on both thresholds still counts.
+    assert capture_module.is_near_duplicate(0.92, 0.8, threshold=0.92) is True
+    # No embedder: the trigram runs alone.
+    assert capture_module.is_near_duplicate(None, 0.95, threshold=0.92) is True
+    assert capture_module.is_near_duplicate(None, 0.30, threshold=0.92) is False
+
+
+async def test_capture_flags_a_near_duplicate_from_the_first_body_chunk(
+    session_factory, db_session
+):
+    """The check runs at capture time, off the vector the embed just wrote — long
+    before any compile, which is the only thing that could produce a summary chunk."""
+    embedder = MarkerEmbedder()
+    first = await capture_article(
+        session_factory,
+        embedder,
+        url="https://example.test/xz-one",
+        title=HEADLINE,
+        text=_marked("xz"),
+    )
+    second = await capture_article(
+        session_factory,
+        embedder,
+        url="https://example.test/xz-two",
+        title=HEADLINE_RETITLED,
+        text=_marked("xz"),
+    )
+
+    assert second.possible_duplicate_of == first.entry_id
+    older = await db_session.get(KbEntry, first.entry_id)
+    newer = await db_session.get(KbEntry, second.entry_id)
+    # The flag points backwards and the older entry is untouched.
+    assert older.possible_duplicate_of is None
+    assert newer.possible_duplicate_of == older.id
+    # Nothing compiled: the check reads the body, never a summary.
+    assert older.compiled_at is None and newer.compiled_at is None
+    assert older.summary_md is None and newer.summary_md is None
+
+
+async def test_a_close_vector_under_an_unrelated_title_is_not_flagged(session_factory):
+    """The end-to-end half of the pure test above: same text, different headline."""
+    embedder = MarkerEmbedder()
+    await capture_article(
+        session_factory,
+        embedder,
+        url="https://example.test/xz-one",
+        title="The xz backdoor",
+        text=_marked("xz"),
+    )
+    second = await capture_article(
+        session_factory,
+        embedder,
+        url="https://example.test/xz-two",
+        title="Quarterly revenue guidance for the fiscal year",
+        text=_marked("xz"),
+    )
+
+    assert second.possible_duplicate_of is None
+
+
+async def test_an_identical_title_over_different_text_is_not_flagged(session_factory):
+    """The other leg on its own: the same headline, a different story."""
+    embedder = MarkerEmbedder()
+    await capture_article(
+        session_factory,
+        embedder,
+        url="https://example.test/one",
+        title="The xz backdoor",
+        text=_marked("xz"),
+    )
+    second = await capture_article(
+        session_factory,
+        embedder,
+        url="https://example.test/two",
+        title="The xz backdoor",
+        text=_marked("unrelated"),
+    )
+
+    assert second.possible_duplicate_of is None
+
+
+async def test_with_no_embedder_only_the_trigram_runs_and_it_only_flags(
+    session_factory, db_session
+):
+    """``NullEmbedder`` leaves every chunk pending, so there is no vector to
+    compare — the title test runs alone, and a hit is still only ever a flag."""
+    first = await _capture(session_factory, url="https://example.test/one", title=HEADLINE)
+    second = await _capture(
+        session_factory, url="https://example.test/two", title=HEADLINE_RETITLED
+    )
+
+    assert second.possible_duplicate_of == first.entry_id
+    # Flag, never merge: two entries, both alive.
+    live = (
+        await db_session.execute(select(KbEntry).where(KbEntry.deleted_at.is_(None)))
+    ).scalars().all()
+    assert len(live) == 2
+    assert {row.id for row in live} == {first.entry_id, second.entry_id}
+
+
+async def test_a_later_article_is_never_flagged_against_a_finding_on_the_vector_leg(
+    session_factory,
+):
+    """The reverse direction of the rule ``capture_finding`` keeps.
+
+    A finding quotes the article it cites, so it sits right next to it on the
+    vector leg — and a merge keeps the **older** entry, so a suggestion accepted
+    here would soft-delete the user's own research and keep its source. The
+    authorship gate is not enough on its own: it lets a *reviewed* finding
+    through, and this must exclude every one of them.
+    """
+    embedder = MarkerEmbedder()
+    finding = await capture_article(
+        session_factory,
+        embedder,
+        url=None,
+        title=HEADLINE,
+        text=_marked("xz"),
+        kind="finding",
+        authorship="model",
+        captured_by="auto",
+    )
+    # Reviewed, in the column *and* in the vec0 metadata: the authorship gate
+    # would let this one back in, which is why the near-duplicate check has a
+    # rule of its own rather than reusing the gate.
+    async with session_factory() as session:
+        (await session.get(KbEntry, finding.entry_id)).review_status = "reviewed"
+        await session.commit()
+    await SqliteKnowledgeStore(session_factory).set_reviewed(finding.entry_id, True)
+
+    article = await capture_article(
+        session_factory,
+        embedder,
+        url="https://example.test/xz",
+        title=HEADLINE_RETITLED,
+        text=_marked("xz"),
+    )
+
+    assert article.possible_duplicate_of is None
+
+
+async def test_a_later_article_is_never_flagged_against_a_finding_on_the_title_leg(
+    session_factory,
+):
+    """With no Voyage key the title is the whole test, and a finding is titled
+    with the user's own question — which is often the headline they read."""
+    await capture_article(
+        session_factory,
+        NullEmbedder(),
+        url=None,
+        title=HEADLINE,
+        text=ARTICLE,
+        kind="finding",
+        authorship="model",
+        captured_by="auto",
+    )
+    article = await _capture(session_factory, url="https://example.test/two", title=HEADLINE)
+
+    assert article.possible_duplicate_of is None
+
+
+async def test_a_note_about_an_article_is_not_flagged_as_its_duplicate(session_factory):
+    """Found in the browser: a note generated from ONE item is titled with that
+    item's headline, so it was flagged as a possible duplicate of the very
+    article it was written from — and a merge keeps the older entry, i.e. throws
+    the note away. Only an article can be a duplicate, and only of an article."""
+    article = await _capture(session_factory, url="https://example.test/one", title=HEADLINE)
+    note = await capture_article(
+        session_factory,
+        NullEmbedder(),
+        url=None,
+        title=HEADLINE,
+        text=ARTICLE + " And what the team should do about it.",
+        kind="note",
+        authorship="human",
+        captured_by="auto",
+    )
+
+    assert article.possible_duplicate_of is None
+    assert note.possible_duplicate_of is None
+
+
+async def test_a_later_article_is_not_flagged_against_a_note(session_factory):
+    await capture_article(
+        session_factory,
+        NullEmbedder(),
+        url=None,
+        title=HEADLINE,
+        text=ARTICLE + " And what the team should do about it.",
+        kind="note",
+        authorship="human",
+        captured_by="auto",
+    )
+    article = await _capture(session_factory, url="https://example.test/two", title=HEADLINE)
+
+    assert article.possible_duplicate_of is None
+
+
+async def test_a_pasted_url_is_flagged_against_an_article_already_held(session_factory):
+    """The likeliest duplicate in this app: a starred article and the same story
+    pasted as a URL. ``capture_url`` writes ``kind='manual'``, so the rule covers
+    both kinds — the vector leg's ``kinds=`` filter included."""
+    embedder = MarkerEmbedder()
+    starred = await capture_article(
+        session_factory,
+        embedder,
+        url="https://example.test/xz-one",
+        title=HEADLINE,
+        text=_marked("xz"),
+    )
+    pasted = await capture_article(
+        session_factory,
+        embedder,
+        url="https://example.test/xz-two",
+        title=HEADLINE_RETITLED,
+        text=_marked("xz"),
+        kind="manual",
+        captured_by="user",
+    )
+
+    assert pasted.possible_duplicate_of == starred.entry_id
+
+
+async def test_an_article_is_flagged_against_a_pasted_url_already_held(session_factory):
+    """The other direction, on the title leg: a manual save is a candidate too."""
+    pasted = await capture_article(
+        session_factory,
+        NullEmbedder(),
+        url="https://example.test/one",
+        title=HEADLINE,
+        text=ARTICLE,
+        kind="manual",
+        captured_by="user",
+    )
+    article = await _capture(
+        session_factory, url="https://example.test/two", title=HEADLINE_RETITLED
+    )
+
+    assert article.possible_duplicate_of == pasted.entry_id
+
+
+async def test_the_flag_is_a_column_and_the_trail_names_both_scores(session_factory, db_session):
+    """``possible_duplicate_of`` is a column, never a string inside a detail (spec §8)
+    — the detail carries the *evidence*, which is what makes 0.92 calibratable."""
+    first = await _capture(session_factory, url="https://example.test/one")
+    second = await _capture(session_factory, url="https://example.test/two")
+
+    rows = (
+        await db_session.execute(
+            select(KbActivity).where(KbActivity.entry_id == second.entry_id)
+        )
+    ).scalars().all()
+    detail = next(row.detail for row in rows if "possible duplicate" in (row.detail or ""))
+    assert f"entry {first.entry_id}" in detail
+    assert "cosine n/a" in detail and "title 1.00" in detail
+
+
+async def test_deferring_the_embedding_skips_the_check_and_leaves_the_chunks_pending(
+    session_factory, db_session
+):
+    """What the bulk job asks for: no Voyage call, no vector, and no flag from a
+    rule that would have had to guess without one."""
+    embedder = MarkerEmbedder()
+    await capture_article(
+        session_factory,
+        embedder,
+        url="https://example.test/one",
+        title="The xz backdoor",
+        text=_marked("xz"),
+    )
+    second = await capture_article(
+        session_factory,
+        embedder,
+        url="https://example.test/two",
+        title="The xz backdoor",
+        text=_marked("xz"),
+        defer_embedding=True,
+    )
+
+    assert second.possible_duplicate_of is None
+    pending = await db_session.scalar(
+        select(func.count())
+        .select_from(KbChunk)
+        .where(KbChunk.entry_id == second.entry_id, KbChunk.embedded_at.is_(None))
+    )
+    assert pending > 0
+
+
+async def test_a_failed_embed_leaves_the_entry_unflagged_rather_than_title_matched(
+    session_factory,
+):
+    """An embedder that is configured but broken must not silently downgrade the
+    rule to the title alone — that is the no-embedder case, not this one."""
+
+    class BrokenEmbedder(MarkerEmbedder):
+        async def embed_documents(self, texts):
+            raise EmbeddingError(429, "rate limited")
+
+    await capture_article(
+        session_factory,
+        MarkerEmbedder(),
+        url="https://example.test/one",
+        title="The xz backdoor",
+        text=_marked("xz"),
+    )
+    second = await capture_article(
+        session_factory,
+        BrokenEmbedder(),
+        url="https://example.test/two",
+        title="The xz backdoor",
+        text=_marked("xz"),
+    )
+
+    assert second.possible_duplicate_of is None
+
+
+class AngledEmbedder:
+    """Two unit vectors a **known** cosine apart: 0.8 for a ``@@near@@`` text.
+
+    ``MarkerEmbedder`` only produces 1.0 and 0.0, which no threshold between them
+    can tell apart. A pair sitting at exactly 0.8 is what makes the setting the
+    only thing deciding the outcome.
+    """
+
+    model = "angled-embed-1"
+    dimensions = VEC_DIMENSIONS
+
+    async def embed_documents(self, texts):
+        return [self._vector(text) for text in texts]
+
+    async def embed_query(self, text):
+        return self._vector(text)
+
+    @staticmethod
+    def _vector(text: str) -> list[float]:
+        vector = [0.0] * VEC_DIMENSIONS
+        if "@@near@@" in text:
+            vector[0], vector[1] = 0.8, 0.6
+        else:
+            vector[0] = 1.0
+        return vector
+
+
+async def test_the_article_fetch_holds_no_database_connection(
+    session_factory, db_session, db_engine
+):
+    """Nothing is checked out of the pool while a capture waits on a website.
+
+    One at a time this was merely untidy; ``MAX_KB_EXTRACTIONS = 8`` made it eight
+    pooled connections parked on network I/O for up to ``feed_timeout_s`` each,
+    with every other request in the application competing for what is left.
+    """
+    feed = Feed(url="https://example.test/feed.xml", title="Example")
+    db_session.add(feed)
+    await db_session.flush()
+    item = FeedItem(
+        feed_id=feed.id,
+        guid="needs-extraction",
+        title="An advisory with no stored text",
+        url="https://example.test/article",
+    )
+    db_session.add(item)
+    await db_session.commit()
+
+    checked_out: list[int] = []
+    page = fixture_text("article.html")
+
+    def handle(request: httpx2.Request) -> httpx2.Response:
+        checked_out.append(db_engine.pool.checkedout())
+        return httpx2.Response(200, text=page)
+
+    service = KbService(session_factory=session_factory, transport=httpx2.MockTransport(handle))
+    baseline = db_engine.pool.checkedout()
+
+    result = await service.capture_feed_item(item.id)
+
+    assert result.created is True
+    assert checked_out == [baseline]
+
+
+async def test_an_item_deleted_while_its_article_is_fetched_is_a_lookup_error(
+    session_factory, db_session
+):
+    """The fetch happens between two short transactions, and the row can go in between.
+
+    ``extract_item`` used to raise ``LookupError`` for this; fetching outside the
+    session must not turn it into an ``AttributeError`` on ``None`` — a 500 on
+    ``POST /api/kb/entries`` and an unreadable ``skip`` row on the star path.
+    """
+    feed = Feed(url="https://example.test/feed.xml", title="Example")
+    db_session.add(feed)
+    await db_session.flush()
+    item = FeedItem(
+        feed_id=feed.id,
+        guid="vanishes",
+        title="An advisory that is deleted mid-fetch",
+        url="https://example.test/article",
+    )
+    db_session.add(item)
+    await db_session.commit()
+    item_id = item.id
+    page = fixture_text("article.html")
+
+    async def handle(request: httpx2.Request) -> httpx2.Response:
+        async with session_factory() as session:
+            await session.delete(await session.get(FeedItem, item_id))
+            await session.commit()
+        return httpx2.Response(200, text=page)
+
+    service = KbService(session_factory=session_factory, transport=httpx2.MockTransport(handle))
+
+    with pytest.raises(LookupError):
+        await service.capture_feed_item(item_id)
+
+
+async def test_a_long_entrys_own_chunks_do_not_crowd_the_duplicate_out_of_the_knn(
+    session_factory, db_session
+):
+    """A fourteen-chunk article still finds the copy that was already there.
+
+    Every one of the new entry's own body chunks is a candidate the KNN returns
+    and the ``id < entry_id`` rule then throws away, so asking for
+    ``NEAR_DUPLICATE_K + 1`` neighbours and filtering afterwards means a long
+    advisory fills all six slots with itself and the syndicated re-publication is
+    never seen. The exclusion belongs inside the KNN.
+    """
+    older = await capture_article(
+        session_factory,
+        AngledEmbedder(),
+        url="https://example.test/advisory-first",
+        title=HEADLINE,
+        text=f"@@near@@ {ARTICLE}",
+        duplicate_threshold=0.7,
+    )
+    long_body = "\n\n".join(f"## Section {index}\n\n{ARTICLE}" for index in range(60))
+    newer = await capture_article(
+        session_factory,
+        AngledEmbedder(),
+        url="https://example.test/advisory-syndicated",
+        title=HEADLINE_RETITLED,
+        text=long_body,
+        duplicate_threshold=0.7,
+    )
+
+    chunks = await db_session.scalar(
+        select(func.count()).select_from(KbChunk).where(KbChunk.entry_id == newer.entry_id)
+    )
+    assert chunks >= 14, "the scenario needs an entry with more chunks than the KNN asks for"
+    assert newer.possible_duplicate_of == older.entry_id
+
+
+@pytest.mark.parametrize(("threshold", "flagged"), [("0.92", False), ("0.70", True)])
+async def test_the_duplicate_threshold_setting_decides_what_a_single_capture_flags(
+    session_factory, db_session, threshold, flagged
+):
+    """A star, a pasted URL or a note reads ``kb_duplicate_threshold`` too.
+
+    Only the bulk route used to: every other path took ``capture_article``'s 0.92
+    default, so the setting in Settings → Knowledge moved nothing that was not
+    captured two hundred at a time.
+    """
+    async with session_factory() as session:
+        await settings_service.set_many(session, {"kb_duplicate_threshold": threshold})
+        await session.commit()
+    feed = Feed(url="https://example.test/feed.xml", title="Example")
+    db_session.add(feed)
+    await db_session.flush()
+    first = FeedItem(
+        feed_id=feed.id,
+        guid="xz-1",
+        title=HEADLINE,
+        url="https://example.test/one",
+        content_text=ARTICLE,
+    )
+    second = FeedItem(
+        feed_id=feed.id,
+        guid="xz-2",
+        title=HEADLINE_RETITLED,
+        url="https://example.test/two",
+        content_text=f"@@near@@ {ARTICLE}",
+    )
+    db_session.add_all([first, second])
+    await db_session.commit()
+    service = KbService(session_factory=session_factory, embedder=AngledEmbedder())
+
+    older = await service.capture_feed_item(first.id)
+    newer = await service.capture_feed_item(second.id)
+
+    assert (newer.possible_duplicate_of == older.entry_id) is flagged
