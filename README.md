@@ -25,12 +25,15 @@ make dev-web PORT=8012            # so Vite proxies /api to the same place
 ```
 
 `PORT` is the port the API binds (Vite always stays on 5173), `DB` is the SQLite file
-(default `backend/data/app.db`) and `LOG` is `DEBUG` / `INFO` / `WARNING` / `ERROR`.
+(default `backend/data/app.db`; give an absolute path — `make dev-api` runs from
+`backend/`, so a relative one resolves there) and `LOG` is `DEBUG` / `INFO` / `WARNING` / `ERROR`.
 The same flags work directly: `python -m app --port 8012 --db-path /tmp/scratch.db`.
 A second `DB` is how you get a second, independent instance — never point two of them
 at one file.
 
-Prerequisites: [uv](https://docs.astral.sh/uv/) and Node 22+.
+Prerequisites: [uv](https://docs.astral.sh/uv/) and Node 22+. On a fresh clone, install
+the frontend's dependencies once — `cd frontend && npm install` — or `make dev-web` and
+`make test` have nothing to run (`uv` installs the backend's by itself).
 
 The browser only ever talks to Vite, which proxies `/api` to the backend, so every
 request is same-origin and the API sends no CORS headers at all. It has no
@@ -211,5 +214,5 @@ make typecheck   # frontend: npx tsc -b — the only TypeScript type-check there
 | Path        | What it is                                              |
 | ----------- | ------------------------------------------------------- |
 | `backend/`  | FastAPI app (`app/`), tests, uv-managed dependencies     |
-| `frontend/` | Vite + React + TypeScript SPA, built into `frontend/dist` |
+| `frontend/` | Vite + React + TypeScript SPA                             |
 | `docs/`     | `DESIGN.md` (design record), `ROADMAP.md` (backlog)       |

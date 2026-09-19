@@ -18,7 +18,7 @@ from pathlib import Path
 
 import uvicorn
 
-from app.config import settings
+from app.config import Settings
 
 #: Loopback, unconditionally — see the module docstring.
 HOST = "127.0.0.1"
@@ -31,8 +31,8 @@ def serve(*, port: int, db_path: Path, log_level: str, reload: bool = False) -> 
     # built here could never arrive. The environment is the only channel that
     # crosses that boundary. SNR_-prefixed so an ambient PORT or DB_PATH meant for
     # some other tool cannot be mistaken for this app's configuration, and so that
-    # nobody reads these as a documented way to run it.
-    os.environ["SNR_PORT"] = str(port)
+    # nobody reads these as a documented way to run it. The port is not among them:
+    # uvicorn binds it from the argument below and nothing in the app reads it.
     os.environ["SNR_DB_PATH"] = str(db_path)
     os.environ["SNR_LOG_LEVEL"] = log_level
     # The import string, not the app object: uvicorn's reloader re-imports it in
@@ -46,6 +46,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         description=f"Serve the API on {HOST}.",
     )
     # The defaults are Settings' own, so there is one place they are written down.
+    settings = Settings()
     parser.add_argument(
         "--port", type=int, default=settings.port, help=f"Port to bind (default {settings.port})."
     )

@@ -52,9 +52,27 @@ def test_the_flags_reach_a_settings_built_in_another_process(
     entrypoint.main(["--port", "8012", "--db-path", "/tmp/other.db", "--log-level", "DEBUG"])
 
     worker_settings = Settings()
-    assert worker_settings.port == 8012
     assert worker_settings.db_path == Path("/tmp/other.db")
     assert worker_settings.log_level == "DEBUG"
+
+
+def test_the_flags_reach_the_app_built_in_this_process(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without ``--reload`` there is no worker: uvicorn imports ``app.main`` right here.
+
+    A ``Settings`` singleton built when ``app.config`` was first imported — which
+    is before ``main()`` has parsed anything — would make ``--db-path`` and
+    ``--log-level`` silently do nothing, and the app would open the default
+    database. ``create_app()`` has to read the hand-off when it is called.
+    """
+    from app.main import create_app
+
+    capture_uvicorn(monkeypatch)
+
+    entrypoint.main(["--db-path", "/tmp/other.db", "--log-level", "DEBUG"])
+
+    served = create_app().state.settings
+    assert served.db_path == Path("/tmp/other.db")
+    assert served.log_level == "DEBUG"
 
 
 def test_the_defaults_are_the_dev_ones(monkeypatch: pytest.MonkeyPatch) -> None:

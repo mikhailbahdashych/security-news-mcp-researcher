@@ -86,8 +86,8 @@ DEFAULT_SETTINGS: dict[str, str] = {
     # until it has been reviewed — that gate is not a setting (spec S5).
     "kb_reviewed_only": "false",
     # -- embeddings (Phase 2) --------------------------------------------------
-    # Write-only over the API, like the Anthropic key: stored here, read back
-    # masked, and overridden by VOYAGE_API_KEY from the environment or .env.
+    # Write-only over the API, like the Anthropic key: stored here and read back
+    # masked. This row is its only source.
     "voyage_api_key": "",
     "kb_embedding_model": "voyage-4",
     # -- capture and compile (Phase 2) ----------------------------------------

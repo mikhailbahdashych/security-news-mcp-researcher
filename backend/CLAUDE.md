@@ -102,7 +102,6 @@ item leaves the note-source row with a NULL `feed_item_id` and its stored `url`/
   `MAX_CONCURRENT_EXTRACTIONS` articles; the agent runner commits per step). **Never
   read `app.state.session_factory` in a route** — tests override the dependency, not
   the state.
-- `AppSettings` — this app's `Settings`. Routes read only `anthropic_api_key` off it.
 - `AnthropicClient` (`AsyncAnthropic | None`) — a per-request client, closed when the
   request ends, `None` when no key is configured. **Not for streaming routes.**
 - `ChatClientFactory` (`Callable[[str], AsyncAnthropic]`) — streaming routes build and

@@ -81,8 +81,8 @@ export default function ApiKeySection({ settings }: { settings: AppSettings }) {
           {save.isPending ? 'Saving…' : 'Save key'}
         </Button>
 
-        {/* Always enabled: an ANTHROPIC_API_KEY in the environment overrides the
-            stored key, so a testable key may exist even when none is stored. */}
+        {/* Always enabled: with no key stored the test is an honest "no API key
+            configured" answer, which is worth being able to ask for. */}
         <Button loading={test.isPending} disabled={busy} onClick={() => test.mutate()}>
           {test.isPending ? 'Testing…' : 'Test key'}
         </Button>

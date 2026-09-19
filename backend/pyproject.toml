@@ -7,8 +7,9 @@ requires-python = ">=3.12"
 dependencies = [
     "fastapi",
     "uvicorn[standard]",
-    # >=2.3 for `NoDecode`, which is what lets CORS_ORIGINS take the
-    # comma-separated form a human writes (see app/config.py).
+    # Only for the entrypoint's hand-off: `python -m app` passes its flags to
+    # uvicorn's reloader worker as SNR_* variables, which `Settings` reads
+    # (see app/config.py). Not a `.env` loader any more.
     "pydantic-settings>=2.3",
     "sqlalchemy[asyncio]>=2.0.52",
     "aiosqlite>=0.22.1",

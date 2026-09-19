@@ -8,7 +8,6 @@ from app import __version__
 from app.agent.turns import TurnRegistry, mark_interrupted
 from app.api import api_router
 from app.config import Settings
-from app.config import settings as default_settings
 from app.db.engine import create_db_engine, create_session_factory
 from app.db.init import init_db
 from app.logging_config import configure_logging
@@ -79,7 +78,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
-    settings = settings or default_settings
+    settings = settings or Settings()
     # Before anything else, so that whatever the rest of start-up logs is actually
     # seen and formatted. Idempotent, so the test suite's many apps share one
     # handler instead of multiplying every record. See app/logging_config.py.

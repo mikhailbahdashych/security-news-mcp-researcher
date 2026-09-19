@@ -31,4 +31,8 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
 
 
-settings = Settings()
+# Deliberately no module-level ``settings = Settings()``. It would be built the
+# moment anything imports this module — for ``python -m app`` that is before the
+# flags are parsed — and without ``--reload`` uvicorn imports ``app.main`` in that
+# same process, so ``--db-path`` would silently open the default database.
+# ``create_app()`` builds its own when it is called.

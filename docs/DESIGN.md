@@ -141,7 +141,7 @@ frontend/
        lib/{sse,dates,useDebouncedValue}.ts
        pages/{Inbox,ChatPage,Notes,NoteDetail,Settings,Page}.tsx
        components/{inbox,chat,notes,settings,ui}/
-Dockerfile docker-compose.yaml Makefile
+Makefile
 ```
 
 > **Implementation notes — where this differs from the plan.**
@@ -443,9 +443,8 @@ Multi-stage: node:22-bookworm-slim builds SPA → python:3.13-slim-bookworm runt
 > pure modules — `api/chat.ts`, `ui/layout.ts`/`theme.ts`/`railState.ts`,
 > `notes/excerpt.ts` — but the "no jsdom, no component tests, no E2E" rule stands.
 > Backend tests use a real temp-file SQLite DB per test (not `:memory:`, so WAL and the
-> FK pragma behave as in production), and two autouse fixtures keep the suite honest:
-> one deletes `ANTHROPIC_API_KEY` from the environment, the other stubs
-> `socket.getaddrinfo`.
+> FK pragma behave as in production), and an autouse fixture stubs
+> `socket.getaddrinfo` so nothing in the suite can reach the network.
 
 ## PR-by-PR build sequence — **complete**
 

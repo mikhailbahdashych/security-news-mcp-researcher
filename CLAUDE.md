@@ -99,8 +99,12 @@ at it. Everything else configurable lives in the database, on the Settings page.
 the constructor, which is what the whole test suite uses, and `SNR_`-prefixed
 environment variables. **Those are an internal hand-off, not configuration** —
 uvicorn's reloader re-imports `app.main` in a worker process, so `__main__` exports
-its parsed flags as `SNR_PORT` / `SNR_DB_PATH` / `SNR_LOG_LEVEL` before
-`uvicorn.run` because the environment is the only channel that crosses the fork.
+its parsed flags as `SNR_DB_PATH` / `SNR_LOG_LEVEL` before `uvicorn.run` because the
+environment is the only channel that crosses the fork (the port goes to uvicorn as an
+argument; nothing in the app reads it). **There is no module-level `settings`
+singleton**: `create_app()` builds `Settings()` when it is called — an import-time one
+is built before the flags are parsed, and without `--reload` uvicorn imports `app.main`
+in that same process, which made `--db-path` silently open the default database.
 Do not document them, and do not add an unprefixed one back: `PORT` and `DB_PATH`
 are names other tools export.
 

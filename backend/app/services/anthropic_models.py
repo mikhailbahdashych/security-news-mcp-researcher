@@ -3,7 +3,7 @@
 The model list changes at most a few times a year but the settings page asks for
 it on every visit, so results are cached in-process for an hour. The cache is
 keyed on a digest of the API key that produced them, which means changing the key
-(stored or via ``ANTHROPIC_API_KEY``) transparently invalidates it.
+transparently invalidates it.
 """
 
 from __future__ import annotations
