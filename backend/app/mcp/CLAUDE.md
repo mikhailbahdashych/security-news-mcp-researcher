@@ -140,8 +140,6 @@ Satisfies the agent's `ToolProvider` protocol: `source = ToolSource.MCP` +
   enabled) are applied *here*, by simply not returning a disabled tool. The registry then
   has nothing to dispatch to, so a cached model turn that still remembers a disabled tool
   gets an error result rather than an execution.
-- `name_map()` → `{namespaced: (server, original)}`, listing first if needed. Use it when
-  a caller (e.g. notes generation) needs to name MCP tools the way the model sees them.
 - The handler is bound to the **original** tool name; the namespaced one exists only for
   the model. The definition uses `tool.input_schema` (snake_case, already a plain dict in
   2.x) — **do not** `model_dump(by_alias=True)`, that yields wire-format camelCase.

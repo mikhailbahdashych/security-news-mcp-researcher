@@ -273,9 +273,6 @@ async def test_vectors_round_trip_and_knn_orders_by_distance(session_factory, db
     stored = (await db_session.execute(text("SELECT count(*) FROM kb_chunk_vec"))).scalar_one()
     assert stored == 3
 
-    await store.delete_vectors([chunks[0].id])
-    assert (await db_session.execute(text("SELECT count(*) FROM kb_chunk_vec"))).scalar_one() == 2
-
 
 async def test_knn_filters_run_inside_the_match(session_factory, db_session):
     """With ``k`` small enough, a post-filter would have returned nothing.

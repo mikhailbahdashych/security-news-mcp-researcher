@@ -419,7 +419,7 @@ async def run(
     # the consumer on a stream with no `error` and no `done`.
     try:
         tools = await registry.tools(subset=tool_subset)
-        tool_definitions = [tool.definition for tool in tools]
+        tool_definitions = await registry.definitions(subset=tool_subset)
         by_name = {tool.name: tool for tool in tools}
         system_prompt = build_system_prompt(override=system_override, extra=system_extra)
 

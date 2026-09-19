@@ -110,8 +110,6 @@ class KnowledgeStore(Protocol):
 
     async def upsert_vectors(self, rows: Sequence[VectorRow]) -> None: ...
 
-    async def delete_vectors(self, chunk_ids: Sequence[int]) -> None: ...
-
     async def set_reviewed(self, entry_id: int, reviewed: bool) -> int: ...
 
     async def knn(
@@ -176,23 +174,6 @@ class SqliteKnowledgeStore:
                         "published_day": row.published_day,
                         "embedding": sqlite_vec.serialize_float32(list(row.embedding)),
                     },
-                )
-            await session.commit()
-
-    async def delete_vectors(self, chunk_ids: Sequence[int]) -> None:
-        """Remove vectors by chunk id.
-
-        The ``AFTER DELETE`` trigger on ``kb_chunks`` already does this when a
-        chunk goes away; this is for the cases where the chunk stays and only its
-        vector is being discarded (a model change, a re-index).
-        """
-        if not chunk_ids:
-            return
-        async with self._session_factory() as session:
-            for chunk_id in chunk_ids:
-                await session.execute(
-                    text("DELETE FROM kb_chunk_vec WHERE chunk_id = :chunk_id"),
-                    {"chunk_id": chunk_id},
                 )
             await session.commit()
 

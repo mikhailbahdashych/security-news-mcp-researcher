@@ -419,19 +419,23 @@ async def test_system_override_replaces_the_default_and_extra_is_appended(
 async def test_tool_subset_filters_the_tools_array(session_factory, session_id):
     client = ScriptedAnthropic([turn_text("ok")])
     registry = registry_with(echo_tool(), echo_tool("get_feed_item"), echo_tool("fetch_article"))
+    subset = {"search_feed_items", "get_feed_item", "not_a_tool"}
 
     await drive(
         client,
         session_factory,
         session_id,
         registry=registry,
-        tool_subset={"search_feed_items", "get_feed_item", "not_a_tool"},
+        tool_subset=subset,
     )
 
     assert [tool["name"] for tool in client.calls[0]["tools"]] == [
         "search_feed_items",
         "get_feed_item",
     ]
+    # The array the runner sends is exactly what the registry builds — it is the
+    # head of the prompt-cache prefix, so it must stay byte-identical.
+    assert client.calls[0]["tools"] == await registry.definitions(subset=subset)
 
 
 async def test_persist_false_writes_nothing(session_factory):

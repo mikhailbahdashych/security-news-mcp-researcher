@@ -93,10 +93,6 @@ class McpToolProvider:
     manager: McpManager
     prefs: ToolPrefs = field(default_factory=dict)
     source: ToolSource = ToolSource.MCP
-    #: ``namespaced -> (server, original tool name)``, filled by ``list_tools``.
-    #: Task 6 reuses the registry with a restricted tool subset and needs to name
-    #: MCP tools the way the model sees them.
-    resolved: dict[str, tuple[str, str]] = field(default_factory=dict)
 
     async def list_tools(self) -> list[RegisteredTool]:
         """Every enabled tool, listed from every server **at once**.
@@ -119,23 +115,14 @@ class McpToolProvider:
 
         registered: list[RegisteredTool] = []
         taken: set[str] = set()
-        resolved: dict[str, tuple[str, str]] = {}
         for server, tools in zip(servers, per_server, strict=True):
             for tool in sorted(tools, key=lambda item: item.name):
                 if not self.prefs.get((server, tool.name), True):
                     continue
                 name = _unique(namespaced_name(server, tool.name), taken)
                 taken.add(name)
-                resolved[name] = (server, tool.name)
                 registered.append(self._register(server, tool, name))
-        self.resolved = resolved
         return registered
-
-    async def name_map(self) -> dict[str, tuple[str, str]]:
-        """``namespaced -> (server, original)``, listing first if need be."""
-        if not self.resolved:
-            await self.list_tools()
-        return dict(self.resolved)
 
     def _register(self, server: str, tool: Tool, name: str) -> RegisteredTool:
         return RegisteredTool(
