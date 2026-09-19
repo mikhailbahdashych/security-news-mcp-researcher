@@ -157,8 +157,12 @@ def test_serve_binds_the_configured_port(monkeypatch: pytest.MonkeyPatch) -> Non
     assert calls == [{"app": "app.main:app", "host": "127.0.0.1", "port": 9123, "reload": False}]
 
 
-def test_serve_defaults_to_loopback(monkeypatch: pytest.MonkeyPatch) -> None:
-    """No authentication anywhere in this app: a dev run must not bind 0.0.0.0."""
+def test_serve_always_binds_loopback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No authentication anywhere in this app: it must never bind 0.0.0.0.
+
+    There is no flag for this any more — the only caller that wanted one was the
+    container's ``CMD``.
+    """
     calls = capture_uvicorn(monkeypatch)
 
     entrypoint.main([])
@@ -167,12 +171,12 @@ def test_serve_defaults_to_loopback(monkeypatch: pytest.MonkeyPatch) -> None:
     assert calls[0]["reload"] is False
 
 
-def test_the_host_and_reload_flags_reach_uvicorn(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_reload_flag_reaches_uvicorn(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = capture_uvicorn(monkeypatch)
 
-    entrypoint.main(["--host", "0.0.0.0", "--reload"])
+    entrypoint.main(["--reload"])
 
-    assert calls[0]["host"] == "0.0.0.0"
+    assert calls[0]["host"] == "127.0.0.1"
     assert calls[0]["reload"] is True
 
 

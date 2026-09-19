@@ -13,5 +13,5 @@ class HealthResponse(BaseModel):
 
 @router.get("/health", response_model=HealthResponse)
 async def get_health() -> HealthResponse:
-    """Liveness probe used by the SPA footer and by `docker compose` smoke checks."""
+    """Liveness probe used by the SPA footer."""
     return HealthResponse(status="ok", version=__version__)

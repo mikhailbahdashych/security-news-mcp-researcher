@@ -5,26 +5,7 @@ an LLM research chat, a meeting-notes generator and a searchable knowledge base 
 you kept. FastAPI backend, React SPA, SQLite storage — nothing leaves your machine except
 the calls you ask it to make.
 
-## Quickstart (Docker)
-
-```sh
-make up          # docker compose up --build
-```
-
-Then open <http://localhost:8000>. Data lives in the named `appdata` volume, so it
-survives `docker compose down`. The port is `PORT` from the repo-root `.env` (or the
-shell); `docker compose` publishes and passes the same number, so `PORT=9000 make up`
-serves on <http://localhost:9000>. `PORT` must be 1024 or above.
-
-The container runs as the non-root user `app` (uid 1000), which owns `/data`. The
-image's entrypoint (`docker/entrypoint.sh`) starts as root only long enough to check
-who owns `/data`; an `appdata` volume created by an earlier, root-running image is
-chowned once, then the entrypoint drops to `app` with `setpriv` and starts the server.
-An existing volume therefore keeps working with no manual step. If you run the image
-with `--user`, nothing is chowned and ownership is yours to manage
-(`docker compose run --rm --user root app chown -R app:app /data` fixes it by hand).
-
-## Local development
+## Running it
 
 Two terminals:
 
@@ -41,8 +22,8 @@ Prerequisites: [uv](https://docs.astral.sh/uv/) and Node 22+.
 Copy `.env.example` to `.env` if you want to override defaults. `CORS_ORIGINS` takes a
 comma-separated list (`CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173`) as
 well as a JSON array; `*` is refused. Leave it empty unless a browser on some other
-origin has to call the API: Docker serves the SPA same-origin, and `make dev-web`
-proxies `/api` through Vite.
+origin has to call the API — `make dev-web` proxies `/api` through Vite, so the app
+itself is always same-origin.
 
 ## The Anthropic API key
 
@@ -169,7 +150,7 @@ Desktop. Saved servers' tools become callable from the research chat, namespaced
   "mcpServers": {
     "files": {
       "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/data/scratch"]
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/scratch"]
     },
     "remote": {
       "url": "https://example.com/mcp",
@@ -200,53 +181,26 @@ Per-tool toggles live under **Show tools**. A disabled tool is not offered to th
 at all. Keep the total under about 40: large tool sets make models pick worse and the
 definitions cost prompt tokens on every turn, so the panel warns above that.
 
-### stdio servers run inside the container
+### stdio servers run on your machine
 
-In Docker, a `command` server is spawned **inside the container's namespace**:
+A `command` server is spawned by the backend process, so it gets **your** machine: your
+real filesystem, your `localhost`, your local databases and SSH agent. Paths in the
+config are ordinary paths on this computer.
 
-- Paths are container paths. `/data` is the mounted volume — put scratch directories
-  there (`/data/scratch`), not on your Mac. Your home directory is not reachable.
-- `localhost` is the container, not your machine. A service on your host is not
-  reachable at `http://localhost:...` from a stdio server started in here.
-- Secrets must go in the entry's `env` block. The MCP SDK does **not** hand the
-  subprocess this app's environment — it gets an allow-list (`HOME`, `LOGNAME`, `PATH`,
-  `SHELL`, `TERM`, `USER`) with `env` merged on top. So `npx` resolves through `PATH`,
-  but a server's API key only exists if you wrote it into `env`.
-- The first `npx -y ...` downloads the package inside the container, which can take
-  longer than the 10 s connect budget on a cold cache. If it trips, press **Reconnect** —
-  the download has finished by then. The cache lives on the `/data` volume, so it
-  survives a rebuild and only the very first run is slow.
+One thing is not inherited. Secrets must go in the entry's `env` block: the MCP SDK does
+**not** hand the subprocess this app's environment — it gets an allow-list (`HOME`,
+`LOGNAME`, `PATH`, `SHELL`, `TERM`, `USER`) with `env` merged on top. So `npx` resolves
+through `PATH`, but a server's API key only exists if you wrote it into `env`.
 
-**The escape hatch**: if a server genuinely needs your host — your real filesystem, a
-local database, an SSH agent — run the backend on the host instead:
-
-```sh
-make dev-api     # stdio servers now spawn on your machine, not in a container
-make dev-web     # and the UI, on :5173 — dev-api serves the API only
-```
-
-Two things are **not** shared with the Docker app. It is a **separate database**:
-`make dev-api` uses `backend/data/app.db`, while the container's data lives in the
-named `appdata` volume — your feeds, chats and notes are not there. And `make dev-api`
-serves no UI: without `make dev-web` there is nothing at `:5173` to open.
-
-To work against the container's data instead, copy it out of the volume and point
-`DB_PATH` at the copy (a copy, not the live file — two processes writing one SQLite
-database across a Docker mount is how it gets corrupted):
-
-```sh
-docker compose cp app:/data/app.db backend/data/from-docker.db
-DB_PATH=./data/from-docker.db make dev-api
-```
-
-`url`-transport servers behave identically in both modes and are the better choice for
-anything remote.
+A cold `npx -y ...` downloads the package first, which can take longer than the 10 s
+connect budget. If it trips, press **Reconnect** — the download has finished by then.
 
 ## Tests and linting
 
 ```sh
 make test        # backend: uv run pytest, then frontend: npx vitest run
 make lint        # backend: uv run ruff check ., then frontend: npm run lint (oxlint)
+make typecheck   # frontend: npx tsc -b — the only TypeScript type-check there is
 ```
 
 ## Layout
@@ -256,6 +210,3 @@ make lint        # backend: uv run ruff check ., then frontend: npm run lint (ox
 | `backend/`  | FastAPI app (`app/`), tests, uv-managed dependencies     |
 | `frontend/` | Vite + React + TypeScript SPA, built into `frontend/dist` |
 | `docs/`     | `DESIGN.md` (design record), `ROADMAP.md` (backlog)       |
-
-In Docker the SPA is built and served by the backend from `/app/static`, so the whole
-app is one container on one port.

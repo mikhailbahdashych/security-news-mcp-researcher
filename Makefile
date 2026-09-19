@@ -1,4 +1,4 @@
-.PHONY: dev-api dev-web test lint up
+.PHONY: dev-api dev-web test lint typecheck
 
 # The backend's port. Only ever a default here: a PORT in the environment or on
 # the command line wins, and is exported to both recipes by make itself.
@@ -22,5 +22,5 @@ lint: ## Lint both halves
 	cd backend && uv run ruff check .
 	cd frontend && npm run lint
 
-up: ## Build and run the whole app in Docker on the configured PORT (default 8000)
-	docker compose up --build
+typecheck: ## Type-check the SPA (tsc -b) — the only TypeScript check there is
+	cd frontend && npx tsc -b

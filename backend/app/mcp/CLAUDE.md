@@ -11,7 +11,7 @@ The user pastes exactly what they would put in `claude_desktop_config.json`:
 
 ```json
 {"mcpServers": {
-  "files":  {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/data/scratch"]},
+  "files":  {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/scratch"]},
   "remote": {"url": "https://example.com/mcp", "headers": {"Authorization": "Bearer ..."}}
 }}
 ```
@@ -180,18 +180,14 @@ Files: `test_mcp_config.py` (validation), `test_mcp_manager.py` (connect/list/ca
 `test_mcp_lifecycle.py` (teardown, retire, reload races), `test_mcp_provider.py`
 (namespacing, prefs), `test_mcp_api.py` (routes), `test_mcp_chat.py` (MCP tools in a turn).
 
-## Docker / runtime
+## Runtime
 
-- `command` servers are spawned **inside the container namespace**: container paths
-  (`/data` is the volume; the user's home is unreachable), container `localhost`.
+- `command` servers are spawned by the backend process, so they get **the user's own
+  machine**: real paths, the user's `localhost`, their local databases and SSH agent.
+  A server that needs any of that just works; there is no sandbox to escape.
 - The MCP SDK gives the subprocess an **allow-list** environment (`HOME`, `LOGNAME`,
   `PATH`, `SHELL`, `TERM`, `USER`) with the entry's `env` merged on top — so `npx` resolves
-  via `PATH`, but a server's API key exists only if it is in `env`. `NPM_CONFIG_CACHE`
-  never reaches it, which is why the image sets **`HOME=/data`**.
-- The runtime image copies `node` + `/usr/local/lib/node_modules` from the `node:22-bookworm-slim`
-  build stage and recreates the `npm`/`npx` symlinks. **Both stages must stay on the same
-  Debian release** — a mismatch breaks `npx` with an obscure dynamic-loader error.
-- A cold `npx -y ...` download can exceed the 10 s connect budget; the cache lives on
-  `/data`, so pressing **Reconnect** succeeds and later rebuilds are fast.
-- A server that genuinely needs the host (real filesystem, local DB, SSH agent) → run
-  `make dev-api` on the host, or use a `url`-transport server.
+  via `PATH`, but a server's API key exists only if it is in `env`. This is the SDK's
+  behaviour, not ours: do not assume the parent's environment reaches a server.
+- A cold `npx -y ...` download can exceed the 10 s connect budget; pressing **Reconnect**
+  succeeds, because the package is in the npm cache by then.

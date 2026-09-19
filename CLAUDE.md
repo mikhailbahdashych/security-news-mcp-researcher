@@ -11,8 +11,8 @@ turns starred items and chat sessions into structured Markdown, a **knowledge ba
 of captured articles, notes and findings — versioned snapshots, hybrid FTS5 +
 `sqlite-vec` retrieval over Voyage embeddings, and an on-demand **compile** step that
 has a model summarise and tag one entry — and a **global search** over the first three
-histories. FastAPI + SQLite backend, React/Vite SPA, one Docker container, one port.
-Nothing leaves the machine except the outbound calls the user asks for.
+histories. FastAPI + SQLite backend, React/Vite SPA, run as two dev servers on
+`localhost`. Nothing leaves the machine except the outbound calls the user asks for.
 
 The core build is **complete**. Read `docs/DESIGN.md` for the product decisions and
 the design record (each section carries an "Implementation notes" block where the
@@ -40,8 +40,6 @@ enrichment, ...). `docs/CLAUDE.md` is the doc map.
 | `backend/app/kb/` | The knowledge base: the **frozen** virtual-table DDL and its versions (`schema.py`), capture, chunking, FTS, entities, embeddings, store, retrieval, the bulk job, compile, findings, and `KbService` — the one door. No `CLAUDE.md` of its own: it is documented in `backend/CLAUDE.md`. |
 | `frontend/` | Vite + React 19 + TS + Tailwind v4 SPA. See `frontend/CLAUDE.md`. |
 | `docs/` | `DESIGN.md` (design record), `ROADMAP.md` (backlog). See `docs/CLAUDE.md`. |
-| `Dockerfile` | Two stages: node builds the SPA, python runs it. Node binary is copied into the runtime so stdio MCP servers can `npx`. Wheels are hash-verified. `docker/entrypoint.sh` starts as root, chowns `/data` to the non-root user `app` only when an older root-owned volume needs it, then drops privileges with `setpriv`; `CMD` is `python -m app --host 0.0.0.0`. `PORT` must be ≥ 1024. |
-| `docker-compose.yaml` | One service, publishes `${PORT:-8000}`, **named volume** `appdata` at `/data`. |
 | `Makefile` | The only commands you need (below). |
 
 ## Running it
@@ -50,17 +48,17 @@ enrichment, ...). `docs/CLAUDE.md` is the doc map.
 |---|---|
 | `make dev-api` | `cd backend && uv run python -m app --reload` — binds `127.0.0.1:$PORT` (default 8000) |
 | `make dev-web` | `cd frontend && npm run dev` — Vite on **:5173**, proxies `/api` to `:$PORT` (Vite reads the environment only, not `.env`) |
-| `make up` | `docker compose up --build` — whole app on **`$PORT`** (default 8000) |
 | `make test` | **both** suites: `cd backend && uv run pytest`, then `cd frontend && npx vitest run` |
 | `make lint` | **both** halves: `uv run ruff check .` (line-length 100, rules `E,F,I,B,UP`), then `npm run lint` (oxlint) |
+| `make typecheck` | `cd frontend && npx tsc -b` — the **only** TypeScript type-check in the repo. oxlint does not type-check and vitest transpiles without checking, so run this alongside `make lint`. |
 
-The SPA build has no Makefile target: `cd frontend && npm run build` (`tsc -b && vite build`).
-`make up` builds it inside Docker.
+There is no production build step and nothing serves `frontend/dist`: the app is these
+two dev servers. `cd frontend && npm run build` still works if you want a bundle.
 
 Prerequisites: [uv](https://docs.astral.sh/uv/) and Node 22+.
 
-**Database.** SQLite at `backend/data/app.db` in dev (`/data/app.db` in Docker),
-gitignored. It holds the Anthropic key, feeds, items, transcripts, notes, MCP config
+**Database.** SQLite at `backend/data/app.db`, gitignored. It holds the Anthropic key,
+feeds, items, transcripts, notes, MCP config
 and the whole knowledge base (entries, snapshots, chunks and both its indexes).
 There is **no Alembic**. `app/db/init.py::init_db` is the entire upgrade path, and it
 runs four things in this order:
@@ -93,9 +91,9 @@ history.
 **`.env`.** Copy `.env.example` → `.env`. `app.config.Settings` reads it via
 pydantic-settings (`env_file=("../.env", ".env")`, so it works whether you run from
 the repo root or from `backend/`). Fields: `DB_PATH`, `PORT`, `STATIC_DIR`,
-`CORS_ORIGINS`, `ANTHROPIC_API_KEY`, `VOYAGE_API_KEY`, `LOG_LEVEL`. `PORT` is honoured by `make dev-api`,
-by the image's `CMD` and by `docker compose` (which publishes `${PORT:-8000}`), because
-both go through `python -m app` (`backend/app/__main__.py`), which reads `Settings.port`.
+`CORS_ORIGINS`, `ANTHROPIC_API_KEY`, `VOYAGE_API_KEY`, `LOG_LEVEL`. `PORT` is honoured by
+`make dev-api`, because it goes through `python -m app` (`backend/app/__main__.py`),
+which reads `Settings.port`.
 `CORS_ORIGINS` accepts a comma-separated list as well as a JSON array; `*` is refused
 (a `ValidationError` at startup) and the middleware never allows credentials, because
 this API has no auth to protect.
@@ -125,10 +123,17 @@ handler and was dropped.
 ## Delivery workflow — MUST follow
 
 - **Feature branch + PR. The human merges. Never merge, never push to `main`.**
-  Cut each branch from `main` and open its PR **against `main`**. Do not stack: a stacked
-  PR merges into its *base branch*, not into `main` (that is how knowledge-base Phase 1
-  first missed `main`). If a stack is ever unavoidable, retarget the child to `main`
-  before it is merged.
+  Cut each branch from `main` and open its PR **against `main`**.
+  **One PR per feature — never a whole phase in one PR.** A phase is several PRs. Each
+  one has to be small enough to revert on its own: if reverting it would take code and
+  docs out of step, it is carrying more than one feature. Keep the commit count low —
+  squash the fix-round noise with `--amend` / `reset --soft` **before** opening it, so
+  the PR reads as the change and not as the diary of making it. (A 101-commit PR is not
+  reviewable and not revertible; do not produce one.)
+  Do not stack: a stacked PR merges into its *base branch*, not into `main` (that is how
+  knowledge-base Phase 1 first missed `main`). Where one PR genuinely depends on another
+  that is not merged yet, open it as a **draft on its parent** and **retarget it to
+  `main`** before it is merged.
 - **Planned work has one source of truth: the tracked `docs/superpowers/` spec + plan**
   (and the plan's Decisions log). `.superpowers/` is the executor's git-ignored scratch —
   never a second plan, deleted when its work merges. See `docs/CLAUDE.md`.
@@ -195,10 +200,10 @@ handler and was dropped.
 - `Client(...)` takes no `headers=`/`timeout=`. HTTP headers and timeouts live on an
   `httpx2.AsyncClient` passed to `streamable_http_client(url, http_client=...)`, and that
   client is the caller's to close.
-- In Docker, `command` (stdio) servers run **inside the container namespace** — container
-  paths, container `localhost`. The SDK gives the subprocess an allow-list environment
-  (`HOME`, `LOGNAME`, `PATH`, `SHELL`, `TERM`, `USER`) plus the entry's own `env`, which is
-  why the image sets **`HOME=/data`** so `npx`'s cache is writable and persists.
+- `command` (stdio) servers run **on the user's own machine** — real paths, the user's
+  `localhost`. But the SDK gives the subprocess only an allow-list environment (`HOME`,
+  `LOGNAME`, `PATH`, `SHELL`, `TERM`, `USER`) plus the entry's own `env`, so a server's
+  API key exists only if it was written into `env`.
 
 **This app**
 
@@ -224,8 +229,7 @@ handler and was dropped.
   straight into the tokenizer; `fts_query` knows nothing about `LIKE` wildcards.
 - All `DATETIME` columns are **naive UTC** — write them with `app.db.models.utcnow()`.
   The frontend re-appends `Z` (`frontend/src/lib/dates.ts::parseUtc`).
-- SQLite runs in **WAL** with `busy_timeout=5000` and `foreign_keys=ON`. Docker uses a
-  **named volume**, never a bind mount (macOS bind mounts break SQLite locking).
+- SQLite runs in **WAL** with `busy_timeout=5000` and `foreign_keys=ON`.
 - **A research turn is a session-owned task** (`app.agent.turns`) that outlives the
   request: `POST /messages` answers 202 and pages attach with `GET /sessions/{id}/stream`,
   which replays the turn from its first event. Leaving the stream never stops the turn;

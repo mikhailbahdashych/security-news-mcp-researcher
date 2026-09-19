@@ -56,10 +56,10 @@ uvicorn's own loggers alone. Without it every `app.*` record had no handler at a
 
 | Module | Responsibility |
 |---|---|
-| `app/__main__.py` | `python -m app` — the one place uvicorn is told what to serve; reads `Settings.port`, `--host`/`--reload` stay flags. |
+| `app/__main__.py` | `python -m app` — the one place uvicorn is told what to serve; reads `Settings.port`. The bind address is hard-coded loopback (no auth, stored API key); `--reload` is the only flag. |
 | `app/config.py` | `Settings` (pydantic-settings): `db_path`, `port`, `static_dir`, `cors_origins`, `anthropic_api_key`, `log_level`. Reads `../.env` then `.env`. `cors_origins` is `Annotated[list[str], NoDecode]` with a validator, so a comma-separated `CORS_ORIGINS` no longer raises at import; `*` and non-http(s) entries are refused (`ValidationError`). `effort`/`thinking_display` are coerced to their allowed literals in `services/settings.py`, the one place both the API and the agent loop read them. |
 | `app/logging_config.py` | `configure_logging` / `installed_handler`, `LOG_FORMAT`, `HANDLER_NAME`. |
-| `app/static.py` | `mount_spa` — serves `frontend/dist` in Docker; a no-op when the dir is absent (dev). Path-traversal safe. |
+| `app/static.py` | `mount_spa` — serves a built SPA out of `STATIC_DIR`; a no-op when the dir is absent, which is every supported run today. Path-traversal safe. |
 | `app/db/engine.py` | `create_db_engine` (WAL / `synchronous=NORMAL` / `busy_timeout=5000` / `foreign_keys=ON` pragmas on every connect **and `sqlite-vec` loaded on every connect**), `create_session_factory`, `extension_status`. No module-level engine. |
 | `app/db/models.py` | The **complete, frozen** schema + `utcnow()`. No Alembic. |
 | `app/db/init.py` | `init_db(engine, session_factory=None)` — `create_all` + `ADDED_COLUMNS` top-up + the KB's virtual tables and triggers + `ADDED_INDEXES` top-up + `seed_defaults`, then one WARNING if the stored index format is outdated. Idempotent. |
@@ -622,8 +622,8 @@ header set, per site) is summarised in PR #19 — **re-run it before changing th
 `build_client` is the ordinary client. `build_impersonating_client` returns one whose
 transport is `ImpersonatingTransport` (libcurl via `curl_cffi`, `impersonate="chrome"`),
 for sites that decide on the **TLS ClientHello** and that no header can reach — CISA's
-Akamai config is the live example, and it 403s CPython+OpenSSL 3.0 (which is what the
-Docker image has) while serving curl and browsers. It returns `None` when the wheel is
+Akamai config is the live example, and it 403s CPython+OpenSSL 3.0 while serving curl
+and browsers. It returns `None` when the wheel is
 absent, so a missing dependency degrades to an error message rather than a failed start.
 
 Two rules hold for it:

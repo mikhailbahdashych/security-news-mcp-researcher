@@ -8,6 +8,20 @@
 > (root, `backend/`, `backend/app/agent/`, `backend/app/mcp/`, `frontend/`). Anything
 > beyond the seven PRs is backlog: `ROADMAP.md`.
 
+**Implementation notes (2026-09-19) — no container, no one-port mode.**
+Docker was removed entirely: `Dockerfile`, `docker-compose.yaml`, `docker/entrypoint.sh`,
+`.dockerignore` and `make up` are gone, and with them the named `appdata` volume, the
+`/data` paths, the non-root-`app`/`setpriv` entrypoint and the `--host` flag of
+`python -m app` (its only caller was the image's `CMD`; the app now binds loopback
+unconditionally, which is right for something with no auth that stores an API key).
+The owner never ran the container. **The app is two dev servers** — `make dev-api`
+(FastAPI on `127.0.0.1:$PORT`) and `make dev-web` (Vite on `:5173`, proxying `/api`) —
+so wherever this document says "single container", "one port" or "stdio MCP servers run
+inside the container's namespace", read: two processes on the host, and stdio MCP
+servers get the user's own filesystem and `localhost`. `make typecheck`
+(`npx tsc -b`) was added in the same change, because the image's `npm run build` had
+been the repo's only TypeScript type-check.
+
 ## Context
 
 Mikhail is a security engineer who leads weekly security meetings with team leads. A key part of each meeting is presenting security news: what happened, root cause of breaches, lessons learned, and what teams should do about it. Today this research and note-writing is fully manual.

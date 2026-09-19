@@ -8,12 +8,12 @@ Linting is **oxlint** (`.oxlintrc.json`), not ESLint.
 | Command | What it does |
 |---|---|
 | `npm run dev` | Vite on **:5173**; `vite.config.ts` proxies `/api` → `http://localhost:8000` |
-| `npm run build` | `tsc -b && vite build` → `dist/` (copied into the Docker image and served by FastAPI) |
+| `npm run build` | `tsc -b && vite build` → `dist/`. Nothing serves `dist/`; the app is always the two dev servers. |
 | `npm run lint` | oxlint (`react/rules-of-hooks` is an error) — also run by `make lint` |
+| `npx tsc -b` | the **only** TypeScript type-check in the repo — also run by `make typecheck` |
 | `npx vitest run` | vitest, `environment: 'node'`, `include: ['src/**/*.test.ts']` — also run by `make test` |
 
-`make test` and `make lint` cover this half; only `npm run build` has no target
-(`make up` builds it inside Docker).
+`make test`, `make lint` and `make typecheck` cover this half.
 
 ## The shell
 

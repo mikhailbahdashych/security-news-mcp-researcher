@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     """
 
     model_config = SettingsConfigDict(
-        # Run from the repo root (Docker) or from backend/ (make dev-api); pick up either.
+        # Run from the repo root or from backend/ (make dev-api); pick up either.
         env_file=("../.env", ".env"),
         env_file_encoding="utf-8",
         extra="ignore",

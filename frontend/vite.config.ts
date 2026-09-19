@@ -20,10 +20,10 @@ export default defineConfig({
     proxy: {
       // Local dev: Vite on :5173 talks to the FastAPI backend on $PORT.
       //
-      // PORT is the backend's port, not this server's — `make dev-api` and the
-      // Docker image both bind it, and Vite itself does not read PORT, so the
-      // dev server stays on 5173. Without this, `PORT=8899 make dev-api` left
-      // the proxy pointing at a port with nothing behind it.
+      // PORT is the backend's port, not this server's — `make dev-api` binds
+      // it, and Vite itself does not read PORT, so the dev server stays on
+      // 5173. Without this, `PORT=8899 make dev-api` left the proxy pointing at
+      // a port with nothing behind it.
       '/api': `http://localhost:${process.env.PORT ?? 8000}`,
     },
   },
