@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     """Application settings, overridable through the environment or a .env file.
 
     Field names map to upper-case environment variables (``db_path`` -> ``DB_PATH``,
-    ``static_dir`` -> ``STATIC_DIR``, ...).
+    ``log_level`` -> ``LOG_LEVEL``, ...).
     """
 
     model_config = SettingsConfigDict(
@@ -27,8 +27,8 @@ class Settings(BaseSettings):
     #: the only one that works from ``.env`` (pydantic-settings never exports a
     #: ``.env`` value to ``os.environ``, so uvicorn's own ``$PORT`` would not see it).
     port: int = 8000
-    static_dir: Path = Path("./static")
-    # Empty by default: in production the SPA is served same-origin, so no CORS is needed.
+    # Empty by default: the SPA reaches the API through Vite's proxy, so it is
+    # same-origin and no CORS is needed.
     #: ``NoDecode`` because pydantic-settings JSON-decodes a list field's env value
     #: *before* validation: ``CORS_ORIGINS=http://localhost:5173`` used to raise a
     #: ``SettingsError`` at import time, which is a stack trace with no app behind

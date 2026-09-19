@@ -15,7 +15,6 @@ from app.db.init import init_db
 from app.logging_config import configure_logging
 from app.mcp.manager import McpManager
 from app.services.http import impersonation_available
-from app.static import mount_spa
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +91,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     # The single source of truth for this app: the lifespan and every dependency
-    # read the database path, CORS origins and static dir from here.
+    # read the database path and the CORS origins from here.
     app.state.settings = settings
     app.state.db_engine = None
     app.state.session_factory = None
@@ -116,10 +115,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # SSE stream into a connection that appears to hang until the turn is over.
     # If compression is ever wanted, it has to exclude the streaming routes.
 
-    # API routes first...
+    # The whole app: there is no static-file route. The SPA is served by Vite
+    # (`make dev-web`), which proxies /api here, so an unknown path is FastAPI's
+    # own JSON 404 and nothing can shadow an API route.
     app.include_router(api_router, prefix="/api")
-    # ...and the SPA catch-all last, so it can never shadow an API route.
-    mount_spa(app, settings.static_dir)
     return app
 
 

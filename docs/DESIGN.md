@@ -114,7 +114,7 @@ The layout **as built** (the planned one is corrected below):
 backend/
   pyproject.toml, uv.lock
   app/
-    main.py config.py logging_config.py static.py   # SPA catch-all 404-JSONs unmatched /api/*
+    main.py config.py logging_config.py             # no static route: Vite serves the SPA
     db/ engine.py models.py init.py util.py         # SQLAlchemy 2 async + aiosqlite, WAL, create_all (no Alembic)
     schemas/ common.py feeds.py items.py sessions.py notes.py search.py settings.py mcp.py
     api/ deps.py streaming.py tasks.py health.py models.py feeds.py items.py

@@ -16,9 +16,9 @@ order: `app.state.settings`, `app.state.db_engine = None`,
 `app.state.session_factory = None`, `app.state.mcp_manager = McpManager()` (created
 empty, **never connected here**), `app.state.turn_registry = TurnRegistry()` (here and
 not in the lifespan, because it holds nothing until a turn starts and the test suite
-skips the lifespan), optional CORS middleware, the API router under `/api`, and **last**
-the SPA catch-all (`app/static.py::mount_spa`) so it can never shadow an API route. The
-catch-all explicitly 404s `/api/*` as JSON.
+skips the lifespan), optional CORS middleware, and the API router under `/api`. There is
+**no static-file route**: Vite serves the SPA and proxies `/api` here, so an unknown path
+is FastAPI's own JSON 404 and nothing can shadow an API route.
 
 `lifespan` fills in `db_engine` and `session_factory` from `settings.db_path`, runs
 `init_db` (create_all + the `ADDED_COLUMNS` top-up + seed default settings), and then
@@ -34,7 +34,7 @@ the engine. Both the sweep and the drain are exercised through the *real* lifesp
 
 | `app.state` key | Set by | Notes |
 |---|---|---|
-| `settings` | `create_app` | `app.config.Settings`; the single source of truth for db path / static dir / CORS / `.env` API key / log level |
+| `settings` | `create_app` | `app.config.Settings`; the single source of truth for db path / CORS / `.env` API key / log level |
 | `db_engine` | lifespan | `None` outside a real server run |
 | `session_factory` | lifespan | `async_sessionmaker(expire_on_commit=False)` |
 | `mcp_manager` | `create_app` | always present, even in tests |
@@ -57,9 +57,8 @@ uvicorn's own loggers alone. Without it every `app.*` record had no handler at a
 | Module | Responsibility |
 |---|---|
 | `app/__main__.py` | `python -m app` — the one place uvicorn is told what to serve; reads `Settings.port`. The bind address is hard-coded loopback (no auth, stored API key); `--reload` is the only flag. |
-| `app/config.py` | `Settings` (pydantic-settings): `db_path`, `port`, `static_dir`, `cors_origins`, `anthropic_api_key`, `log_level`. Reads `../.env` then `.env`. `cors_origins` is `Annotated[list[str], NoDecode]` with a validator, so a comma-separated `CORS_ORIGINS` no longer raises at import; `*` and non-http(s) entries are refused (`ValidationError`). `effort`/`thinking_display` are coerced to their allowed literals in `services/settings.py`, the one place both the API and the agent loop read them. |
+| `app/config.py` | `Settings` (pydantic-settings): `db_path`, `port`, `cors_origins`, `anthropic_api_key`, `log_level`. Reads `../.env` then `.env`. `cors_origins` is `Annotated[list[str], NoDecode]` with a validator, so a comma-separated `CORS_ORIGINS` no longer raises at import; `*` and non-http(s) entries are refused (`ValidationError`). `effort`/`thinking_display` are coerced to their allowed literals in `services/settings.py`, the one place both the API and the agent loop read them. |
 | `app/logging_config.py` | `configure_logging` / `installed_handler`, `LOG_FORMAT`, `HANDLER_NAME`. |
-| `app/static.py` | `mount_spa` — serves a built SPA out of `STATIC_DIR`; a no-op when the dir is absent, which is every supported run today. Path-traversal safe. |
 | `app/db/engine.py` | `create_db_engine` (WAL / `synchronous=NORMAL` / `busy_timeout=5000` / `foreign_keys=ON` pragmas on every connect **and `sqlite-vec` loaded on every connect**), `create_session_factory`, `extension_status`. No module-level engine. |
 | `app/db/models.py` | The **complete, frozen** schema + `utcnow()`. No Alembic. |
 | `app/db/init.py` | `init_db(engine, session_factory=None)` — `create_all` + `ADDED_COLUMNS` top-up + the KB's virtual tables and triggers + `ADDED_INDEXES` top-up + `seed_defaults`, then one WARNING if the stored index format is outdated. Idempotent. |

@@ -93,7 +93,7 @@ async def test_the_lifespan_marks_orphaned_rows_interrupted(tmp_path: Path):
     db_path = tmp_path / "app.db"
     session_id = await _seed(db_path, turn_status="running")
 
-    application = create_app(Settings(db_path=db_path, static_dir=tmp_path / "absent"))
+    application = create_app(Settings(db_path=db_path))
     async with application.router.lifespan_context(application):
         async with httpx2.AsyncClient(
             transport=ASGITransport(app=application), base_url="http://test"
@@ -112,7 +112,7 @@ async def test_the_lifespan_drains_a_running_turn(tmp_path: Path):
     db_path = tmp_path / "app.db"
     session_id = await _seed(db_path)
 
-    application = create_app(Settings(db_path=db_path, static_dir=tmp_path / "absent"))
+    application = create_app(Settings(db_path=db_path))
     async with application.router.lifespan_context(application):
         turn = await application.state.turn_registry.start(
             session_id=session_id,

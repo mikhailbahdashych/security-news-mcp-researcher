@@ -121,7 +121,6 @@ def app(app_factory, tmp_path) -> FastAPI:
     return app_factory(
         Settings(
             db_path=tmp_path / "app.db",
-            static_dir=tmp_path / "absent",
             anthropic_api_key="",
             voyage_api_key="",
         )

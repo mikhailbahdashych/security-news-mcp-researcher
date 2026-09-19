@@ -138,7 +138,7 @@ async def test_init_db_adds_columns_a_previous_release_did_not_have(tmp_path: Pa
     finally:
         connection.close()
 
-    application = create_app(Settings(db_path=db_path, static_dir=tmp_path / "absent"))
+    application = create_app(Settings(db_path=db_path))
     async with application.router.lifespan_context(application):
         async with httpx2.AsyncClient(
             transport=ASGITransport(app=application), base_url="http://test"
@@ -321,7 +321,7 @@ async def test_feed_items_may_have_no_published_date(db_session):
 async def test_create_app_uses_the_injected_db_path(tmp_path: Path):
     """The settings handed to create_app decide which database the app opens."""
     db_path = tmp_path / "injected" / "app.db"
-    application = create_app(Settings(db_path=db_path, static_dir=tmp_path / "absent"))
+    application = create_app(Settings(db_path=db_path))
 
     assert not db_path.exists()
 

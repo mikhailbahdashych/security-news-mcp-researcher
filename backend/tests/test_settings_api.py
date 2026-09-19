@@ -293,7 +293,6 @@ def dotenv_app(app_factory, tmp_path, monkeypatch):
     application = app_factory(
         Settings(
             db_path=tmp_path / "app.db",
-            static_dir=tmp_path / "absent",
             anthropic_api_key=DOTENV_KEY,
         )
     )
@@ -453,7 +452,6 @@ async def test_the_voyage_env_override_wins_over_the_stored_key(
     dotenv_app = app_factory(
         Settings(
             db_path=tmp_path / "app.db",
-            static_dir=tmp_path / "absent",
             anthropic_api_key="",
             voyage_api_key="pa-from-the-dotenv-0002",
         )

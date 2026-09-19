@@ -90,7 +90,7 @@ history.
 
 **`.env`.** Copy `.env.example` → `.env`. `app.config.Settings` reads it via
 pydantic-settings (`env_file=("../.env", ".env")`, so it works whether you run from
-the repo root or from `backend/`). Fields: `DB_PATH`, `PORT`, `STATIC_DIR`,
+the repo root or from `backend/`). Fields: `DB_PATH`, `PORT`,
 `CORS_ORIGINS`, `ANTHROPIC_API_KEY`, `VOYAGE_API_KEY`, `LOG_LEVEL`. `PORT` is honoured by
 `make dev-api`, because it goes through `python -m app` (`backend/app/__main__.py`),
 which reads `Settings.port`.

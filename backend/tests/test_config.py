@@ -24,7 +24,7 @@ def isolated_env(monkeypatch: pytest.MonkeyPatch) -> None:
     here — the file is read relative to the working directory, so a developer with
     a repo-root ``.env`` would otherwise be testing their own values.
     """
-    for name in ("CORS_ORIGINS", "PORT", "DB_PATH", "STATIC_DIR", "LOG_LEVEL"):
+    for name in ("CORS_ORIGINS", "PORT", "DB_PATH", "LOG_LEVEL"):
         monkeypatch.delenv(name, raising=False)
 
 

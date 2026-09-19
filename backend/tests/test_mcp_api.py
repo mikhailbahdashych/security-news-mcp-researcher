@@ -253,7 +253,7 @@ async def test_app_startup_connects_to_nothing(db_engine, tmp_path, factory: Spy
     from app.config import Settings
     from app.main import create_app, lifespan
 
-    application = create_app(Settings(db_path=tmp_path / "app.db", static_dir=tmp_path / "gone"))
+    application = create_app(Settings(db_path=tmp_path / "app.db"))
     application.state.mcp_manager = McpManager(target_factory=factory)
 
     async with lifespan(application):
