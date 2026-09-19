@@ -98,6 +98,13 @@ DEFAULT_DUPLICATE_THRESHOLD = 0.92
 
 #: How many neighbours the near-duplicate KNN asks for. A duplicate that is not
 #: in the nearest handful is not a duplicate.
+#: Only an article can be a duplicate, and only of another article. A note
+#: generated from one inbox item is titled with that item's headline and quotes
+#: it, so on either leg it sits on top of the article it was written from — and a
+#: merge keeps the *older* entry, which would throw the note away. Findings are
+#: kept out by authorship as well; this keeps notes and manual entries out too.
+DUPLICATE_KIND = "article"
+
 NEAR_DUPLICATE_K = 5
 
 #: How many titles the *embedder-less* leg compares against. There is no index on
@@ -1249,6 +1256,7 @@ async def _nearest_by_vector(
         list(vector),
         NEAR_DUPLICATE_K,
         filters=SearchFilters(
+            kinds=(DUPLICATE_KIND,),
             chunk_kinds=("body",),
             include_model_authored=True,
             exclude_model_authored=True,
@@ -1307,6 +1315,7 @@ async def _nearest_by_title(
                     KbEntry.deleted_at.is_(None),
                     KbEntry.id < entry_id,
                     KbEntry.authorship != "model",
+                    KbEntry.kind == DUPLICATE_KIND,
                 )
                 .order_by(KbEntry.id.desc())
                 .limit(NEAR_DUPLICATE_TITLE_SCAN)
@@ -1349,6 +1358,8 @@ async def flag_near_duplicate(
         async with session_factory() as session:
             entry = await session.get(KbEntry, entry_id)
             if entry is None or entry.deleted_at is not None:
+                return None
+            if entry.kind != DUPLICATE_KIND:
                 return None
             title = entry.title
 

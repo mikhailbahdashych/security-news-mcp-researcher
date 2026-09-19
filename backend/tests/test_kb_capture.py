@@ -1185,6 +1185,43 @@ async def test_a_later_article_is_never_flagged_against_a_finding_on_the_title_l
     assert article.possible_duplicate_of is None
 
 
+async def test_a_note_about_an_article_is_not_flagged_as_its_duplicate(session_factory):
+    """Found in the browser: a note generated from ONE item is titled with that
+    item's headline, so it was flagged as a possible duplicate of the very
+    article it was written from — and a merge keeps the older entry, i.e. throws
+    the note away. Only an article can be a duplicate, and only of an article."""
+    article = await _capture(session_factory, url="https://example.test/one", title=HEADLINE)
+    note = await capture_article(
+        session_factory,
+        NullEmbedder(),
+        url=None,
+        title=HEADLINE,
+        text=ARTICLE + " And what the team should do about it.",
+        kind="note",
+        authorship="human",
+        captured_by="auto",
+    )
+
+    assert article.possible_duplicate_of is None
+    assert note.possible_duplicate_of is None
+
+
+async def test_a_later_article_is_not_flagged_against_a_note(session_factory):
+    await capture_article(
+        session_factory,
+        NullEmbedder(),
+        url=None,
+        title=HEADLINE,
+        text=ARTICLE + " And what the team should do about it.",
+        kind="note",
+        authorship="human",
+        captured_by="auto",
+    )
+    article = await _capture(session_factory, url="https://example.test/two", title=HEADLINE)
+
+    assert article.possible_duplicate_of is None
+
+
 async def test_the_flag_is_a_column_and_the_trail_names_both_scores(session_factory, db_session):
     """``possible_duplicate_of`` is a column, never a string inside a detail (spec §8)
     — the detail carries the *evidence*, which is what makes 0.92 calibratable."""
