@@ -607,9 +607,16 @@ function EmbedNow({ pending, configured }: { pending: number; configured: boolea
     } finally {
       setRunning(false)
       await queryClient.invalidateQueries({ queryKey: kbQueryKey })
+      // `left` is this run's own count, and the run is over: hand the line back
+      // to `pending`, which the refetch above has just made current. Left set,
+      // it froze the count and pinned the button disabled for the life of the
+      // mounted section — a star in the other pane would add pending chunks the
+      // row went on denying.
+      setLeft(null)
     }
   }
 
+  // During a run, what the last call reported; otherwise the fresh stats.
   const waiting = left ?? pending
 
   return (
