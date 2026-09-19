@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useId, useState, type ReactNode } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 
+import { kbQueryKey } from '../api/kb'
 import {
   EFFORTS,
   THINKING_DISPLAYS,
@@ -144,11 +145,21 @@ function SettingsForm({ settings }: { settings: AppSettings }) {
 
   const save = useMutation({
     mutationFn: (patch: SettingsUpdate) => updateSettings(patch),
-    onSuccess: (result) => {
+    onSuccess: async (result) => {
       const next = toDraft(result)
       setDraft(next)
       setSaved(next)
-      return queryClient.invalidateQueries({ queryKey: settingsQueryKey })
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: settingsQueryKey }),
+        // The Knowledge panel is on this same page and half of it is derived
+        // from settings the server acts on as it stores them: a changed
+        // embedding model empties the vector index inside this very PUT, and
+        // `kb_reviewed_only` / `kb_recency_boost` / `kb_duplicate_threshold`
+        // change what a search would answer. Without this the panel below the
+        // button keeps saying everything is embedded, with Embed now — the one
+        // control the user now needs — disabled.
+        queryClient.invalidateQueries({ queryKey: kbQueryKey }),
+      ])
     },
   })
 
