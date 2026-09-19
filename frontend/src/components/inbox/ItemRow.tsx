@@ -150,7 +150,11 @@ export default function ItemRow({
       <div className="flex shrink-0 items-start gap-0.5">
         <IconButton
           icon={starring ? 'spinner' : starred ? 'starFilled' : 'star'}
-          label={starred ? 'Unstar' : 'Star'}
+          // The spinner is `aria-hidden`, so without these the control is simply
+          // dead for the seconds an `auto`-mode capture takes: same name, no
+          // state, no reason. `label` is both the tooltip and the a11y name.
+          label={starring ? 'Saving…' : starred ? 'Unstar' : 'Star'}
+          aria-busy={starring}
           tone={starred ? 'amber' : 'default'}
           disabled={busy}
           onClick={() => onStar(item)}
