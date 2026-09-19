@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useState } from 'react'
 
 import { isNotFound } from '../../api/client'
 import {
@@ -215,6 +216,10 @@ function Result({
   topicName: (id: number) => string
   onOpen: (id: number) => void
 }) {
+  // "nothing was created" is true until the user presses Create, and false the
+  // moment they do — `NewTopic` then says "Topic created." two words away, and
+  // the two sentences must not contradict each other.
+  const [created, setCreated] = useState(false)
   const tokens =
     result.input_tokens + result.output_tokens > 0
       ? `${formatTokens(result.input_tokens)} in / ${formatTokens(result.output_tokens)} out`
@@ -250,9 +255,10 @@ function Result({
       {result.new_topic ? (
         <div className="mt-1.5 flex flex-wrap items-center gap-2">
           <span className="text-[11.5px] text-muted">
-            Proposed a new topic, “{result.new_topic.name}” — nothing was created.
+            Proposed a new topic, “{result.new_topic.name}”
+            {created ? '.' : ' — nothing was created.'}
           </span>
-          <NewTopic initialName={result.new_topic.name} />
+          <NewTopic initialName={result.new_topic.name} onCreated={() => setCreated(true)} />
         </div>
       ) : null}
     </div>
