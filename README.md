@@ -10,16 +10,27 @@ the calls you ask it to make.
 Two terminals:
 
 ```sh
-make dev-api     # uv run python -m app --reload — binds 127.0.0.1:$PORT (default 8000)
-make dev-web     # Vite dev server on :5173, proxying /api to $PORT
+make dev-api     # FastAPI with reload, on 127.0.0.1:8000
+make dev-web     # Vite dev server on :5173, proxying /api to the backend
 ```
 
-Then open <http://localhost:5173>. The backend reads `PORT` from the environment or
-the repo-root `.env`; Vite reads only the environment, so a port set in `.env` alone
-needs `PORT=... make dev-web` as well.
+Then open <http://localhost:5173>.
+
+There is no configuration file and no environment variable. Three things can be
+changed at start-up, and they are flags the Makefile passes for you:
+
+```sh
+make dev-api PORT=8012 DB=/tmp/scratch.db LOG=DEBUG
+make dev-web PORT=8012            # so Vite proxies /api to the same place
+```
+
+`PORT` is the port the API binds (Vite always stays on 5173), `DB` is the SQLite file
+(default `backend/data/app.db`) and `LOG` is `DEBUG` / `INFO` / `WARNING` / `ERROR`.
+The same flags work directly: `python -m app --port 8012 --db-path /tmp/scratch.db`.
+A second `DB` is how you get a second, independent instance — never point two of them
+at one file.
 
 Prerequisites: [uv](https://docs.astral.sh/uv/) and Node 22+.
-Copy `.env.example` to `.env` if you want to override defaults.
 
 The browser only ever talks to Vite, which proxies `/api` to the backend, so every
 request is same-origin and the API sends no CORS headers at all. It has no

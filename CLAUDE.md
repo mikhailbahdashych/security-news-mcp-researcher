@@ -46,8 +46,8 @@ enrichment, ...). `docs/CLAUDE.md` is the doc map.
 
 | Command | What it does |
 |---|---|
-| `make dev-api` | `cd backend && uv run python -m app --reload` — binds `127.0.0.1:$PORT` (default 8000) |
-| `make dev-web` | `cd frontend && npm run dev` — Vite on **:5173**, proxies `/api` to `:$PORT` (Vite reads the environment only, not `.env`) |
+| `make dev-api` | `cd backend && uv run python -m app --reload --port $(PORT) --log-level $(LOG) [--db-path $(DB)]` — binds `127.0.0.1:$PORT` (default 8000) |
+| `make dev-web` | `cd frontend && npm run dev` — Vite on **:5173**, proxies `/api` to `:$PORT`. This is the one place a variable really does cross from make into a process: `vite.config.ts` is a Node file and has no other channel. |
 | `make test` | **both** suites: `cd backend && uv run pytest`, then `cd frontend && npx vitest run` |
 | `make lint` | **both** halves: `uv run ruff check .` (line-length 100, rules `E,F,I,B,UP`), then `npm run lint` (oxlint) |
 | `make typecheck` | `cd frontend && npx tsc -b` — the **only** TypeScript type-check in the repo. oxlint does not type-check and vitest transpiles without checking, so run this alongside `make lint`. |
@@ -88,12 +88,21 @@ a failed load raises rather than degrading.
 Never tell anyone to delete the database — it holds their key, their feeds and their
 history.
 
-**`.env`.** Copy `.env.example` → `.env`. `app.config.Settings` reads it via
-pydantic-settings (`env_file=("../.env", ".env")`, so it works whether you run from
-the repo root or from `backend/`). Fields: `DB_PATH`, `PORT`,
-`LOG_LEVEL`. `PORT` is honoured by
-`make dev-api`, because it goes through `python -m app` (`backend/app/__main__.py`),
-which reads `Settings.port`.
+**Start-up configuration is command-line flags. There is no `.env` file and no
+documented environment variable.** `python -m app` takes `--port` (8000),
+`--db-path` (`./data/app.db`), `--log-level` (INFO) and `--reload`; the Makefile
+passes them from `PORT`, `DB` and `LOG`, so `make dev-api PORT=8012 DB=/tmp/x.db`
+is a second, independent instance and `make dev-web PORT=8012` points Vite's proxy
+at it. Everything else configurable lives in the database, on the Settings page.
+
+`app.config.Settings` (pydantic-settings) is a defaults object with two ways in:
+the constructor, which is what the whole test suite uses, and `SNR_`-prefixed
+environment variables. **Those are an internal hand-off, not configuration** —
+uvicorn's reloader re-imports `app.main` in a worker process, so `__main__` exports
+its parsed flags as `SNR_PORT` / `SNR_DB_PATH` / `SNR_LOG_LEVEL` before
+`uvicorn.run` because the environment is the only channel that crosses the fork.
+Do not document them, and do not add an unprefixed one back: `PORT` and `DB_PATH`
+are names other tools export.
 
 **There is no CORS.** The SPA reaches the API through Vite's `/api` proxy, so it is
 same-origin and the app adds no `CORSMiddleware` — do not add one back. An API with no

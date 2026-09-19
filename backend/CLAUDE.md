@@ -34,7 +34,7 @@ the engine. Both the sweep and the drain are exercised through the *real* lifesp
 
 | `app.state` key | Set by | Notes |
 |---|---|---|
-| `settings` | `create_app` | `app.config.Settings`; the single source of truth for db path / `.env` API key / log level |
+| `settings` | `create_app` | `app.config.Settings`; the single source of truth for the db path and the log level |
 | `db_engine` | lifespan | `None` outside a real server run |
 | `session_factory` | lifespan | `async_sessionmaker(expire_on_commit=False)` |
 | `mcp_manager` | `create_app` | always present, even in tests |
@@ -56,8 +56,8 @@ uvicorn's own loggers alone. Without it every `app.*` record had no handler at a
 
 | Module | Responsibility |
 |---|---|
-| `app/__main__.py` | `python -m app` — the one place uvicorn is told what to serve; reads `Settings.port`. The bind address is hard-coded loopback (no auth, stored API key); `--reload` is the only flag. |
-| `app/config.py` | `Settings` (pydantic-settings): `db_path`, `port`, `anthropic_api_key`, `voyage_api_key`, `log_level`. Reads `../.env` then `.env`. Plain fields, no validators — the whole `CORS_ORIGINS` apparatus went when CORS did. `effort`/`thinking_display` are coerced to their allowed literals in `services/settings.py`, the one place both the API and the agent loop read them. |
+| `app/__main__.py` | `python -m app` — the one place uvicorn is told what to serve. Flags: `--port`, `--db-path`, `--log-level`, `--reload`; it exports them as `SNR_*` before `uvicorn.run` so the reloader's worker sees them. The bind address is hard-coded loopback (no auth, stored API key) and is not a flag. |
+| `app/config.py` | `Settings` (pydantic-settings): `db_path`, `port`, `log_level`, and nothing else. Plain fields, no validators. **No `.env` file**: values come from the constructor (every test) or from the `SNR_`-prefixed environment variables `app/__main__.py` writes as its hand-off to the reloader's worker process. `effort`/`thinking_display` are coerced to their allowed literals in `services/settings.py`, the one place both the API and the agent loop read them. |
 | `app/logging_config.py` | `configure_logging` / `installed_handler`, `LOG_FORMAT`, `HANDLER_NAME`. |
 | `app/db/engine.py` | `create_db_engine` (WAL / `synchronous=NORMAL` / `busy_timeout=5000` / `foreign_keys=ON` pragmas on every connect **and `sqlite-vec` loaded on every connect**), `create_session_factory`, `extension_status`. No module-level engine. |
 | `app/db/models.py` | The **complete, frozen** schema + `utcnow()`. No Alembic. |

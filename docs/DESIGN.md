@@ -8,6 +8,16 @@
 > (root, `backend/`, `backend/app/agent/`, `backend/app/mcp/`, `frontend/`). Anything
 > beyond the seven PRs is backlog: `ROADMAP.md`.
 
+**Implementation notes (2026-09-19) — no `.env`, no environment variables.**
+Start-up configuration is command-line flags on `python -m app`: `--port`,
+`--db-path`, `--log-level`, `--reload`, passed by the Makefile from `PORT`, `DB` and
+`LOG`. `.env.example` was deleted and `Settings` no longer reads a `.env` file, so
+wherever this document mentions one — `CORS_ORIGINS`, `ANTHROPIC_API_KEY`,
+`VOYAGE_API_KEY`, `DB_PATH`, `PORT`, `LOG_LEVEL` — there is no such file to write it
+in. (`Settings` does read `SNR_`-prefixed variables, but only because `__main__`
+writes them there to reach uvicorn's reloader worker: an internal hand-off, not
+configuration.)
+
 **Implementation notes (2026-09-19) — no container, no one-port mode.**
 Docker was removed entirely: `Dockerfile`, `docker-compose.yaml`, `docker/entrypoint.sh`,
 `.dockerignore` and `make up` are gone, and with them the named `appdata` volume, the
@@ -131,7 +141,7 @@ frontend/
        lib/{sse,dates,useDebouncedValue}.ts
        pages/{Inbox,ChatPage,Notes,NoteDetail,Settings,Page}.tsx
        components/{inbox,chat,notes,settings,ui}/
-Dockerfile docker-compose.yaml Makefile .env.example
+Dockerfile docker-compose.yaml Makefile
 ```
 
 > **Implementation notes — where this differs from the plan.**

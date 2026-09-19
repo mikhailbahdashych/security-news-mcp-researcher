@@ -1,11 +1,14 @@
-"""`Settings` parsing and the `python -m app` entrypoint.
+"""`Settings` and the `python -m app` entrypoint.
 
 Nothing here starts a server: `serve` is checked by capturing the call it makes
-to uvicorn, which is the whole of its job.
+to uvicorn, and the flags are checked by building a fresh ``Settings`` afterwards
+— which is exactly what the reloader's worker process does.
 """
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -16,17 +19,12 @@ from app.config import Settings
 
 @pytest.fixture(autouse=True)
 def isolated_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A developer's own environment must not decide these assertions.
+    """A private copy of the environment, restored on teardown.
 
-    The ``.env`` half is handled by ``_env_file=None`` on every ``Settings`` built
-    here — the file is read relative to the working directory, so a developer with
-    a repo-root ``.env`` would otherwise be testing their own values.
+    ``serve`` writes the ``SNR_*`` hand-off variables directly, which ``monkeypatch``
+    cannot undo — so the mapping itself is swapped for a copy.
     """
-    for name in ("PORT", "DB_PATH", "LOG_LEVEL"):
-        monkeypatch.delenv(name, raising=False)
-
-
-# --------------------------------------------------------------------- the PORT
+    monkeypatch.setattr(os, "environ", dict(os.environ))
 
 
 def capture_uvicorn(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
@@ -37,19 +35,52 @@ def capture_uvicorn(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     return calls
 
 
-def test_serve_binds_the_configured_port(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``PORT`` was a dead knob: the Makefile and the image both hard-coded 8000."""
+# ------------------------------------------------------------------- the flags
+
+
+def test_the_flags_reach_a_settings_built_in_another_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The whole point of the hand-off.
+
+    ``uvicorn.run(..., reload=True)`` re-imports ``app.main`` — and therefore
+    ``app.config`` — in a worker process, so a ``Settings`` built inside ``main()``
+    never arrives. Building a fresh one here is what that worker does.
+    """
+    capture_uvicorn(monkeypatch)
+
+    entrypoint.main(["--port", "8012", "--db-path", "/tmp/other.db", "--log-level", "DEBUG"])
+
+    worker_settings = Settings()
+    assert worker_settings.port == 8012
+    assert worker_settings.db_path == Path("/tmp/other.db")
+    assert worker_settings.log_level == "DEBUG"
+
+
+def test_the_defaults_are_the_dev_ones(monkeypatch: pytest.MonkeyPatch) -> None:
+    capture_uvicorn(monkeypatch)
+
+    entrypoint.main([])
+
+    worker_settings = Settings()
+    assert worker_settings.port == 8000
+    assert worker_settings.db_path == Path("./data/app.db")
+    assert worker_settings.log_level == "INFO"
+
+
+def test_the_port_flag_also_reaches_uvicorn(monkeypatch: pytest.MonkeyPatch) -> None:
+    """uvicorn binds the port itself; it does not read ``Settings``."""
     calls = capture_uvicorn(monkeypatch)
 
-    entrypoint.serve(app_settings=Settings(port=9123))
+    entrypoint.main(["--port", "8012"])
 
-    assert calls == [{"app": "app.main:app", "host": "127.0.0.1", "port": 9123, "reload": False}]
+    assert calls == [{"app": "app.main:app", "host": "127.0.0.1", "port": 8012, "reload": False}]
 
 
 def test_serve_always_binds_loopback(monkeypatch: pytest.MonkeyPatch) -> None:
     """No authentication anywhere in this app: it must never bind 0.0.0.0.
 
-    There is no flag for this any more — the only caller that wanted one was the
+    There is no flag for this — the only caller that wanted one was the
     container's ``CMD``.
     """
     calls = capture_uvicorn(monkeypatch)
@@ -69,10 +100,26 @@ def test_the_reload_flag_reaches_uvicorn(monkeypatch: pytest.MonkeyPatch) -> Non
     assert calls[0]["reload"] is True
 
 
-def test_main_serves_the_process_wide_settings(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls = capture_uvicorn(monkeypatch)
-    monkeypatch.setattr(entrypoint, "settings", Settings(port=8123))
+# ---------------------------------------------------------------- the settings
 
-    entrypoint.main([])
 
-    assert calls[0]["port"] == 8123
+def test_settings_take_constructor_arguments(tmp_path: Path) -> None:
+    """How every test in the suite configures an app."""
+    configured = Settings(db_path=tmp_path / "app.db", port=9123, log_level="WARNING")
+
+    assert configured.db_path == tmp_path / "app.db"
+    assert configured.port == 9123
+    assert configured.log_level == "WARNING"
+
+
+def test_an_unprefixed_environment_variable_is_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``PORT`` and ``DB_PATH`` are not this app's configuration any more.
+
+    They are also names another tool may well have exported, which is why the
+    internal hand-off is prefixed rather than bare.
+    """
+    monkeypatch.setenv("PORT", "9999")
+    monkeypatch.setenv("DB_PATH", "/tmp/somewhere-else.db")
+
+    assert Settings().port == 8000
+    assert Settings().db_path == Path("./data/app.db")
