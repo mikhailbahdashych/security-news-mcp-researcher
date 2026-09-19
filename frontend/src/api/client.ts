@@ -27,6 +27,18 @@ export function isNotFound(error: unknown): boolean {
 }
 
 /**
+ * The `detail` of a refusal with exactly this status, or `null`.
+ *
+ * The status is named by the caller because "the server explained itself" is
+ * only true for the refusals a screen can act on; a 500 or a dead backend has
+ * nothing to explain, and printing its text over the caller's own wording tells
+ * the reader less, not more.
+ */
+export function detailFor(error: unknown, status: number): string | null {
+  return error instanceof ApiError && error.status === status ? error.detail : null
+}
+
+/**
  * The sentence behind a 409, or `null` for anything else.
  *
  * A 409 from this API is never a bug: it is the one refusal the user can act on
@@ -37,7 +49,7 @@ export function isNotFound(error: unknown): boolean {
  * caller's own wording, because a 500 or a dead backend has nothing to explain.
  */
 export function conflictDetail(error: unknown): string | null {
-  return error instanceof ApiError && error.status === 409 ? error.detail : null
+  return detailFor(error, 409)
 }
 
 async function readDetail(response: Response): Promise<string> {

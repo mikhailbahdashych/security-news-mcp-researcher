@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useId, useState, type ReactNode } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 
+import { detailFor } from '../api/client'
 import { kbQueryKey } from '../api/kb'
 import {
   EFFORTS,
@@ -31,7 +32,7 @@ import Checkbox from '../components/ui/Checkbox'
 import EmptyState from '../components/ui/EmptyState'
 import Input from '../components/ui/Input'
 import PageHeader from '../components/ui/PageHeader'
-import Select from '../components/ui/Select'
+import Select, { UnknownOption } from '../components/ui/Select'
 import Textarea from '../components/ui/Textarea'
 import { FIELD_HINT } from '../components/ui/classes'
 import {
@@ -83,19 +84,6 @@ const toDraft = (settings: AppSettings): Draft => ({
   kb_rerank: settings.kb_rerank,
   kb_duplicate_threshold: settings.kb_duplicate_threshold,
 })
-
-/**
- * The current value as an option of its own, when it is not one of ours.
- *
- * A `<select>` whose value matches no option renders as the first one, so a
- * stored "turbo" would show as "low" — and the next save would write that back
- * as though the user had chosen it. The API coerces an off-union value to the
- * default before it ever gets here; this is the second lock, for a response from
- * an older build or a hand-edited database.
- */
-function UnknownOption({ value, options }: { value: string; options: readonly string[] }) {
-  return options.includes(value) ? null : <option value={value}>{value} (unknown value)</option>
-}
 
 /** Settings looks the same in both panes: it edits app state, not a selection. */
 export default function SettingsPage(_props: EmbeddablePageProps) {
@@ -178,7 +166,10 @@ function SettingsForm({ settings }: { settings: AppSettings }) {
   // The one field a save must not be allowed to empty. The API refuses it too
   // (a 422 since P2-24); this is the half that keeps the user from meeting that
   // refusal as "could not save" over a form they cannot see the fault in.
-  const invalid = draft.kb_compile_prompt.trim() === ''
+  const invalid = draft.kb_compile_prompt.trim() === '' || draft.kb_compile_model.trim() === ''
+  // A refusal the server explained. Only a 422 qualifies: it names the field,
+  // which is the part the reader needs and the part "could not save" throws away.
+  const refused = detailFor(save.error, 422)
   const models = modelsQuery.data ?? []
 
   return (
@@ -371,7 +362,12 @@ function SettingsForm({ settings }: { settings: AppSettings }) {
         </Button>
         {save.isSuccess ? <span className="text-[11.5px] text-green">Saved</span> : null}
         {save.isError ? (
-          <span className="text-[11.5px] text-red">Could not save. Is the backend running?</span>
+          <span className="text-[11.5px] text-red">
+            {/* A 422 names the field it refused. "Is the backend running?" over
+                it is false and points at nothing — that wording belongs to the
+                failure that really is a dead backend. */}
+            {refused ?? 'Could not save. Is the backend running?'}
+          </span>
         ) : null}
       </div>
     </Shell>

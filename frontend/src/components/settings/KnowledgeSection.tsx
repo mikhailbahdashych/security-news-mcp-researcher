@@ -32,7 +32,7 @@ import { formatNoteDate, formatNoteDay } from '../notes/noteDate'
 import Button from '../ui/Button'
 import Checkbox from '../ui/Checkbox'
 import Input from '../ui/Input'
-import Select from '../ui/Select'
+import Select, { UnknownOption } from '../ui/Select'
 import Textarea from '../ui/Textarea'
 import { FIELD_HINT, cx } from '../ui/classes'
 import Field, { FIELD_GRID } from './Field'
@@ -131,14 +131,25 @@ export default function KnowledgeSection({ uid, draft, settings, onEdit }: Knowl
         htmlFor={`${uid}-kb-embedding-model`}
         hint="Changing this empties the vector index: every chunk is marked pending and has to be embedded again with the new model, because vectors from two models cannot be compared."
       >
-        <Input
+        {/* A select, not a free-text box: the server refuses a name the embedder
+            does not know (a 422), and the names it does know are on the wire so
+            this list is never a second copy of them. A typo here used to be
+            stored, and a stored typo is a *changed* model — which empties the
+            vector index before anything checks that Voyage would accept it. */}
+        <Select
           id={`${uid}-kb-embedding-model`}
           tone="bg"
-          spellCheck={false}
           value={draft.kb_embedding_model}
           onChange={(event) => onEdit({ kb_embedding_model: event.target.value })}
           className="max-w-[260px]"
-        />
+        >
+          {settings.kb_embedding_models.map((model) => (
+            <option key={model} value={model}>
+              {model}
+            </option>
+          ))}
+          <UnknownOption value={draft.kb_embedding_model} options={settings.kb_embedding_models} />
+        </Select>
       </Field>
 
       <Compile uid={uid} draft={draft} settings={settings} onEdit={onEdit} />

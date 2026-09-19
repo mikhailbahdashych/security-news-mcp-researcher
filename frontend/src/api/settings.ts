@@ -57,6 +57,11 @@ export interface AppSettings {
   voyage_api_key_masked: string
   voyage_key_source: KeySource
   kb_embedding_model: string
+  /** What `kb_embedding_model` may be set to in this build — read-only, and the
+   *  list the embedding-model select is built from, so the set lives in the
+   *  embedder and nowhere else. A stored value the server no longer accepts is
+   *  still reported above and simply is not in here. */
+  kb_embedding_models: string[]
   kb_capture_findings: boolean
   kb_compile_mode: CompileMode
   kb_compile_model: string
@@ -92,6 +97,7 @@ export type NotWritable =
   | 'voyage_api_key_masked'
   | 'voyage_key_source'
   | 'kb_compile_prompt_default'
+  | 'kb_embedding_models'
 
 /** Everything a `PUT` may change. All fields optional: unsent fields are left alone. */
 export type SettingsUpdate = Partial<

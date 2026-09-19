@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { ApiError, conflictDetail, isNotFound } from './client'
+import { ApiError, conflictDetail, detailFor, isNotFound } from './client'
 
 describe('isNotFound', () => {
   it('is true for a 404 from the API', () => {
@@ -39,5 +39,21 @@ describe('conflictDetail', () => {
     expect(conflictDetail(new ApiError(404, 'Entry not found'))).toBeNull()
     expect(conflictDetail(new TypeError('Failed to fetch'))).toBeNull()
     expect(conflictDetail(null)).toBeNull()
+  })
+})
+
+describe('detailFor', () => {
+  it('hands back the detail of the status the caller named', () => {
+    // The settings form's case: a 422 names the field that was refused, and
+    // "Is the backend running?" over it points at nothing.
+    expect(detailFor(new ApiError(422, 'kb_compile_model: too short'), 422)).toBe(
+      'kb_compile_model: too short',
+    )
+  })
+
+  it('is nothing for another status, or for a failure that never reached the API', () => {
+    expect(detailFor(new ApiError(500, 'Internal Server Error'), 422)).toBeNull()
+    expect(detailFor(new TypeError('Failed to fetch'), 422)).toBeNull()
+    expect(detailFor(undefined, 422)).toBeNull()
   })
 })
