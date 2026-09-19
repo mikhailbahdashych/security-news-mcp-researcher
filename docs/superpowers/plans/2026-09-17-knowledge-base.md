@@ -402,6 +402,36 @@ a gap is an entry folded into a neighbour.
   was flagged as a possible duplicate of the article it was written from — and a merge keeps the older
   entry. Both near-duplicate legs now offer only `kind = 'article'` candidates and only an article is
   checked. — Cost if wrong: two manual entries with the same title are never flagged.
+- **P2-26 (amended by the final review).** "Only an article" was one kind too narrow: Save-a-URL
+  writes `kind = 'manual'`, so pasted-URL saves had silently stopped being flagged. The rule is
+  `DUPLICATE_KINDS = ("article", "manual")`; notes and findings stay out.
+
+### Phase 2 — follow-ups handed to later phases
+
+Found by the Phase 2 reviews and the browser pass, judged not worth holding the phase for. Each
+names its owner so it is picked up rather than rediscovered.
+
+- **Task 3.5 (inbox / global search):** `extract_item(session, …)` still holds a database session
+  across its network fetch at three pre-existing call sites (`api/items.py`, `agent/builtin.py`'s
+  `fetch_article`, `services/notes.py`). The root fix is a `session_factory` signature; it spans three
+  subsystems and their tests. The knowledge base's own capture path already fetches outside a session.
+- **Task 3.3 (citations UI):** the entry's and Settings' activity lists print a compile row's raw JSON
+  `detail`; the duplicate banner on an entry does not name the other entry or carry the
+  "title alone" caveat the strip has.
+- **Task 4.1 (curation):** creating a proposed topic does not attach it to the entry that proposed it
+  (a recompile does); a note edit never recompiles; `new_topic` name/description are uncapped; a
+  cancelled capture leaves no trail row; the trail needs a real outcome column (P2-25);
+  `_prune_activity` runs `COUNT(*)` and an `OFFSET` walk on every activity write; the bulk panel's
+  "N saved" counts items that were already saved; "Needs attention" shows one shared error line for
+  seven actions; the two progress bars lack `role="progressbar"`; the bulk panel latches on
+  "Stopping…" if the cancel request itself fails.
+- **Task 4.4 (re-index):** P2-18; `embed_query` on every search is a paid Voyage call that writes no
+  metered row, so the Voyage counter under-reports searches.
+- **Anywhere it is cheap:** the compile estimate counts the user message only and came in about a
+  third under the real input (1.4K estimated, 2.1K billed) because the system prompt and the schema
+  are not in it — label it approximate, or count the real request; do **not** blind-add
+  `output_config` to `count_tokens` (P2-22 is that lesson). A refusal's token cost is recorded in the
+  trail but is not on the compile response.
 
 ---
 
