@@ -36,7 +36,6 @@ from sqlalchemy import Select, case, delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.config import Settings
 from app.db.engine import extension_status
 from app.db.models import Feed, FeedItem, utcnow
 from app.kb import capture as capture_module
@@ -150,9 +149,6 @@ class KbService:
     #: of an SSE stream). ``None`` means "no compile from this service": the agent's
     #: ``searchable()`` fallback and every test that builds one by hand.
     client_factory: Callable[[str], AsyncAnthropic] | None = None
-    #: This app's :class:`Settings`, for the documented key precedence
-    #: (process environment → ``.env`` → the key stored in the database).
-    settings: Settings | None = None
 
     @property
     def store(self) -> SqliteKnowledgeStore:
@@ -243,7 +239,6 @@ class KbService:
                 self.session_factory,
                 self.client_factory,
                 result.entry_id,
-                settings=self.settings,
                 embedder=self.embedder,
                 source="auto",
             ),
@@ -1027,7 +1022,6 @@ def searchable(session_factory: async_sessionmaker[AsyncSession]) -> KbService:
 async def for_request(
     session_factory: async_sessionmaker[AsyncSession],
     session: AsyncSession,
-    settings: Settings | None = None,
     client_factory: Callable[[str], AsyncAnthropic] | None = None,
 ) -> KbService:
     """The service for one request: keyword-only, or hybrid if a key is configured.
@@ -1041,9 +1035,8 @@ async def for_request(
     """
     return KbService(
         session_factory=session_factory,
-        embedder=await build_embedder(session, settings),
+        embedder=await build_embedder(session),
         client_factory=client_factory,
-        settings=settings,
     )
 
 

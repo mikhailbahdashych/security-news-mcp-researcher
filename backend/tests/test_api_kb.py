@@ -18,7 +18,6 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import build_anthropic_client, get_db, get_kb_service
-from app.config import Settings
 from app.db.models import Feed, FeedItem, Note, utcnow
 from app.kb.capture import capture_article
 from app.kb.models import KbActivity, KbEntry, KbEntryTopic, Topic
@@ -671,9 +670,7 @@ async def test_the_kb_dependency_hands_back_a_session_with_no_open_transaction(
     it for the whole request — across ``POST /kb/embed-pending``'s Voyage calls,
     which is the largest embed in the app. The dependency ends what it started.
     """
-    await get_kb_service(
-        db_session, session_factory, Settings(voyage_api_key=""), build_anthropic_client
-    )
+    await get_kb_service(db_session, session_factory, build_anthropic_client)
 
     assert db_session.in_transaction() is False
 

@@ -22,7 +22,6 @@ from sqlalchemy import func, select
 from app.agent import events as ev
 from app.agent.builtin import MODEL_TITLE_PREFIX, BuiltinToolProvider
 from app.agent.turns import RunningTurn, TurnRegistry
-from app.config import Settings
 from app.db.models import Message, ResearchSession
 from app.kb import capture as capture_module
 from app.kb import findings as findings_module
@@ -317,7 +316,6 @@ async def _run_turn(
     *,
     prompt: str = QUESTION,
     done: bool = True,
-    settings: Settings | None = None,
 ) -> tuple[RunningTurn, int, int]:
     """Drive one whole turn through the registry and wait for its cleanup."""
     chat_id, message_id = await _chat(session_factory)
@@ -332,7 +330,6 @@ async def _run_turn(
         client=None,
         prompt=prompt,
         attachments=[],
-        settings=settings,
     )
     await turn.task
     return turn, chat_id, message_id
@@ -575,22 +572,23 @@ async def test_deleting_the_chat_leaves_the_finding_with_its_source_ref(session_
     assert kept.source_ref == f"session {chat_id} turn {message_id}"
 
 
-async def test_the_embedder_is_built_from_the_turns_own_settings(session_factory, monkeypatch):
-    """A Voyage key in ``.env`` reaches the app as ``Settings`` and nowhere else.
+async def test_the_embedder_is_built_from_the_database(session_factory, monkeypatch):
+    """The capture runs after the request is gone, so it opens its own session.
 
-    The turn carries it because the embedder is built after the request is gone;
-    without it this would be the one capture path that quietly never embeds.
+    The key is a row in this database, so there is nothing to carry from the
+    request — but the embedder must still be built, on a live session, or this is
+    the one capture path that quietly never embeds.
     """
-    seen: list[Settings | None] = []
+    seen: list[object] = []
 
-    async def spy(session, settings=None):
-        seen.append(settings)
+    async def spy(session):
+        seen.append(session)
         return NullEmbedder()
 
     monkeypatch.setattr(findings_module, "build_embedder", spy)
     await _settings(session_factory, kb_capture_findings="true")
-    app_settings = Settings(voyage_api_key="vk-test")
 
-    await _run_turn(session_factory, CITED, settings=app_settings)
+    await _run_turn(session_factory, CITED)
 
-    assert seen == [app_settings]
+    assert len(seen) == 1
+    assert seen[0] is not None

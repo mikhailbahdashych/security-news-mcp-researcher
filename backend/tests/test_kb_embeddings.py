@@ -17,7 +17,6 @@ from sqlalchemy import select, text
 
 from app.agent.providers import build_tool_providers
 from app.api.deps import get_kb_service
-from app.config import Settings
 from app.kb.capture import embed_pending
 from app.kb.chunking import estimate_tokens
 from app.kb.embeddings import (
@@ -504,13 +503,12 @@ async def test_build_embedder_follows_the_configured_key(db_session, offline_voy
     await db_session.commit()
 
     assert await build_embedder(db_session) is offline_voyage
-    # A key that exists only in `.env` is just as configured.
+
+    # The stored row is the only source: clearing it turns embedding off again,
+    # whatever is in the environment.
     await settings_service.set_value(db_session, "voyage_api_key", "")
     await db_session.commit()
-    assert (
-        await build_embedder(db_session, Settings(voyage_api_key="pa-dotenv-0002"))
-        is offline_voyage
-    )
+    assert isinstance(await build_embedder(db_session), NullEmbedder)
 
 
 async def test_a_configured_voyage_key_makes_the_service_hybrid(

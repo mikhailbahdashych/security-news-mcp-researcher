@@ -55,13 +55,13 @@ Transport-agnostic: both streaming routes drive it through
 - The generator is safe to `aclose()` at any point: `CancelledError`/`GeneratorExit` is
   logged and **re-raised**; whatever was committed stays committed.
 
-Callers must not read settings themselves: `providers.py::turn_settings(session,
-app_settings)` returns `api_key` / `model` / `effort` / `thinking_display` /
+Callers must not read settings themselves: `providers.py::turn_settings(session)`
+returns `api_key` / `model` / `effort` / `thinking_display` /
 `max_tool_turns` / `system_prompt_extra` in one read, inside the request's own
 transaction and **before** the stream opens, so a settings edit mid-run cannot shift
 the prompt (and therefore the cache prefix) under a model that is already answering.
-`api_key` follows the env → `.env` → stored precedence in
-`app/services/settings.py::get_effective_api_key`.
+`api_key` is the stored row and nothing else
+(`app/services/settings.py::get_effective_api_key`) — there is no env override.
 
 Module constants: `FALLBACK_BETA = "server-side-fallback-2026-07-01"`,
 `FALLBACKS = "default"`, `MAX_TOKENS = 64_000`, `PREVIEW_CHARS = 600`.

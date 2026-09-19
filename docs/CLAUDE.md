@@ -14,7 +14,7 @@ before changing anything:
 
 | File | Covers |
 |---|---|
-| root `CLAUDE.md` | Product, ground rules, commands, `.env` / key precedence, the Anthropic + MCP gotcha list, delivery workflow |
+| root `CLAUDE.md` | Product, ground rules, commands, where the API keys live, the Anthropic + MCP gotcha list, delivery workflow |
 | `backend/CLAUDE.md` | App factory, `app.state`, module map, DB-session conventions, settings, the endpoint list, the SSE table, notes generation, cancellation, the test harness |
 | `backend/app/agent/CLAUDE.md` | The manual loop, `stop_reason` handling, container threading, persistence, `sanitize_for_replay`, the tool registry |
 | `backend/app/mcp/CLAUDE.md` | Config validation, the owner-task lifecycle, cooldown/retire/reload, namespacing, the MCP routes, the stdio subprocess environment |

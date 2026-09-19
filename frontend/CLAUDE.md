@@ -729,9 +729,9 @@ and model-authored findings.
   the four compile fields, the monthly budget, auto-accept, reviewed-only, the recency
   prior, the rerank flag and the duplicate threshold) and reads `GET /kb/budget` and
   `GET /kb/activity` live beside `GET /kb/stats`. **The Voyage key is written on its own
-  button** like the Anthropic one and read back only masked, and the hint reads
-  `voyage_key_source`, not `has_voyage_key`: a key from the environment is a working app
-  with nothing stored. **Embed now** loops `POST /kb/embed-pending` while `pending > 0`
+  button** like the Anthropic one and read back only masked; the hint reads
+  `has_voyage_key`, which is the whole truth — the database is the only place a key can
+  be. **Embed now** loops `POST /kb/embed-pending` while `pending > 0`
   — `components/settings/embedNow.ts::embedAgain` is the decision that ends it, tested on
   its own, including the case that used to spin. It is a loop the user started and can
   stop, not a poller.

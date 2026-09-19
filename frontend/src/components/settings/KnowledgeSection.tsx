@@ -171,9 +171,8 @@ export default function KnowledgeSection({ uid, draft, settings, onEdit }: Knowl
 /**
  * The Voyage credential.
  *
- * `voyage_key_source` is read exactly as `key_source` is for Anthropic: an
- * environment key overrides the stored one, so "no key configured" on the
- * strength of `has_voyage_key` alone would be a lie about a working app.
+ * Stored in the database and nowhere else, exactly like the Anthropic key, so
+ * `has_voyage_key` is the whole truth.
  */
 function VoyageKey({ settings, uid }: { settings: AppSettings; uid: string }) {
   const queryClient = useQueryClient()
@@ -193,16 +192,10 @@ function VoyageKey({ settings, uid }: { settings: AppSettings; uid: string }) {
     },
   })
 
-  const source = settings.voyage_key_source
   const masked = settings.voyage_api_key_masked || '…'
-  const hint =
-    source === 'env'
-      ? settings.has_voyage_key
-        ? `VOYAGE_API_KEY from the environment is in use; it overrides the stored key (${masked}).`
-        : 'VOYAGE_API_KEY from the environment is in use. Saving a key here stores one for when it is unset.'
-      : settings.has_voyage_key
-        ? `Currently set: ${masked}. Enter a new key to replace it.`
-        : 'No Voyage key configured — the knowledge base stays a keyword index until there is one.'
+  const hint = settings.has_voyage_key
+    ? `Currently set: ${masked}. Enter a new key to replace it.`
+    : 'No Voyage key configured — the knowledge base stays a keyword index until there is one.'
 
   return (
     <div className="flex flex-col gap-2">

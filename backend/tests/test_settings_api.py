@@ -6,10 +6,8 @@ import anthropic
 import httpx2
 import pytest
 from fakes.anthropic import FakeAnthropicClient, api_error
-from httpx2 import ASGITransport
 
 from app.api.deps import get_anthropic_client
-from app.config import Settings
 from app.kb import schema as kb_schema
 from app.services import settings as settings_service
 
@@ -37,7 +35,6 @@ async def test_get_settings_returns_seeded_defaults(client: httpx2.AsyncClient) 
         "thinking_display": "summarized",
         "has_api_key": False,
         "api_key_masked": "",
-        "key_source": "none",
         "web_search_enabled": True,
         "web_search_max_uses": 8,
         "web_fetch_enabled": True,
@@ -51,7 +48,6 @@ async def test_get_settings_returns_seeded_defaults(client: httpx2.AsyncClient) 
         "kb_schema_version": kb_schema.current_schema_version(),
         "has_voyage_key": False,
         "voyage_api_key_masked": "",
-        "voyage_key_source": "none",
         "kb_embedding_model": "voyage-4",
         "kb_embedding_models": ["voyage-4", "voyage-4-lite", "voyage-4-large"],
         "kb_capture_findings": False,
@@ -239,7 +235,7 @@ async def test_anthropic_client_is_closed_when_the_request_ends(db_session) -> N
     """The client owns an httpx2 pool; leaking one per request would leak sockets."""
     await settings_service.set_value(db_session, "anthropic_api_key", RAW_KEY)
 
-    dependency = get_anthropic_client(db_session, Settings(anthropic_api_key=""))
+    dependency = get_anthropic_client(db_session)
     client = await anext(dependency)
 
     assert client is not None
@@ -252,7 +248,7 @@ async def test_anthropic_client_is_closed_when_the_request_ends(db_session) -> N
 
 
 async def test_anthropic_client_is_none_without_a_key(db_session) -> None:
-    dependency = get_anthropic_client(db_session, Settings(anthropic_api_key=""))
+    dependency = get_anthropic_client(db_session)
 
     assert await anext(dependency) is None
 
@@ -260,12 +256,12 @@ async def test_anthropic_client_is_none_without_a_key(db_session) -> None:
         await anext(dependency)
 
 
-# ---------------------------------- the key that lives in .env, not the database
+# ------------------------------- the database is the only place a key can be
 
 
-#: Stands in for an ``ANTHROPIC_API_KEY=`` line in ``.env``: pydantic-settings puts
-#: it on ``Settings``, and never into ``os.environ``.
-DOTENV_KEY = "sk-ant-api03-from-the-dotenv-file-z9y8"
+#: A key in the process environment. It used to win over everything; now it is
+#: ignored, which is the property this section exists to hold.
+ENV_KEY = "sk-ant-api03-from-the-process-environment-p0q1"
 
 
 class ClosableFakeClient(FakeAnthropicClient):
@@ -276,137 +272,50 @@ class ClosableFakeClient(FakeAnthropicClient):
 
 
 @pytest.fixture
-def dotenv_app(app_factory, tmp_path, monkeypatch):
-    """An app whose ``Settings`` carry the key — and nothing else does.
-
-    The stub records the key ``get_anthropic_client`` built it with, so a test can
-    assert the whole path (``.env`` -> ``Settings`` -> effective key -> client)
-    rather than only the endpoint's answer.
-    """
+def built_keys(monkeypatch):
+    """Records the key ``get_anthropic_client`` actually built a client with."""
     built: list[str] = []
 
     def fake_build(api_key: str) -> ClosableFakeClient:
         built.append(api_key)
         return ClosableFakeClient()
 
-    monkeypatch.setattr("app.api.deps.build_anthropic_client", fake_build)
-    application = app_factory(
-        Settings(
-            db_path=tmp_path / "app.db",
-            anthropic_api_key=DOTENV_KEY,
-        )
-    )
-    return application, built
-
-
-@pytest.fixture
-async def dotenv_client(dotenv_app):
-    application, built = dotenv_app
-    async with httpx2.AsyncClient(
-        transport=ASGITransport(app=application), base_url="http://test"
-    ) as http:
-        yield http, built
-
-
-async def test_a_key_only_in_dotenv_is_used_for_the_live_check(dotenv_client) -> None:
-    """The bug this guards: ``.env.example`` advertised ``ANTHROPIC_API_KEY``, the
-    service read ``os.environ``, and a user who followed the README got "no API key
-    configured" with a perfectly good key on disk."""
-    http, built = dotenv_client
-
-    response = await http.post("/api/settings/test-key")
-
-    assert response.status_code == 200
-    assert response.json() == {"ok": True, "error": None}
-    assert built == [DOTENV_KEY]
-
-
-async def test_a_key_only_in_dotenv_leaves_has_api_key_false_but_names_the_source(
-    dotenv_client,
-) -> None:
-    """``has_api_key`` keeps meaning "stored here"; ``key_source`` explains the rest."""
-    http, _ = dotenv_client
-
-    body = (await http.get("/api/settings")).json()
-
-    assert body["has_api_key"] is False
-    assert body["api_key_masked"] == ""
-    assert body["key_source"] == "env"
-    # Still write-only: the raw key never travels, whichever source it came from.
-    assert DOTENV_KEY not in str(body)
-
-
-async def test_the_dotenv_key_is_never_written_to_the_database(dotenv_client) -> None:
-    http, _ = dotenv_client
-
-    await http.post("/api/settings/test-key")
-
-    assert (await http.get("/api/settings")).json()["has_api_key"] is False
-
-
-#: The other spelling of "configured outside the app": a real environment
-#: variable, which wins over both ``.env`` and the database.
-ENV_KEY = "sk-ant-api03-from-the-process-environment-p0q1"
-
-
-@pytest.fixture
-def env_key_client(app, monkeypatch):
-    """The app plus ``ANTHROPIC_API_KEY`` in the process environment.
-
-    ``isolated_api_key_env`` deletes the variable for every test, so setting it
-    here is the only way it is ever present — and the stub records the key the
-    dependency built a client with, which is the half of the path an assertion on
-    ``key_source`` alone would miss.
-    """
-    built: list[str] = []
-
-    def fake_build(api_key: str) -> ClosableFakeClient:
-        built.append(api_key)
-        return ClosableFakeClient()
-
-    monkeypatch.setenv(settings_service.API_KEY_ENV_VAR, ENV_KEY)
     monkeypatch.setattr("app.api.deps.build_anthropic_client", fake_build)
     return built
 
 
-async def test_the_environment_key_is_used_and_named_as_the_source(
-    client: httpx2.AsyncClient, env_key_client
+async def test_an_environment_key_is_ignored_entirely(
+    client: httpx2.AsyncClient, built_keys, monkeypatch
 ) -> None:
-    built = env_key_client
+    """An ``ANTHROPIC_API_KEY`` left in a shell must not spend anything.
 
-    settings_body = (await client.get("/api/settings")).json()
+    It used to override the stored key, which meant the Settings page could show
+    one key while the app billed another. The database row is now the only source.
+    """
+    monkeypatch.setenv("ANTHROPIC_API_KEY", ENV_KEY)
+
+    body = (await client.get("/api/settings")).json()
     test_key = await client.post("/api/settings/test-key")
 
-    # Nothing is stored, and the app still works — which is what `key_source` is
-    # there to explain.
-    assert settings_body["has_api_key"] is False
-    assert settings_body["key_source"] == "env"
-    assert test_key.json() == {"ok": True, "error": None}
-    assert built == [ENV_KEY]
-    assert ENV_KEY not in str(settings_body)
+    assert body["has_api_key"] is False
+    assert test_key.json() == {"ok": False, "error": "no API key configured"}
+    assert built_keys == []
 
 
-async def test_the_environment_key_beats_a_stored_one_and_is_never_written_down(
-    client: httpx2.AsyncClient, env_key_client
+async def test_the_stored_key_is_the_one_the_client_is_built_with(
+    client: httpx2.AsyncClient, built_keys, monkeypatch
 ) -> None:
-    built = env_key_client
+    monkeypatch.setenv("ANTHROPIC_API_KEY", ENV_KEY)
     await client.put("/api/settings", json={"anthropic_api_key": RAW_KEY})
 
     body = (await client.get("/api/settings")).json()
     await client.post("/api/settings/test-key")
 
-    # The stored key is still stored — it is just not the one being used.
     assert body["has_api_key"] is True
-    assert body["key_source"] == "env"
-    assert built == [ENV_KEY]
-
-
-async def test_key_source_is_stored_once_a_key_is_saved(client: httpx2.AsyncClient) -> None:
-    assert (await client.get("/api/settings")).json()["key_source"] == "none"
-
-    await client.put("/api/settings", json={"anthropic_api_key": RAW_KEY})
-
-    assert (await client.get("/api/settings")).json()["key_source"] == "stored"
+    assert built_keys == [RAW_KEY]
+    # Still write-only, whatever else is in the environment.
+    assert RAW_KEY not in str(body)
+    assert ENV_KEY not in str(body)
 
 
 # ------------------------------------------------- the Voyage key and Phase 2
@@ -420,7 +329,6 @@ async def test_the_voyage_key_is_only_ever_read_back_masked(client: httpx2.Async
     for response in (put_response, get_response):
         body = response.json()
         assert body["has_voyage_key"] is True
-        assert body["voyage_key_source"] == "stored"
         assert body["voyage_api_key_masked"] == "…c3d4"
         assert RAW_VOYAGE_KEY not in response.text
         assert "voyagesupersecret" not in response.text
@@ -431,37 +339,15 @@ async def test_the_voyage_key_is_only_ever_read_back_masked(client: httpx2.Async
     assert cleared["voyage_api_key_masked"] == ""
 
 
-async def test_the_voyage_env_override_wins_over_the_stored_key(
-    client: httpx2.AsyncClient, app_factory, tmp_path, monkeypatch
+async def test_a_voyage_key_in_the_environment_is_ignored(
+    client: httpx2.AsyncClient, monkeypatch
 ) -> None:
-    """``has_voyage_key`` keeps meaning "stored here"; the source explains the rest."""
-    monkeypatch.setenv(settings_service.VOYAGE_KEY_ENV_VAR, "pa-from-the-environment-0001")
+    """Same single source as the Anthropic key, and the same guard."""
+    monkeypatch.setenv("VOYAGE_API_KEY", "pa-from-the-environment-0001")
 
     body = (await client.get("/api/settings")).json()
+
     assert body["has_voyage_key"] is False
-    assert body["voyage_key_source"] == "env"
-
-    await client.put("/api/settings", json={"voyage_api_key": RAW_VOYAGE_KEY})
-    stored_too = (await client.get("/api/settings")).json()
-    assert stored_too["has_voyage_key"] is True
-    assert stored_too["voyage_key_source"] == "env"
-
-    # The other spelling of "configured outside the app": a key in `.env`, which
-    # reaches the app as `Settings` and never as an environment variable.
-    monkeypatch.delenv(settings_service.VOYAGE_KEY_ENV_VAR, raising=False)
-    dotenv_app = app_factory(
-        Settings(
-            db_path=tmp_path / "app.db",
-            anthropic_api_key="",
-            voyage_api_key="pa-from-the-dotenv-0002",
-        )
-    )
-    async with httpx2.AsyncClient(
-        transport=ASGITransport(app=dotenv_app), base_url="http://test"
-    ) as http:
-        from_dotenv = (await http.get("/api/settings")).json()
-    assert from_dotenv["voyage_key_source"] == "env"
-    assert "pa-from-the-dotenv-0002" not in str(from_dotenv)
 
 
 PHASE_TWO_SETTINGS = {

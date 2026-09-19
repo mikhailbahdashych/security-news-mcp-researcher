@@ -27,18 +27,10 @@ authentication either — that is the same decision seen from the other side.
 
 ## The Anthropic API key
 
-Set it either way — both work, neither is written to the other:
-
-- **Settings → Anthropic API key** in the app. Stored in the SQLite database and
-  only ever read back masked (`sk-ant-…a1b2`).
-- **`ANTHROPIC_API_KEY`** in `.env` (copied from `.env.example`) or in the real
-  process environment (`ANTHROPIC_API_KEY=... make dev-api`).
-
-Precedence is process environment, then `.env`, then the stored key; an externally
-supplied key overrides the stored one and is never saved to the database. `GET
-/api/settings` reports which one is in force as `key_source`
-(`env` / `stored` / `none`), while `has_api_key` means only "a key is stored in
-this database".
+**Settings → Anthropic API key** in the app, and nowhere else. It is stored in the
+SQLite database, write-only over the API, and only ever read back masked
+(`sk-ant-…a1b2`). There is no environment variable and no `.env` override: one key,
+one place, and the page always shows the key that is actually being spent.
 
 ## The inbox
 
@@ -81,8 +73,8 @@ down is still readable. Save a whole Inbox selection at once with **Save to know
 base** — it streams its progress and can be stopped, and what was already saved stays.
 
 Search works with no extra key: it is SQLite FTS5 over the snapshots. For **semantic
-search**, put a Voyage AI key in **Settings → Knowledge** (or `VOYAGE_API_KEY` in `.env`,
-same precedence as the Anthropic key, and it is only ever read back masked), then press
+search**, put a Voyage AI key in **Settings → Knowledge** (same rules as the Anthropic
+key: stored in the database, read back only masked), then press
 **Embed now** to work through anything captured before the key existed. From then on a
 search runs both legs and each hit says which one found it.
 

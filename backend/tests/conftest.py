@@ -12,22 +12,6 @@ from app.config import Settings
 from app.db.engine import create_db_engine, create_session_factory
 from app.db.init import init_db
 from app.main import create_app
-from app.services import settings as settings_service
-
-
-@pytest.fixture(autouse=True)
-def isolated_api_key_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep an ambient ``ANTHROPIC_API_KEY`` out of the suite.
-
-    Without this, a developer who exports a real key would have the "no key
-    configured" tests quietly make live API calls. Tests that want the override
-    set it themselves.
-    """
-    monkeypatch.delenv(settings_service.API_KEY_ENV_VAR, raising=False)
-    # The Voyage key has the same precedence and the same trap: with a real one
-    # in the environment, every capture in the suite would try to embed.
-    monkeypatch.delenv(settings_service.VOYAGE_KEY_ENV_VAR, raising=False)
-
 
 #: A public address (example.com's). The stub resolver below hands it out so that
 #: fixture hostnames like ``example.test`` pass the outbound-URL guard.
@@ -89,7 +73,7 @@ def app_factory(db_engine: AsyncEngine):
 
     ``ASGITransport`` does not run the lifespan, so the schema is created by the
     ``db_engine`` fixture and ``get_db`` is overridden to use it. Tests that need
-    an app with different settings — the ``.env`` API key, a log level — build one
+    an app with different settings — a log level, another database — build one
     here rather than re-deriving the overrides.
     """
 
@@ -113,18 +97,10 @@ def app(app_factory, tmp_path) -> FastAPI:
     """The application wired to the test database.
 
     The app's own settings name the same database file so the two cannot drift
-    apart, and ``anthropic_api_key`` is pinned empty for the same reason
-    ``isolated_api_key_env`` deletes the environment variable: ``Settings`` reads
-    ``.env``, so a developer with a real key in theirs would otherwise turn every
-    "no key configured" test into a live API call.
+    apart. Nothing else needs pinning: an API key can only come from the database,
+    and every test gets an empty one.
     """
-    return app_factory(
-        Settings(
-            db_path=tmp_path / "app.db",
-            anthropic_api_key="",
-            voyage_api_key="",
-        )
-    )
+    return app_factory(Settings(db_path=tmp_path / "app.db"))
 
 
 @pytest.fixture

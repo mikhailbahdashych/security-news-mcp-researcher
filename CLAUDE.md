@@ -91,7 +91,7 @@ history.
 **`.env`.** Copy `.env.example` → `.env`. `app.config.Settings` reads it via
 pydantic-settings (`env_file=("../.env", ".env")`, so it works whether you run from
 the repo root or from `backend/`). Fields: `DB_PATH`, `PORT`,
-`ANTHROPIC_API_KEY`, `VOYAGE_API_KEY`, `LOG_LEVEL`. `PORT` is honoured by
+`LOG_LEVEL`. `PORT` is honoured by
 `make dev-api`, because it goes through `python -m app` (`backend/app/__main__.py`),
 which reads `Settings.port`.
 
@@ -99,22 +99,17 @@ which reads `Settings.port`.
 same-origin and the app adds no `CORSMiddleware` — do not add one back. An API with no
 authentication at all, holding the user's Anthropic key, must not invite other origins.
 
-**API-key precedence: process environment → `.env` (i.e. `Settings.anthropic_api_key`)
-→ the key stored in the DB.** `app/services/settings.py::external_api_key` reads
-`os.environ` first and falls back to the `Settings` field — pydantic-settings loads
-`.env` into its own fields and never exports it to `os.environ`, so reading the
-environment alone would silently ignore a key written into `.env`. Neither external
-value is ever written back to the DB. `GET /api/settings` reports the winner as
-`key_source` (`env` / `stored` / `none`); `has_api_key` means only "a key is stored
-in *this database*".
+**Both API keys have exactly one source: the row in this database.** The Anthropic key
+and the Voyage key are written through the Settings page, read back through
+`app/services/settings.py::get_effective_api_key` / `get_effective_voyage_key`, and
+exposed only as `has_api_key` / `api_key_masked` and `has_voyage_key` /
+`voyage_api_key_masked`. **There is no environment or `.env` override and no
+`key_source`** — a key in a shell must never be able to spend money on an app whose
+Settings page shows a different key. Do not add the precedence back.
 
-**The Voyage key mirrors it exactly** (`external_voyage_key` /
-`get_effective_voyage_key` / `get_voyage_key_source`, same module): process environment
-`VOYAGE_API_KEY` → `.env` (`Settings.voyage_api_key`) → the row in the DB, written over
-the API and read back only as `voyage_api_key_masked`, reported as `voyage_key_source`,
-with `has_voyage_key` again meaning only "stored in *this database*". With no key the
-knowledge base is a keyword index and everything still works; entering one and pressing
-**Embed now** (`POST /api/kb/embed-pending`) embeds the backlog.
+With no Voyage key the knowledge base is a keyword index and everything still works;
+entering one and pressing **Embed now** (`POST /api/kb/embed-pending`) embeds the
+backlog.
 
 **`LOG_LEVEL`** is applied by `app/logging_config.py::configure_logging`, called from
 `create_app` before anything else. It is idempotent (one named handler, re-levelled)

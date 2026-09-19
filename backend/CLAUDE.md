@@ -65,7 +65,7 @@ uvicorn's own loggers alone. Without it every `app.*` record had no handler at a
 | `app/db/util.py` | `matches(column, value)` / `escape_like` / `like_pattern` / `LIKE_ESCAPE_CHAR` — **the** substring-match rule for the whole app. |
 | `app/schemas/` | Pydantic request/response models, one module per domain, plus `common.py` for what genuinely crosses domains (`CancelResponse`). The bulk job's two request bodies are `kb_bulk.py` (its *responses* are SSE frames, not models); everything else knowledge-base is `kb.py`. |
 | `app/api/` | Routers (`health`, `settings`, `models`, `feeds`, `items`, `sessions`, `notes`, `search`, `kb`, `kb_bulk`, `kb_compile`, `mcp`) wired in `app/api/__init__.py`; `deps.py`; `streaming.py` (shared SSE plumbing, **not** a router); `tasks.py` (**not** a router — the cancel registry, notes and the bulk job). `kb_bulk.py` (the streamed selection save) and `kb_compile.py` (compile, estimate, budget) are their own modules under the same `/api/kb` prefix, per plan decision P2-2. |
-| `app/services/` | Domain logic, no FastAPI imports: `settings` (kv store + key precedence), `feeds` (ingest), `extract` (trafilatura), `items` (inbox queries + keyset cursor + the public `sort_key()`), `notes` (context, sources, save), `search` (cross-entity queries), `http` (UA/timeout policy + the browser-TLS transport), `url_guard` (SSRF + body/time caps), `anthropic_models` (model list + key check, 1 h in-process cache keyed on a digest of the key). |
+| `app/services/` | Domain logic, no FastAPI imports: `settings` (kv store, incl. both API keys), `feeds` (ingest), `extract` (trafilatura), `items` (inbox queries + keyset cursor + the public `sort_key()`), `notes` (context, sources, save), `search` (cross-entity queries), `http` (UA/timeout policy + the browser-TLS transport), `url_guard` (SSRF + body/time caps), `anthropic_models` (model list + key check, 1 h in-process cache keyed on a digest of the key). |
 | `app/agent/` | The agent loop, the tool registry, the **turn registry** (`turns.py`, `turnlog.py`) and `oneshot.py` — the one non-streaming, non-turn Anthropic call, which compile uses. See `app/agent/CLAUDE.md`. |
 | `app/mcp/` | The MCP client — see `app/mcp/CLAUDE.md`. |
 | `app/kb/` | The knowledge base: `models` (its tables), `schema` (the two **frozen** virtual tables, their versions and the rebuilds), `chunking`, `fts`, `entities`, `embeddings` (the `Embedder` protocol, `VoyageEmbedder`, the token batcher, `l2_normalise`), `store`, `retrieval`, `urls` (canonicalisation), `capture` (the writes, the activity trail and the near-duplicate check), `bulk` (the cancellable selection job), `compile` (the model summary + its budget), `prompts` (the compile schema and renderer), `findings` (a chat turn kept as an entry), `service` (`KbService`, the one door). |
@@ -165,16 +165,12 @@ knowledge base's two virtual tables were actually built with
 `app/kb/schema.py::index_status` can compare the file with the constants in this
 build. Nothing rewrites it except a rebuild.
 
-**Key precedence: process environment → `Settings.anthropic_api_key` (i.e. `.env`) →
-the stored row.** `external_api_key(settings)` covers the first two; `get_effective_api_key`
-adds the third; `get_key_source` names the winner (`"env"` / `"stored"` / `"none"`) for
-`GET /api/settings`. Neither external value is ever written back. `has_api_key` in the
-response means only "a key is stored **in this database**". `mask_key` is the only shape
-the key may take in a response or a log. `seed_defaults` only inserts missing keys.
-The **Voyage** key is the same three sources in the same order, through
-`external_voyage_key` / `get_effective_voyage_key` / `get_voyage_key_source`
-(`VOYAGE_KEY_ENV_VAR`), reported as `voyage_key_source` / `has_voyage_key` /
-`voyage_api_key_masked`.
+**Both keys have one source: the stored row.** `get_effective_api_key(session)` and
+`get_effective_voyage_key(session)` each read one setting and nothing else — **no
+environment, no `.env`, no `key_source`**. `GET /api/settings` reports `has_api_key` /
+`api_key_masked` and `has_voyage_key` / `voyage_api_key_masked`, which is the whole
+truth now that the database is the only place a key can be. `mask_key` is the only shape
+a key may take in a response or a log. `seed_defaults` only inserts missing keys.
 
 ## Endpoints
 
@@ -694,11 +690,7 @@ There is **no `tests/__init__.py`**, so pytest puts `tests/` on `sys.path`: help
 imported either as `from fakes.anthropic import ...` or `from tests.feed_fixtures import ...`
 (the latter works because `pythonpath = ["."]`). Both spellings are in use.
 
-`conftest.py` fixtures: **`isolated_api_key_env`** (autouse) deletes `ANTHROPIC_API_KEY`
-**and `VOYAGE_API_KEY`** so a developer's real key can never turn a "no key" test into a
-live call — and the `app` fixture pins both `Settings` fields to `""`, because a key in
-the repo-root `.env` is loaded by pydantic-settings and would make `key_source` /
-`voyage_key_source` come back `env`; **`offline_dns`** (autouse) stubs `socket.getaddrinfo` to a public address
+`conftest.py` fixtures: **`offline_dns`** (autouse) stubs `socket.getaddrinfo` to a public address
 so fixture hosts (`example.test`) pass the URL guard without a resolver; **`db_engine`**
 is a real temp-file SQLite DB per test (not `:memory:`, so WAL and the FK pragma behave
 as in production), initialised via `init_db`; then `session_factory`, `db_session`,

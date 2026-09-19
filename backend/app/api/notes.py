@@ -27,7 +27,7 @@ from app.agent import runner as agent_runner
 from app.agent.providers import build_tool_providers, turn_settings
 from app.agent.registry import ToolRegistry
 from app.api import tasks as task_registry
-from app.api.deps import AppSettings, ChatClientFactory, DbSession, KbServiceDep, SessionFactory
+from app.api.deps import ChatClientFactory, DbSession, KbServiceDep, SessionFactory
 from app.api.streaming import (
     SSE_HEADERS,
     SSE_PING_S,
@@ -81,7 +81,6 @@ async def generate_note(
     session: DbSession,
     session_factory: SessionFactory,
     client_factory: ChatClientFactory,
-    app_settings: AppSettings,
     kb: KbServiceDep,
 ) -> Response:
     """Generate a note from starred items and/or a research session, streamed."""
@@ -92,7 +91,7 @@ async def generate_note(
             status.HTTP_409_CONFLICT, detail="That generation is already running."
         )
 
-    resolved = await turn_settings(session, app_settings)
+    resolved = await turn_settings(session)
     if not resolved["api_key"]:
         # Checked *before* the context is built: assembly fetches and extracts the
         # article behind every item that has no stored text, so running it first

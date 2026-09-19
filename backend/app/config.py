@@ -23,17 +23,9 @@ class Settings(BaseSettings):
     #: from ``.env`` (pydantic-settings never exports a ``.env`` value to
     #: ``os.environ``, so uvicorn's own ``$PORT`` would not see it).
     port: int = 8000
-    #: Optional ``ANTHROPIC_API_KEY``. This field is the *only* reason a key written
-    #: into ``.env`` works at all: pydantic-settings reads ``.env`` into these fields
-    #: and never exports it to ``os.environ``, so a service reading the environment
-    #: directly would never see it. It is read through
-    #: ``app.services.settings.get_effective_api_key`` and is never written to the
-    #: database — see the precedence rules there.
-    anthropic_api_key: str = ""
-    #: Optional ``VOYAGE_API_KEY`` for the knowledge base's embeddings. Same story
-    #: and same precedence as the Anthropic key above — see
-    #: ``app.services.settings.get_effective_voyage_key``.
-    voyage_api_key: str = ""
+    # No API keys here. The Anthropic and Voyage keys live in the database, are
+    # written through the Settings page and are read back only masked — one
+    # source, not three. Do not add an env override back.
     #: Root log level for the application's own loggers; see ``app.logging_config``.
     log_level: str = "INFO"
 

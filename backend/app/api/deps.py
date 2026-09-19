@@ -10,7 +10,6 @@ from fastapi import Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agent.turns import TurnRegistry
-from app.config import Settings
 from app.kb.service import KbService, for_request
 from app.mcp.manager import McpManager
 from app.services import settings as settings_service
@@ -76,27 +75,9 @@ def get_mcp_manager(request: Request) -> McpManager:
 McpManagerDep = Annotated[McpManager, Depends(get_mcp_manager)]
 
 
-def get_app_settings(request: Request) -> Settings:
-    """This app's :class:`Settings`, put on ``app.state`` by ``create_app``.
-
-    Reached through a dependency rather than the module-level ``app.config.settings``
-    so that an app built with ``create_app(Settings(...))`` — every test, and any
-    second app in one process — really does get its own values. The only field
-    routes read from it today is ``anthropic_api_key`` (``.env``'s key).
-    """
-    settings = getattr(request.app.state, "settings", None)
-    if settings is None:  # pragma: no cover - create_app always sets it
-        raise RuntimeError("Settings are missing from app.state.")
-    return settings
-
-
-AppSettings = Annotated[Settings, Depends(get_app_settings)]
-
-
 async def get_kb_service(
     session: DbSession,
     session_factory: SessionFactory,
-    settings: AppSettings,
     client_factory: ChatClientFactory,
 ) -> KbService:
     """The knowledge base, over this app's database.
@@ -122,7 +103,7 @@ async def get_kb_service(
     stream, and a yield-dependency's client is already closed by then. The factory
     is a plain function, holds nothing, and compile closes what it builds.
     """
-    service = await for_request(session_factory, session, settings, client_factory)
+    service = await for_request(session_factory, session, client_factory)
     await session.commit()
     return service
 
@@ -136,9 +117,7 @@ def build_anthropic_client(api_key: str) -> AsyncAnthropic:
     return AsyncAnthropic(api_key=api_key)
 
 
-async def get_anthropic_client(
-    session: DbSession, settings: AppSettings
-) -> AsyncIterator[AsyncAnthropic | None]:
+async def get_anthropic_client(session: DbSession) -> AsyncIterator[AsyncAnthropic | None]:
     """A client built from the effective API key, or ``None`` when none is configured.
 
     The client owns an httpx2 connection pool, so it is closed when the request ends;
@@ -149,7 +128,7 @@ async def get_anthropic_client(
     Returning ``None`` rather than raising keeps "no key yet" an ordinary state for
     the settings page. Tests override this dependency with a stub client.
     """
-    api_key = await settings_service.get_effective_api_key(session, settings)
+    api_key = await settings_service.get_effective_api_key(session)
     if not api_key:
         yield None
         return
@@ -200,7 +179,6 @@ TurnRegistryDep = Annotated[TurnRegistry, Depends(get_turn_registry)]
 
 __all__ = [
     "AnthropicClient",
-    "AppSettings",
     "ChatClientFactory",
     "DbSession",
     "KbServiceDep",
@@ -209,7 +187,6 @@ __all__ = [
     "TurnRegistryDep",
     "build_anthropic_client",
     "get_anthropic_client",
-    "get_app_settings",
     "get_chat_client_factory",
     "get_db",
     "get_kb_service",

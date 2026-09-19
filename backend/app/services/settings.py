@@ -1,10 +1,10 @@
 """The application's key/value settings store.
 
 Everything configurable lives in the ``settings`` table as TEXT, with the typed
-accessors below doing the parsing. Callers read through :func:`get_effective_api_key`
-rather than the raw key so that an ``ANTHROPIC_API_KEY`` supplied from outside the
-database — the process environment, or ``.env`` by way of :class:`app.config.Settings`
-— can override the stored value without ever being written to the database.
+accessors below doing the parsing. That includes the Anthropic and Voyage keys:
+the database row written through the Settings page is the **only** source, read
+back through :func:`get_effective_api_key` / :func:`get_effective_voyage_key`.
+There is no environment override — do not add one back.
 
 The raw API key must never reach a response body or a log line — use
 :func:`mask_key` for anything user-visible.
@@ -13,27 +13,16 @@ The raw API key must never reach a response body or a log line — use
 from __future__ import annotations
 
 import logging
-import os
 from collections.abc import Mapping
-from typing import Literal
 
 from sqlalchemy import select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import Settings
 from app.db.models import Setting, utcnow
 from app.kb.schema import KB_SCHEMA_VERSION_KEY, default_schema_version
 
 logger = logging.getLogger(__name__)
-
-API_KEY_ENV_VAR = "ANTHROPIC_API_KEY"
-VOYAGE_KEY_ENV_VAR = "VOYAGE_API_KEY"
-
-#: Where the key actually used for Anthropic calls came from. ``"env"`` covers both
-#: spellings of "configured outside the app" — the process environment and the
-#: ``ANTHROPIC_API_KEY`` line of ``.env``, which reaches us as ``Settings``.
-KeySource = Literal["env", "stored", "none"]
 
 DEFAULT_NOTE_TEMPLATE = """For each news item, produce a section with these headings:
 ## {Item title}
@@ -254,94 +243,21 @@ async def get_float(session: AsyncSession, key: str) -> float:
     return _parse_float(await get(session, key), key)
 
 
-def external_api_key(settings: Settings | None = None) -> str:
-    """The key configured outside the database, or ``""``.
+async def get_effective_api_key(session: AsyncSession) -> str:
+    """The API key used for Anthropic calls: the row stored in this database.
 
-    Two places count, in this order: the real process environment
-    (``ANTHROPIC_API_KEY=... make dev-api``), then the app's :class:`Settings`,
-    which is what actually loads a key written into ``.env`` — pydantic-settings
-    reads ``.env`` into its own fields and never exports it to ``os.environ``, so
-    reading the environment alone silently ignored it.
-
-    ``settings`` is optional so that this stays a plain service function: passing
-    ``None`` means "no ``Settings`` source", which is what a caller that has no app
-    handy (and every test that has not opted in) wants.
+    Written over the API by the Settings page, read back only masked. There is no
+    environment or ``.env`` override — this is the single source.
     """
-    from_env = (os.environ.get(API_KEY_ENV_VAR) or "").strip()
-    if from_env:
-        return from_env
-    return (settings.anthropic_api_key or "").strip() if settings is not None else ""
-
-
-async def get_effective_api_key(session: AsyncSession, settings: Settings | None = None) -> str:
-    """The API key actually used for Anthropic calls.
-
-    Precedence: process environment, then the app ``Settings`` (i.e. ``.env``),
-    then the key stored in the database. Neither external value is ever written
-    back to the database.
-    """
-    external = external_api_key(settings)
-    if external:
-        return external
     return (await get(session, "anthropic_api_key") or "").strip()
 
 
-async def get_key_source(session: AsyncSession, settings: Settings | None = None) -> KeySource:
-    """Which of the three sources :func:`get_effective_api_key` would use.
+async def get_effective_voyage_key(session: AsyncSession) -> str:
+    """The key used for Voyage embedding calls: the row stored in this database.
 
-    Purely informational: ``has_api_key`` still means "a key is stored in this
-    database", so the Settings page can keep saying whether *its* key is set while
-    still telling the user that an external one is overriding it.
+    Same single source, same rules, as :func:`get_effective_api_key`.
     """
-    if external_api_key(settings):
-        return "env"
-    if (await get(session, "anthropic_api_key") or "").strip():
-        return "stored"
-    return "none"
-
-
-def external_voyage_key(settings: Settings | None = None) -> str:
-    """The Voyage key configured outside the database, or ``""``.
-
-    The same two places, in the same order, as :func:`external_api_key`: the real
-    process environment (``VOYAGE_API_KEY=... make dev-api``), then the app's
-    :class:`Settings`, which is what actually loads a key written into ``.env`` —
-    pydantic-settings reads ``.env`` into its own fields and never exports it to
-    ``os.environ``, so reading the environment alone silently ignores it.
-    """
-    from_env = (os.environ.get(VOYAGE_KEY_ENV_VAR) or "").strip()
-    if from_env:
-        return from_env
-    return (settings.voyage_api_key or "").strip() if settings is not None else ""
-
-
-async def get_effective_voyage_key(session: AsyncSession, settings: Settings | None = None) -> str:
-    """The key actually used for Voyage embedding calls.
-
-    Precedence: process environment, then the app ``Settings`` (i.e. ``.env``),
-    then the key stored in the database. Neither external value is ever written
-    back to the database.
-    """
-    external = external_voyage_key(settings)
-    if external:
-        return external
     return (await get(session, "voyage_api_key") or "").strip()
-
-
-async def get_voyage_key_source(
-    session: AsyncSession, settings: Settings | None = None
-) -> KeySource:
-    """Which of the three sources :func:`get_effective_voyage_key` would use.
-
-    Informational, exactly like :func:`get_key_source`: ``has_voyage_key`` still
-    means "a key is stored in this database", so "no key stored and embeddings
-    working" is a state the Settings page can explain rather than contradict.
-    """
-    if external_voyage_key(settings):
-        return "env"
-    if (await get(session, "voyage_api_key") or "").strip():
-        return "stored"
-    return "none"
 
 
 def _parse_bool(value: str | None, key: str) -> bool:
@@ -379,15 +295,10 @@ def _parse_float(value: str | None, key: str) -> float:
 
 __all__ = [
     "ALLOWED_VALUES",
-    "API_KEY_ENV_VAR",
     "COMPILE_PROMPT_VERSION",
     "DEFAULT_COMPILE_PROMPT",
     "DEFAULT_NOTE_TEMPLATE",
     "DEFAULT_SETTINGS",
-    "VOYAGE_KEY_ENV_VAR",
-    "KeySource",
-    "external_api_key",
-    "external_voyage_key",
     "get",
     "get_all",
     "get_bool",
@@ -396,9 +307,7 @@ __all__ = [
     "get_effective_voyage_key",
     "get_float",
     "get_int",
-    "get_key_source",
     "get_str",
-    "get_voyage_key_source",
     "mask_key",
     "seed_defaults",
     "set_many",
