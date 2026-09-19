@@ -226,7 +226,7 @@ async def test_startup_warns_once_when_curl_cffi_is_missing(
     # The seam, not the installed wheel: both branches have to be testable on an
     # install that has it and on one that does not.
     monkeypatch.setattr(http_service, "_CurlAsyncSession", None)
-    application = create_app(Settings(db_path=tmp_path / "app.db", static_dir=tmp_path / "gone"))
+    application = create_app(Settings(db_path=tmp_path / "app.db"))
 
     with caplog.at_level(logging.WARNING, logger="app.main"):
         async with lifespan(application):
@@ -247,7 +247,7 @@ async def test_startup_is_silent_when_the_wheel_is_there(
     from app.main import create_app, lifespan
 
     monkeypatch.setattr(http_service, "_CurlAsyncSession", object())
-    application = create_app(Settings(db_path=tmp_path / "app.db", static_dir=tmp_path / "gone"))
+    application = create_app(Settings(db_path=tmp_path / "app.db"))
 
     with caplog.at_level(logging.WARNING, logger="app.main"):
         async with lifespan(application):

@@ -39,7 +39,6 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agent.oneshot import OneshotError, RefusalError, structured_call_result
-from app.config import Settings
 from app.db.models import utcnow
 from app.kb import capture as capture_module
 from app.kb.chunking import estimate_tokens
@@ -182,7 +181,6 @@ async def _plan(session_factory: async_sessionmaker[AsyncSession], entry_id: int
 async def build_client(
     session_factory: async_sessionmaker[AsyncSession],
     client_factory: Callable[[str], AsyncAnthropic],
-    settings: Settings | None = None,
 ) -> AsyncAnthropic | None:
     """A client from the effective key, or ``None`` when none is configured.
 
@@ -192,7 +190,7 @@ async def build_client(
     it gets back.
     """
     async with session_factory() as session:
-        api_key = await settings_service.get_effective_api_key(session, settings)
+        api_key = await settings_service.get_effective_api_key(session)
     return client_factory(api_key) if api_key else None
 
 
@@ -306,7 +304,6 @@ async def compile_entry(
     client_factory: Callable[[str], AsyncAnthropic],
     entry_id: int,
     *,
-    settings: Settings | None = None,
     embedder: Embedder | None = None,
     source: str = "compile",
 ) -> CompileResult:
@@ -336,7 +333,7 @@ async def compile_entry(
             detail=f"needs about {estimate} tokens",
         )
 
-    client = await build_client(session_factory, client_factory, settings)
+    client = await build_client(session_factory, client_factory)
     if client is None:
         return await _skip(
             session_factory,

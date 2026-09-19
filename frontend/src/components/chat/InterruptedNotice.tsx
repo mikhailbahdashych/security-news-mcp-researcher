@@ -4,8 +4,8 @@ import Icon from '../ui/Icon'
 /**
  * A turn the backend did not finish, because the backend went away.
  *
- * A turn is a task in the server process, so a restart — a `--reload` in dev, a
- * `docker compose up` — ends it wherever it had got to. The runner persists as
+ * A turn is a task in the server process, so a restart — a `--reload` picking up
+ * an edit, a Ctrl-C — ends it wherever it had got to. The runner persists as
  * it goes, so the answer is not lost, it is only cut short; the row is marked
  * `interrupted` on the next startup and this is how the user hears about it.
  *

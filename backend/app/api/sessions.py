@@ -29,7 +29,6 @@ from app.agent.providers import build_tool_providers, turn_settings
 from app.agent.registry import ToolRegistry
 from app.agent.turns import TurnAlreadyRunning, TurnStartFailed
 from app.api.deps import (
-    AppSettings,
     ChatClientFactory,
     DbSession,
     SessionFactory,
@@ -300,7 +299,6 @@ async def post_message(
     session: DbSession,
     session_factory: SessionFactory,
     client_factory: ChatClientFactory,
-    app_settings: AppSettings,
     registry: TurnRegistryDep,
 ) -> TurnAccepted:
     """Start one agent turn in the background; attach to ``/stream`` to watch it."""
@@ -310,7 +308,7 @@ async def post_message(
             status.HTTP_409_CONFLICT, detail="A turn is already running for this session."
         )
 
-    resolved = await turn_settings(session, app_settings)
+    resolved = await turn_settings(session)
     blocks, chips = await _resolve_attachments(session, payload.attached_item_ids)
     user_content: list[dict[str, Any]] = [{"type": "text", "text": payload.content}, *blocks]
 
@@ -355,9 +353,6 @@ async def post_message(
             client=client,
             prompt=payload.content,
             attachments=chips,
-            # Carried onto the turn for the one thing that happens after it: the
-            # finding capture builds its embedder when the request is long gone.
-            settings=app_settings,
         )
     except TurnAlreadyRunning:
         # The check above lost a race with another POST. The client this one built

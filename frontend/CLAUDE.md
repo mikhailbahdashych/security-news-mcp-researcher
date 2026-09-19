@@ -8,12 +8,12 @@ Linting is **oxlint** (`.oxlintrc.json`), not ESLint.
 | Command | What it does |
 |---|---|
 | `npm run dev` | Vite on **:5173**; `vite.config.ts` proxies `/api` → `http://localhost:8000` |
-| `npm run build` | `tsc -b && vite build` → `dist/` (copied into the Docker image and served by FastAPI) |
+| `npm run build` | `tsc -b && vite build` → `dist/`. Nothing serves `dist/`; the app is always the two dev servers. |
 | `npm run lint` | oxlint (`react/rules-of-hooks` is an error) — also run by `make lint` |
+| `npx tsc -b` | the **only** TypeScript type-check in the repo — also run by `make typecheck` |
 | `npx vitest run` | vitest, `environment: 'node'`, `include: ['src/**/*.test.ts']` — also run by `make test` |
 
-`make test` and `make lint` cover this half; only `npm run build` has no target
-(`make up` builds it inside Docker).
+`make test`, `make lint` and `make typecheck` cover this half.
 
 ## The shell
 
@@ -729,9 +729,9 @@ and model-authored findings.
   the four compile fields, the monthly budget, auto-accept, reviewed-only, the recency
   prior, the rerank flag and the duplicate threshold) and reads `GET /kb/budget` and
   `GET /kb/activity` live beside `GET /kb/stats`. **The Voyage key is written on its own
-  button** like the Anthropic one and read back only masked, and the hint reads
-  `voyage_key_source`, not `has_voyage_key`: a key from the environment is a working app
-  with nothing stored. **Embed now** loops `POST /kb/embed-pending` while `pending > 0`
+  button** like the Anthropic one and read back only masked; the hint reads
+  `has_voyage_key`, which is the whole truth — the database is the only place a key can
+  be. **Embed now** loops `POST /kb/embed-pending` while `pending > 0`
   — `components/settings/embedNow.ts::embedAgain` is the decision that ends it, tested on
   its own, including the case that used to spin. It is a loop the user started and can
   stop, not a poller.

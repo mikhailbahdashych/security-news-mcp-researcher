@@ -111,9 +111,8 @@ An ordinary captured article never produces a row. That rule is I16 and is the s
 ### New read-only fields on `SettingsRead`
 
 ```
-has_voyage_key: boolean          # a key is stored IN THIS DATABASE — not "a key is usable"
+has_voyage_key: boolean          # a key is stored IN THIS DATABASE, the only place one can be
 voyage_api_key_masked: string    # mask_key() output, e.g. "…a1b2"; "" when nothing is stored
-voyage_key_source: 'env'|'stored'|'none'   # mirrors key_source exactly
 kb_embedding_models: string[]    # what kb_embedding_model may be set to, in this build
 ```
 
@@ -122,9 +121,12 @@ ceiling of its own — so the Settings select is built from it instead of hard-c
 already stored that is **not** in it (hand-edited, or left by a newer build) is still reported
 verbatim in `kb_embedding_model`; the page shows both.
 
-Precedence, mirroring the Anthropic key: **process environment `VOYAGE_API_KEY` → `.env` (i.e.
-`Settings.voyage_api_key`) → the key stored in the DB.** Neither external value is ever written back
-to the DB. `voyage_key_source === 'env'` with `has_voyage_key === false` is a normal, working state.
+**Amended 2026-09-19: one source, the DB row.** This contract originally specified a
+`voyage_key_source: 'env'|'stored'|'none'` field mirroring the Anthropic key's three-level
+precedence (process environment → `.env` → the stored row). The environment and `.env` overrides
+were removed from the whole app, so the field is gone with them: `has_voyage_key` is now the whole
+truth, exactly as `has_api_key` is. The key is written through `PUT /api/settings` and read back
+only as `voyage_api_key_masked`.
 
 ### New read/write fields (on both `SettingsRead` and `SettingsUpdate`)
 

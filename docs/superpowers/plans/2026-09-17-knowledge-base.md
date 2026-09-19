@@ -405,6 +405,16 @@ a gap is an entry folded into a neighbour.
 - **P2-26 (amended by the final review).** "Only an article" was one kind too narrow: Save-a-URL
   writes `kind = 'manual'`, so pasted-URL saves had silently stopped being flagged. The rule is
   `DUPLICATE_KINDS = ("article", "manual")`; notes and findings stay out.
+- **Cleanup, 2026-09-19 (after Phase 2).** The owner runs the app one way — two dev servers — and
+  keeps every credential in the database, so Docker, the one-port served-SPA mode, `CORS_ORIGINS`,
+  the env/`.env` API-key override (`key_source` / `voyage_key_source` are gone from the wire; the
+  Phase 2 contract is amended) and `.env` itself were removed; port, database file and log level are
+  CLI flags of `python -m app`, fed by the Makefile. `KnowledgeStore.delete_vectors`, which Task 1.5's
+  interface list still names, was deleted with no caller: vectors leave through the
+  `kb_chunks_ad_vec` trigger and `discard_vectors`, and no later task needs it. **Phase 5 (backups)
+  is affected**: its plan text reads `BACKUP_PASSPHRASE` and AWS credentials from the environment —
+  when Phase 5 is planned, decide where those live now (the owner's rule: credentials in the app,
+  not in env; a passphrase that must not sit beside the data it protects is the one hard case).
 
 ### Phase 2 — follow-ups handed to later phases
 

@@ -44,11 +44,6 @@ export interface GenerateNotesBody {
   generation_id: string
 }
 
-/** The terminal `done` payload: present only when a note was actually saved. */
-export interface NoteDonePayload {
-  note_id: number
-}
-
 export const NOTE_PAGE_SIZE = 30
 
 export const notesQueryKey = ['notes'] as const

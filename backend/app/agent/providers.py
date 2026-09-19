@@ -20,15 +20,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agent.builtin import BuiltinToolProvider, ServerToolProvider
 from app.agent.registry import ToolProvider
-from app.config import Settings
 from app.kb import service as kb_service
 from app.mcp.provider import McpToolProvider, load_tool_prefs, sync_manager
 from app.services import settings as settings_service
 
 
-async def turn_settings(
-    session: AsyncSession, settings: Settings | None = None
-) -> dict[str, Any]:
+async def turn_settings(session: AsyncSession) -> dict[str, Any]:
     """Every setting one run needs, read once, in the request's own transaction.
 
     Never per-event and never after the stream has opened: the system prompt and
@@ -36,11 +33,9 @@ async def turn_settings(
     would invalidate the cache for the rest of it — and a settings edit must not
     be able to shift the prompt under a model that is already answering.
 
-    ``settings`` is the app's :class:`Settings`; it contributes only the ``.env``
-    API key (see ``app.services.settings.get_effective_api_key``).
     """
     return {
-        "api_key": await settings_service.get_effective_api_key(session, settings),
+        "api_key": await settings_service.get_effective_api_key(session),
         "model": await settings_service.get_str(session, "model"),
         # Coerced, not raw: a hand-edited row would otherwise be sent verbatim
         # and 400 every message while the Settings page showed the default.
@@ -74,9 +69,7 @@ async def build_tool_providers(
         # would say so.
         BuiltinToolProvider(
             session_factory,
-            kb=await kb_service.for_request(
-                session_factory, session, getattr(request.app.state, "settings", None)
-            ),
+            kb=await kb_service.for_request(session_factory, session),
         ),
         await ServerToolProvider.from_settings(session),
     ]

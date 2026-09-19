@@ -3,19 +3,16 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 
 from app import __version__
 from app.agent.turns import TurnRegistry, mark_interrupted
 from app.api import api_router
 from app.config import Settings
-from app.config import settings as default_settings
 from app.db.engine import create_db_engine, create_session_factory
 from app.db.init import init_db
 from app.logging_config import configure_logging
 from app.mcp.manager import McpManager
 from app.services.http import impersonation_available
-from app.static import mount_spa
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +78,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
-    settings = settings or default_settings
+    settings = settings or Settings()
     # Before anything else, so that whatever the rest of start-up logs is actually
     # seen and formatted. Idempotent, so the test suite's many apps share one
     # handler instead of multiplying every record. See app/logging_config.py.
@@ -92,7 +89,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     # The single source of truth for this app: the lifespan and every dependency
-    # read the database path, CORS origins and static dir from here.
+    # read the database path from here.
     app.state.settings = settings
     app.state.db_engine = None
     app.state.session_factory = None
@@ -103,23 +100,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # a turn starts, and the test suite (which skips the lifespan) needs one too.
     app.state.turn_registry = TurnRegistry()
 
-    if settings.cors_origins:
-        app.add_middleware(
-            CORSMiddleware,
-            allow_origins=settings.cors_origins,
-            allow_credentials=False,
-            allow_methods=["*"],
-            allow_headers=["*"],
-        )
+    # Deliberately no CORS middleware: the SPA reaches this API through Vite's
+    # `/api` proxy, so every request is same-origin. An API with no auth at all,
+    # holding the user's Anthropic key, has no business inviting other origins.
 
     # Deliberately no GZipMiddleware: it buffers responses, which turns the chat
     # SSE stream into a connection that appears to hang until the turn is over.
     # If compression is ever wanted, it has to exclude the streaming routes.
 
-    # API routes first...
+    # The whole app: there is no static-file route. The SPA is served by Vite
+    # (`make dev-web`), which proxies /api here, so an unknown path is FastAPI's
+    # own JSON 404 and nothing can shadow an API route.
     app.include_router(api_router, prefix="/api")
-    # ...and the SPA catch-all last, so it can never shadow an API route.
-    mount_spa(app, settings.static_dir)
     return app
 
 

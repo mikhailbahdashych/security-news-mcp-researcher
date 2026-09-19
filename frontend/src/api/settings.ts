@@ -10,14 +10,6 @@ export type ThinkingDisplay = (typeof THINKING_DISPLAYS)[number]
 export type CompileMode = (typeof COMPILE_MODES)[number]
 
 /**
- * Where the key the backend would actually use comes from.
- *
- * `env` means the process environment or `.env` — both override the stored key,
- * so the app can work perfectly with `has_api_key: false`.
- */
-export type KeySource = 'env' | 'stored' | 'none'
-
-/**
  * What the two virtual tables behind the knowledge base were actually built
  * with. Read-only, and not a preference: the Settings panel compares it with
  * this build and offers a rebuild when they disagree.
@@ -35,10 +27,9 @@ export interface AppSettings {
   model: string
   effort: Effort
   thinking_display: ThinkingDisplay
-  /** A key is stored *in the database* — not the same as "a key is usable". */
+  /** A key is stored in the database, which is the only place one can be. */
   has_api_key: boolean
   api_key_masked: string
-  key_source: KeySource
   web_search_enabled: boolean
   web_search_max_uses: number
   web_fetch_enabled: boolean
@@ -51,11 +42,9 @@ export interface AppSettings {
   kb_capture_notes: boolean
   kb_min_snapshot_chars: number
   kb_schema_version: KbSchemaVersion
-  /** A Voyage key is stored *in the database* — `voyage_key_source` says which
-   *  key is actually in force, exactly as `key_source` does for Anthropic. */
+  /** A Voyage key is stored in the database, the only place one can be. */
   has_voyage_key: boolean
   voyage_api_key_masked: string
-  voyage_key_source: KeySource
   kb_embedding_model: string
   /** What `kb_embedding_model` may be set to in this build — read-only, and the
    *  list the embedding-model select is built from, so the set lives in the
@@ -91,11 +80,9 @@ export interface AppSettings {
 export type NotWritable =
   | 'has_api_key'
   | 'api_key_masked'
-  | 'key_source'
   | 'kb_schema_version'
   | 'has_voyage_key'
   | 'voyage_api_key_masked'
-  | 'voyage_key_source'
   | 'kb_compile_prompt_default'
   | 'kb_embedding_models'
 

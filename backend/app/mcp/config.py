@@ -4,7 +4,7 @@ The user pastes the same JSON they would put in ``claude_desktop_config.json``::
 
     {"mcpServers": {
       "files":  {"command": "npx",
-                 "args": ["-y", "@modelcontextprotocol/server-filesystem", "/data/scratch"]},
+                 "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/scratch"]},
       "remote": {"url": "https://example.com/mcp",
                  "headers": {"Authorization": "Bearer ..."}}
     }}

@@ -1,15 +1,17 @@
-.PHONY: dev-api dev-web test lint up
+.PHONY: dev-api dev-web test lint typecheck
 
-# The backend's port. Only ever a default here: a PORT in the environment or on
-# the command line wins, and is exported to both recipes by make itself.
+# The three start-up knobs, passed to the backend as command-line flags. There is
+# no .env file and no environment variable behind them: override on the command
+# line, e.g. `make dev-api PORT=8012 DB=/tmp/scratch.db LOG=DEBUG`.
 #
-# Deliberately NOT passed to dev-api. The backend reads PORT through
-# pydantic-settings, where the process environment beats the repo-root .env — so
-# exporting this default would silently override a PORT written in .env.
+# DB empty means "the default", ./data/app.db relative to backend/.
 PORT ?= 8000
+DB   ?=
+LOG  ?= INFO
 
-dev-api: ## Run the FastAPI backend with reload on the configured PORT (default 8000)
-	cd backend && uv run python -m app --reload
+dev-api: ## Run the FastAPI backend with reload on 127.0.0.1:$(PORT)
+	cd backend && uv run python -m app --reload --port $(PORT) --log-level $(LOG) \
+		$(if $(DB),--db-path $(DB))
 
 dev-web: ## Run the Vite dev server on :5173 (proxies /api to the backend's PORT)
 	cd frontend && PORT=$(PORT) npm run dev
@@ -22,5 +24,5 @@ lint: ## Lint both halves
 	cd backend && uv run ruff check .
 	cd frontend && npm run lint
 
-up: ## Build and run the whole app in Docker on the configured PORT (default 8000)
-	docker compose up --build
+typecheck: ## Type-check the SPA (tsc -b) — the only TypeScript check there is
+	cd frontend && npx tsc -b

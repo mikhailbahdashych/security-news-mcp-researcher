@@ -10,7 +10,6 @@ from app.kb.embeddings import EMBEDDING_MODELS
 
 Effort = Literal["low", "medium", "high", "xhigh", "max"]
 ThinkingDisplay = Literal["summarized", "omitted"]
-KeySource = Literal["env", "stored", "none"]
 #: ``manual`` — entries wait for a "Compile N entries" click; ``auto`` — compile
 #: at capture time.
 CompileMode = Literal["manual", "auto"]
@@ -43,13 +42,10 @@ class SettingsRead(BaseModel):
     model: str
     effort: Effort
     thinking_display: ThinkingDisplay
-    #: Whether a key is stored **in this database** — not whether one is usable.
+    #: Whether a key is stored in this database, which is the only place one can
+    #: be: there is no environment override. ``has_api_key`` is the whole truth.
     has_api_key: bool
     api_key_masked: str
-    #: Which source the effective key comes from: ``"env"`` (the process
-    #: environment or ``.env``, which overrides the stored one), ``"stored"``, or
-    #: ``"none"``. Lets the Settings page explain a working app with no stored key.
-    key_source: KeySource
     web_search_enabled: bool
     web_search_max_uses: int
     web_fetch_enabled: bool
@@ -62,11 +58,10 @@ class SettingsRead(BaseModel):
     kb_capture_notes: bool
     kb_min_snapshot_chars: int
     kb_schema_version: KbSchemaVersionRead
-    #: Whether a Voyage key is stored **in this database** — not whether one is
-    #: usable; ``voyage_key_source`` answers that. Both mirror the Anthropic key.
+    #: Whether a Voyage key is stored in this database, the only place one can
+    #: be. Mirrors the Anthropic key above.
     has_voyage_key: bool
     voyage_api_key_masked: str
-    voyage_key_source: KeySource
     kb_embedding_model: str
     #: What ``kb_embedding_model`` may be set to, read-only: the Settings select is
     #: built from this rather than from a hard-coded list, so the embedder's table
@@ -181,7 +176,6 @@ __all__ = [
     "CompileMode",
     "Effort",
     "KbSchemaVersionRead",
-    "KeySource",
     "ModelOption",
     "SettingsRead",
     "SettingsUpdate",

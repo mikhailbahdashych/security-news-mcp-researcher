@@ -55,7 +55,7 @@ export const EXAMPLE_CONFIG = `{
   "mcpServers": {
     "files": {
       "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/data/scratch"]
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/scratch"]
     },
     "remote": {
       "url": "https://example.com/mcp",

@@ -10,7 +10,7 @@ from typing import Any, cast
 
 from fastapi import APIRouter
 
-from app.api.deps import AnthropicClient, AppSettings, DbSession
+from app.api.deps import AnthropicClient, DbSession
 from app.kb.capture import log_activity
 from app.kb.embeddings import EMBEDDING_MODELS, discard_vectors
 from app.kb.schema import (
@@ -40,7 +40,7 @@ def _as_text(value: Any) -> str:
     return str(value)
 
 
-async def _read(session: DbSession, settings: AppSettings) -> SettingsRead:
+async def _read(session: DbSession) -> SettingsRead:
     api_key = await settings_service.get_str(session, "anthropic_api_key")
     voyage_key = await settings_service.get_str(session, "voyage_api_key")
     return SettingsRead(
@@ -53,12 +53,10 @@ async def _read(session: DbSession, settings: AppSettings) -> SettingsRead:
         thinking_display=cast(
             ThinkingDisplay, await settings_service.get_choice(session, "thinking_display")
         ),
-        # "a key is stored in *this database*" — deliberately not "a key is
-        # usable", which is what ``key_source`` answers: an ``ANTHROPIC_API_KEY``
-        # from the environment or .env works without anything being stored.
+        # The database is the only place a key can be, so "stored here" and
+        # "usable" are the same statement.
         has_api_key=bool(api_key.strip()),
         api_key_masked=settings_service.mask_key(api_key),
-        key_source=await settings_service.get_key_source(session, settings),
         web_search_enabled=await settings_service.get_bool(session, "web_search_enabled"),
         web_search_max_uses=await settings_service.get_int(session, "web_search_max_uses"),
         web_fetch_enabled=await settings_service.get_bool(session, "web_fetch_enabled"),
@@ -70,12 +68,10 @@ async def _read(session: DbSession, settings: AppSettings) -> SettingsRead:
         kb_capture_notes=await settings_service.get_bool(session, "kb_capture_notes"),
         kb_min_snapshot_chars=await settings_service.get_int(session, "kb_min_snapshot_chars"),
         kb_schema_version=await _schema_version(session),
-        # The same two meanings as above: "stored here" and "where the effective
-        # key comes from". `mask_key` invents no prefix for a Voyage key, so this
-        # is the bare `…c3d4` form.
+        # `mask_key` invents no prefix for a Voyage key, so this is the bare
+        # `…c3d4` form.
         has_voyage_key=bool(voyage_key.strip()),
         voyage_api_key_masked=settings_service.mask_key(voyage_key),
-        voyage_key_source=await settings_service.get_voyage_key_source(session, settings),
         kb_embedding_model=await settings_service.get_str(session, "kb_embedding_model"),
         # Not a preference and not stored, like `kb_compile_prompt_default`: what
         # this build can embed with, so the UI's select needs no list of its own.
@@ -120,14 +116,14 @@ async def _schema_version(session: DbSession) -> KbSchemaVersionRead:
 
 
 @router.get("/settings", response_model=SettingsRead)
-async def read_settings(session: DbSession, settings: AppSettings) -> SettingsRead:
+async def read_settings(session: DbSession) -> SettingsRead:
     """Current settings, with the API key present only as a mask."""
-    return await _read(session, settings)
+    return await _read(session)
 
 
 @router.put("/settings", response_model=SettingsRead)
 async def update_settings(
-    update: SettingsUpdate, session: DbSession, settings: AppSettings
+    update: SettingsUpdate, session: DbSession
 ) -> SettingsRead:
     """Update the fields that were sent; unsent fields keep their stored values."""
     changes = {
@@ -160,10 +156,10 @@ async def update_settings(
             ),
         )
     await session.commit()
-    return await _read(session, settings)
+    return await _read(session)
 
 
 @router.post("/settings/test-key", response_model=TestKeyResult)
 async def test_api_key(client: AnthropicClient) -> TestKeyResult:
-    """Check the effective key (env override or stored) against the live API."""
+    """Check the stored key against the live API."""
     return await anthropic_models.check_api_key(client)

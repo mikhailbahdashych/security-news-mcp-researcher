@@ -8,6 +8,30 @@
 > (root, `backend/`, `backend/app/agent/`, `backend/app/mcp/`, `frontend/`). Anything
 > beyond the seven PRs is backlog: `ROADMAP.md`.
 
+**Implementation notes (2026-09-19) — no `.env`, no environment variables.**
+Start-up configuration is command-line flags on `python -m app`: `--port`,
+`--db-path`, `--log-level`, `--reload`, passed by the Makefile from `PORT`, `DB` and
+`LOG`. `.env.example` was deleted and `Settings` no longer reads a `.env` file, so
+wherever this document mentions one — `CORS_ORIGINS`, `ANTHROPIC_API_KEY`,
+`VOYAGE_API_KEY`, `DB_PATH`, `PORT`, `LOG_LEVEL` — there is no such file to write it
+in. (`Settings` does read `SNR_`-prefixed variables, but only because `__main__`
+writes them there to reach uvicorn's reloader worker: an internal hand-off, not
+configuration.)
+
+**Implementation notes (2026-09-19) — no container, no one-port mode.**
+Docker was removed entirely: `Dockerfile`, `docker-compose.yaml`, `docker/entrypoint.sh`,
+`.dockerignore` and `make up` are gone, and with them the named `appdata` volume, the
+`/data` paths, the non-root-`app`/`setpriv` entrypoint and the `--host` flag of
+`python -m app` (its only caller was the image's `CMD`; the app now binds loopback
+unconditionally, which is right for something with no auth that stores an API key).
+The owner never ran the container. **The app is two dev servers** — `make dev-api`
+(FastAPI on `127.0.0.1:$PORT`) and `make dev-web` (Vite on `:5173`, proxying `/api`) —
+so wherever this document says "single container", "one port" or "stdio MCP servers run
+inside the container's namespace", read: two processes on the host, and stdio MCP
+servers get the user's own filesystem and `localhost`. `make typecheck`
+(`npx tsc -b`) was added in the same change, because the image's `npm run build` had
+been the repo's only TypeScript type-check.
+
 ## Context
 
 Mikhail is a security engineer who leads weekly security meetings with team leads. A key part of each meeting is presenting security news: what happened, root cause of breaches, lessons learned, and what teams should do about it. Today this research and note-writing is fully manual.
@@ -100,7 +124,7 @@ The layout **as built** (the planned one is corrected below):
 backend/
   pyproject.toml, uv.lock
   app/
-    main.py config.py logging_config.py static.py   # SPA catch-all 404-JSONs unmatched /api/*
+    main.py config.py logging_config.py             # no static route: Vite serves the SPA
     db/ engine.py models.py init.py util.py         # SQLAlchemy 2 async + aiosqlite, WAL, create_all (no Alembic)
     schemas/ common.py feeds.py items.py sessions.py notes.py search.py settings.py mcp.py
     api/ deps.py streaming.py tasks.py health.py models.py feeds.py items.py
@@ -117,7 +141,7 @@ frontend/
        lib/{sse,dates,useDebouncedValue}.ts
        pages/{Inbox,ChatPage,Notes,NoteDetail,Settings,Page}.tsx
        components/{inbox,chat,notes,settings,ui}/
-Dockerfile docker-compose.yaml Makefile .env.example
+Makefile
 ```
 
 > **Implementation notes — where this differs from the plan.**
@@ -229,12 +253,13 @@ Search = `LIKE '%q%'` (single user, thousands of rows; no FTS5).
 >   `GET /api/sessions?q=` reuses the same `session_match` predicate, and `archived` is
 >   a `"false"`/`"true"`/`"all"` enum. Hits carry a server-built `link` and a plain-text
 >   snippet the client highlights by splitting — never markup.
-> - **API-key precedence**: process environment → `.env` (via
->   `Settings.anthropic_api_key`) → the stored row. pydantic-settings reads `.env` into
->   its own fields and never exports it to `os.environ`, so a service reading the
->   environment alone silently ignored a key written into `.env` — which is what the
->   `Settings` field exists to fix. `GET /api/settings` reports the winner as
->   `key_source` (`env`/`stored`/`none`); `has_api_key` means only "stored in this DB".
+> - **API-key precedence**: there is none any more. This build had three sources
+>   (process environment → `.env` → the stored row) reported as `key_source`; on
+>   **2026-09-19** the two external ones were removed and the **stored row is the only
+>   source**, for both the Anthropic and the Voyage key. A key in a shell could
+>   otherwise spend money while the Settings page showed a different one. `has_api_key`
+>   / `has_voyage_key` are now the whole truth, and `key_source` / `voyage_key_source`
+>   no longer exist.
 > - **`url_guard`**: the design says "response bodies are capped" — there are **two**
 >   caps, `MAX_FETCH_BYTES` 5 MiB for articles and `MAX_FEED_BYTES` 20 MiB for feeds
 >   (several real feeds ship every post in full). The timeout bounds the **whole fetch**,
@@ -374,10 +399,10 @@ Implementation notes for the SPA half (the backend half is `backend/CLAUDE.md`):
 - `.env.example` gains a **commented** `VOYAGE_API_KEY`: nothing reads it until Phase 2.
 
 > **Implementation notes — Phase 2 (embeddings, compile, findings).** The vector half
-> landed: Voyage embeddings behind the same key precedence as the Anthropic one (process
-> environment → `.env` → the stored row, read back masked, reported as
-> `voyage_key_source`), `VOYAGE_API_KEY` now live in `.env.example` rather than commented
-> out, and **search is hybrid the moment a key exists** — entries captured before it stay
+> landed: Voyage embeddings behind the same key handling as the Anthropic one (stored in
+> the database, read back masked — the `.env`/environment precedence and
+> `voyage_key_source` that this phase shipped were both removed on 2026-09-19, see the
+> API-key note above), and **search is hybrid the moment a key exists** — entries captured before it stay
 > keyword-only until Settings → Knowledge → **Embed now** works through the backlog
 > (`POST /api/kb/embed-pending`, a user-driven loop, still no poller). Measured on 20 000
 > chunks the KNN is p50 14.4 ms and filtering it is free, against the keyword leg's
@@ -418,9 +443,8 @@ Multi-stage: node:22-bookworm-slim builds SPA → python:3.13-slim-bookworm runt
 > pure modules — `api/chat.ts`, `ui/layout.ts`/`theme.ts`/`railState.ts`,
 > `notes/excerpt.ts` — but the "no jsdom, no component tests, no E2E" rule stands.
 > Backend tests use a real temp-file SQLite DB per test (not `:memory:`, so WAL and the
-> FK pragma behave as in production), and two autouse fixtures keep the suite honest:
-> one deletes `ANTHROPIC_API_KEY` from the environment, the other stubs
-> `socket.getaddrinfo`.
+> FK pragma behave as in production), and an autouse fixture stubs
+> `socket.getaddrinfo` so nothing in the suite can reach the network.
 
 ## PR-by-PR build sequence — **complete**
 

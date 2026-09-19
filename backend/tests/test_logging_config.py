@@ -100,7 +100,7 @@ def test_an_unparsable_level_falls_back_to_info() -> None:
 def test_create_app_installs_the_handler(app_factory, tmp_path) -> None:
     logging.getLogger().handlers = []
 
-    app_factory(Settings(db_path=tmp_path / "app.db", static_dir=tmp_path / "absent"))
+    app_factory(Settings(db_path=tmp_path / "app.db"))
 
     assert installed_handler() is not None
 
@@ -109,7 +109,6 @@ def test_create_app_honours_the_log_level_setting(app_factory, tmp_path) -> None
     app_factory(
         Settings(
             db_path=tmp_path / "app.db",
-            static_dir=tmp_path / "absent",
             log_level="WARNING",
         )
     )

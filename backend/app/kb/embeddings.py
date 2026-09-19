@@ -26,7 +26,6 @@ import httpx2
 from sqlalchemy import text as sql_text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import Settings
 from app.kb.chunking import estimate_tokens
 from app.kb.schema import VEC_DIMENSIONS
 
@@ -326,7 +325,7 @@ def _safe_reason(response: httpx2.Response) -> str:
     return reason.strip() or response.reason_phrase or "no reason given"
 
 
-async def build_embedder(session: AsyncSession, settings: Settings | None = None) -> Embedder:
+async def build_embedder(session: AsyncSession) -> Embedder:
     """The embedder this database is configured for.
 
     :class:`NullEmbedder` without a key — "no embeddings yet" is a normal state of
@@ -334,7 +333,7 @@ async def build_embedder(session: AsyncSession, settings: Settings | None = None
     """
     from app.services import settings as settings_service
 
-    key = await settings_service.get_effective_voyage_key(session, settings)
+    key = await settings_service.get_effective_voyage_key(session)
     if not key:
         return NullEmbedder()
     model = await settings_service.get_str(session, "kb_embedding_model")

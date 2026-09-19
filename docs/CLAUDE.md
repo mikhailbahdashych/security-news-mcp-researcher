@@ -14,12 +14,12 @@ before changing anything:
 
 | File | Covers |
 |---|---|
-| root `CLAUDE.md` | Product, ground rules, commands, `.env` / key precedence, the Anthropic + MCP gotcha list, delivery workflow |
+| root `CLAUDE.md` | Product, ground rules, commands, where the API keys live, the Anthropic + MCP gotcha list, delivery workflow |
 | `backend/CLAUDE.md` | App factory, `app.state`, module map, DB-session conventions, settings, the endpoint list, the SSE table, notes generation, cancellation, the test harness |
 | `backend/app/agent/CLAUDE.md` | The manual loop, `stop_reason` handling, container threading, persistence, `sanitize_for_replay`, the tool registry |
-| `backend/app/mcp/CLAUDE.md` | Config validation, the owner-task lifecycle, cooldown/retire/reload, namespacing, the MCP routes, Docker runtime |
+| `backend/app/mcp/CLAUDE.md` | Config validation, the owner-task lifecycle, cooldown/retire/reload, namespacing, the MCP routes, the stdio subprocess environment |
 | `frontend/CLAUDE.md` | The shell, `embedded` + split view, tokens and themes, the API layer, `lib/sse.ts`, the transcript model, `liveTurn`, notes generation, the vitest scope |
-| `README.md` | The user-facing story: quickstart, the API key, the inbox, fetch safety, MCP servers, the host-run escape hatch |
+| `README.md` | The user-facing story: how to run it, the API key, the inbox, fetch safety, MCP servers |
 
 ## Reading `DESIGN.md` safely
 

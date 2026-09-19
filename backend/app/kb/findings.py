@@ -32,7 +32,6 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agent import events as ev
-from app.config import Settings
 from app.kb.capture import (
     DEFAULT_MIN_SNAPSHOT_CHARS,
     CaptureResult,
@@ -212,7 +211,6 @@ async def capture_turn_finding(
     *,
     session_id: int,
     question: str,
-    settings: Settings | None = None,
 ) -> CaptureResult | None:
     """The turn-end trigger: the policy read, the capture, and the error handling.
 
@@ -229,7 +227,7 @@ async def capture_turn_finding(
     service = KbService(session_factory=session_factory)
     return await service.guarded(
         _capture(
-            session_factory, draft, session_id=session_id, question=question, settings=settings
+            session_factory, draft, session_id=session_id, question=question
         ),
         source=FINDING_TRIGGER,
     )
@@ -241,7 +239,6 @@ async def _capture(
     *,
     session_id: int,
     question: str,
-    settings: Settings | None,
 ) -> CaptureResult | None:
     answer = draft.answer
     sources = draft.sources()
@@ -251,11 +248,9 @@ async def _capture(
         if not await settings_service.get_bool(session, "kb_capture_findings"):
             return None
         min_chars = await settings_service.get_int(session, "kb_min_snapshot_chars")
-        # *settings* is the turn's own copy of the app's, carried from the request
-        # that started it: there is no request here, and without it a Voyage key
-        # configured in ``.env`` alone would be invisible to this one capture path
-        # while every other one honoured it.
-        embedder = await build_embedder(session, settings)
+        # The key is a row in this database, so this path reads it exactly like
+        # every other one — no request, and nothing to carry from one.
+        embedder = await build_embedder(session)
     # The session above is closed before the embed inside: no transaction is ever
     # held across a network call.
     return await capture_finding(

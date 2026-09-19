@@ -25,7 +25,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query, status
 
-from app.api.deps import AppSettings, ChatClientFactory, KbServiceDep
+from app.api.deps import ChatClientFactory, KbServiceDep
 from app.kb import compile as compile_module
 from app.kb.models import KbEntry
 from app.kb.service import EntryFacts, KbService
@@ -75,7 +75,6 @@ async def compile_entry(
     entry_id: int,
     kb: KbServiceDep,
     client_factory: ChatClientFactory,
-    app_settings: AppSettings,
 ) -> CompileResponse:
     """Summarise one entry and store the answer."""
     await _load(kb, entry_id)
@@ -83,7 +82,6 @@ async def compile_entry(
         kb.session_factory,
         client_factory,
         entry_id,
-        settings=app_settings,
         embedder=kb.embedder,
         source="user",
     )
@@ -95,7 +93,6 @@ async def compile_batch(
     payload: CompileRequest,
     kb: KbServiceDep,
     client_factory: ChatClientFactory,
-    app_settings: AppSettings,
     estimate: Annotated[bool, Query()] = False,
 ) -> CompileEstimateResponse | CompileBatchResponse:
     """Compile several entries, or price the batch without compiling any.
@@ -105,7 +102,7 @@ async def compile_batch(
     of asking "what would this cost" is never itself a cost.
     """
     if estimate:
-        return await _estimate(payload, kb, client_factory, app_settings)
+        return await _estimate(payload, kb, client_factory)
 
     # **Every id first, then the first token.** Interleaving the two spends real
     # money on entries 1…N−1 and then answers 404 with no body, so the client
@@ -122,7 +119,6 @@ async def compile_batch(
                     kb.session_factory,
                     client_factory,
                     entry_id,
-                    settings=app_settings,
                     embedder=kb.embedder,
                     source="batch",
                 ),
@@ -135,9 +131,8 @@ async def _estimate(
     payload: CompileRequest,
     kb: KbService,
     client_factory: ChatClientFactory,
-    app_settings: AppSettings,
 ) -> CompileEstimateResponse:
-    client = await compile_module.build_client(kb.session_factory, client_factory, app_settings)
+    client = await compile_module.build_client(kb.session_factory, client_factory)
     try:
         counted = await compile_module.estimate_batch(kb.session_factory, client, payload.entry_ids)
     finally:

@@ -13,3 +13,9 @@ __pycache__/
 
 # Playwright MCP browser artifacts (screenshots, traces)
 .playwright-mcp/
+
+# editor and tool droppings the deleted frontend/.gitignore used to cover
+*.local
+npm-debug.log*
+.idea/
+.vscode/

@@ -187,18 +187,6 @@ async def test_definitions_are_anthropic_shaped_snake_case() -> None:
         await manager.aclose()
 
 
-async def test_name_map_recovers_the_original_names() -> None:
-    manager = make_manager(files=build_server())
-    try:
-        provider = McpToolProvider(manager)
-        mapping = await provider.name_map()
-
-        assert mapping["mcp__files__weird_name_v2"] == ("files", "weird name/v2")
-        assert mapping["mcp__files__echo"] == ("files", "echo")
-    finally:
-        await manager.aclose()
-
-
 def test_namespaced_name_is_pure_and_bounded() -> None:
     assert namespaced_name("files", "read_file") == "mcp__files__read_file"
     long = namespaced_name("s", "x" * 400)

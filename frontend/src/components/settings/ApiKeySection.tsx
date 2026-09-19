@@ -17,16 +17,10 @@ import SettingsSection from './SettingsSection'
 /**
  * What to say about the key that is in force.
  *
- * `key_source: 'env'` means ANTHROPIC_API_KEY (environment or `.env`) is winning,
- * which it does whether or not one is stored — so saying "no key configured" on
- * the strength of `has_api_key` alone would be a lie about a working app.
+ * The stored key is the only key there is — no environment override — so
+ * `has_api_key` is the whole truth and the hint has two states, not three.
  */
 function keyHint(settings: AppSettings): string {
-  if (settings.key_source === 'env') {
-    return settings.has_api_key
-      ? `ANTHROPIC_API_KEY from the environment is in use; it overrides the stored key (${settings.api_key_masked}).`
-      : 'ANTHROPIC_API_KEY from the environment is in use. Saving a key here stores one for when it is unset.'
-  }
   return settings.has_api_key
     ? `Currently set: ${settings.api_key_masked}. Enter a new key to replace it.`
     : 'No key configured yet — the research chat and the model list need one.'
@@ -87,8 +81,8 @@ export default function ApiKeySection({ settings }: { settings: AppSettings }) {
           {save.isPending ? 'Saving…' : 'Save key'}
         </Button>
 
-        {/* Always enabled: an ANTHROPIC_API_KEY in the environment overrides the
-            stored key, so a testable key may exist even when none is stored. */}
+        {/* Always enabled: with no key stored the test is an honest "no API key
+            configured" answer, which is worth being able to ask for. */}
         <Button loading={test.isPending} disabled={busy} onClick={() => test.mutate()}>
           {test.isPending ? 'Testing…' : 'Test key'}
         </Button>
