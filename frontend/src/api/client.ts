@@ -52,12 +52,40 @@ export function conflictDetail(error: unknown): string | null {
   return detailFor(error, 409)
 }
 
+/**
+ * An error body's `detail`, as a sentence.
+ *
+ * FastAPI's own errors carry a string. A **validation** error (422) carries an
+ * array of `{loc, msg, …}` — printed raw that is ~180 characters of JSON in a red
+ * one-liner, so it is read instead: the field's name and what was wrong with it.
+ * Anything else falls back to JSON, never to `[object Object]`.
+ */
+export function detailText(detail: unknown): string {
+  if (typeof detail === 'string') {
+    return detail
+  }
+  if (Array.isArray(detail) && detail.length > 0) {
+    const lines = detail.map((item) => {
+      if (item && typeof item === 'object' && typeof (item as { msg?: unknown }).msg === 'string') {
+        const { loc, msg } = item as { loc?: unknown; msg: string }
+        const field = Array.isArray(loc) ? loc[loc.length - 1] : null
+        return typeof field === 'string' ? `${field}: ${msg}` : msg
+      }
+      return null
+    })
+    if (lines.every((line): line is string => line !== null)) {
+      return lines.join('; ')
+    }
+  }
+  return JSON.stringify(detail)
+}
+
 async function readDetail(response: Response): Promise<string> {
   try {
     const body: unknown = await response.json()
     if (body && typeof body === 'object' && 'detail' in body) {
       const { detail } = body as { detail: unknown }
-      return typeof detail === 'string' ? detail : JSON.stringify(detail)
+      return detailText(detail)
     }
   } catch {
     // Non-JSON error body (e.g. a proxy error page); fall through to the status text.

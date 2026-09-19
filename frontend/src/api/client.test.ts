@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { ApiError, conflictDetail, detailFor, isNotFound } from './client'
+import { ApiError, conflictDetail, detailFor, detailText, isNotFound } from './client'
 
 describe('isNotFound', () => {
   it('is true for a 404 from the API', () => {
@@ -55,5 +55,26 @@ describe('detailFor', () => {
     expect(detailFor(new ApiError(500, 'Internal Server Error'), 422)).toBeNull()
     expect(detailFor(new TypeError('Failed to fetch'), 422)).toBeNull()
     expect(detailFor(undefined, 422)).toBeNull()
+  })
+})
+
+describe('detailText', () => {
+  it('passes a string detail through', () => {
+    expect(detailText('Entry not found')).toBe('Entry not found')
+  })
+
+  it("reads a validation error's messages instead of printing the array", () => {
+    const detail = [
+      { type: 'value_error', loc: ['body', 'kb_embedding_model'], msg: 'Value error, must be one of voyage-4', input: 'x' },
+      { loc: ['body', 'kb_compile_prompt'], msg: 'must not be blank' },
+    ]
+    expect(detailText(detail)).toBe(
+      'kb_embedding_model: Value error, must be one of voyage-4; kb_compile_prompt: must not be blank',
+    )
+  })
+
+  it('falls back to JSON for a shape it does not know', () => {
+    expect(detailText({ reason: 'busy' })).toBe('{"reason":"busy"}')
+    expect(detailText([{ nothing: true }])).toBe('[{"nothing":true}]')
   })
 })
