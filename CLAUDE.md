@@ -37,8 +37,7 @@ enrichment, ...). `docs/CLAUDE.md` is the doc map.
 | `backend/` | FastAPI app, uv-managed. See `backend/CLAUDE.md`. |
 | `backend/app/agent/` | The manual Anthropic agent loop + tool registry. See `backend/app/agent/CLAUDE.md`. |
 | `backend/app/mcp/` | MCP client: config, connection manager, tool provider. See `backend/app/mcp/CLAUDE.md`. |
-| `backend/app/kb/` | The knowledge base: the **frozen** virtual-table DDL and its versions (`schema.py`), capture, chunking, FTS, entities, embeddings, store, retrieval, the bulk job, compile,
-findings, and `KbService` — the one door. No `CLAUDE.md` of its own: it is documented in `backend/CLAUDE.md`. |
+| `backend/app/kb/` | The knowledge base: the **frozen** virtual-table DDL and its versions (`schema.py`), capture, chunking, FTS, entities, embeddings, store, retrieval, the bulk job, compile, findings, and `KbService` — the one door. No `CLAUDE.md` of its own: it is documented in `backend/CLAUDE.md`. |
 | `frontend/` | Vite + React 19 + TS + Tailwind v4 SPA. See `frontend/CLAUDE.md`. |
 | `docs/` | `DESIGN.md` (design record), `ROADMAP.md` (backlog). See `docs/CLAUDE.md`. |
 | `Dockerfile` | Two stages: node builds the SPA, python runs it. Node binary is copied into the runtime so stdio MCP servers can `npx`. Wheels are hash-verified. `docker/entrypoint.sh` starts as root, chowns `/data` to the non-root user `app` only when an older root-owned volume needs it, then drops privileges with `setpriv`; `CMD` is `python -m app --host 0.0.0.0`. `PORT` must be ≥ 1024. |

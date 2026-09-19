@@ -66,8 +66,8 @@ RECENCY_WINDOW_DAYS = 90
 #: §4.4's "recency is most of the relevance signal, not a tie-break", and
 #: ``test_the_recency_prior_displaces_a_bounded_number_of_rrf_ranks`` is where the
 #: number is pinned. What it can never do is cross the exact leg: RRF over two
-#: legs cannot exceed ``2/(RRF_K + 1)`` ≈ 0.033, so even boosted a fused hit stays
-#: two orders of magnitude below ``ENTITY_SCORE``.
+#: legs cannot exceed ``2/(RRF_K + 1)`` ≈ 0.033, so even boosted (× 1.25 ≈ 0.041) a
+#: fused hit stays ~24× below ``ENTITY_SCORE`` — a factor, not two orders.
 RECENCY_BOOST = 1.25
 
 #: ``(entry_id, chunk_id, score)`` — what a leg looks like once hydrated.

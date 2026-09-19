@@ -124,7 +124,8 @@ Keys: `anthropic_api_key` (""), `model` (`claude-opus-5`), `effort` (`high`),
 `kb_reviewed_only` (false).
 
 Phase 2 added, all of them read-only to everything but `PUT /api/settings`:
-`voyage_api_key` (""), `kb_embedding_model` (`voyage-4`), `kb_capture_findings`
+`voyage_api_key` (""), `kb_embedding_model` (`voyage-4`, and only one of the names the
+embedder knows — see below), `kb_capture_findings`
 (**false**), `kb_compile_mode` (`manual`), `kb_compile_model` (`claude-sonnet-5`),
 `kb_compile_effort` (`low`), `kb_compile_prompt` (`DEFAULT_COMPILE_PROMPT`; a blank one is a
 422, and `SettingsRead.kb_compile_prompt_default` carries the shipped text read-only so the
@@ -143,7 +144,14 @@ closed set belongs in `ALLOWED_VALUES` **and** pinned against its `Literal` in
 settings write (`api/settings.py` → `embeddings.discard_vectors`, decision C1): the vec0
 DDL is frozen and carries no `embedding_model` column, so two models' vectors in one KNN
 would be meaningless similarity rather than merely worse. Every chunk goes back to
-pending and **Embed now** re-embeds them.
+pending and **Embed now** re-embeds them. Which is why the field is **validated**: a
+`SettingsUpdate` field validator refuses anything outside
+`embeddings.EMBEDDING_MODELS` (the default plus the keys of `MAX_TOKENS_BY_MODEL` —
+derived, never a second list) with a **422**, before the write, because a typo is
+otherwise a *changed* model and costs the whole index plus a paid re-embed. The same
+tuple goes out read-only as `SettingsRead.kb_embedding_models`, which is what the UI's
+select is built from. A value already in the database that is not in the tuple is read
+back verbatim — `GET /api/settings` stays a 200 and the page can show both.
 
 `kb_reviewed_only` is deliberately **not** on `SettingsRead`: it is read by
 `KbService.search_for_model` and nothing else, and the API contract the frontend was
@@ -673,7 +681,7 @@ Three more ingest invariants worth not re-litigating (`app/services/feeds.py`):
 
 ## Tests (`backend/tests/`)
 
-`make test` → `uv run pytest` (**1110 passed, 4 skipped**, ~50 s) then the frontend's
+`make test` → `uv run pytest` (**1119 passed, 4 skipped**, ~50 s) then the frontend's
 vitest. One `test_<area>.py` per area, `fakes/` for client stand-ins, `fixtures/` for
 XML/HTML.
 
