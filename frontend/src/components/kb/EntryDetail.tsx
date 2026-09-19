@@ -197,6 +197,9 @@ function Actions({ entry, onChanged }: { entry: KbEntryDetail; onChanged: () => 
   const review = useMutation({
     mutationFn: () => patchEntry(entry.id, { review_status: 'reviewed' }),
     onSuccess: onChanged,
+    // Silence here reads as success, and this is the button that decides
+    // whether the chat may ever see the entry — the shared note says so instead.
+    onError: () => setNote({ text: 'That could not be marked reviewed.', failed: true }),
   })
 
   const refresh = useMutation({
