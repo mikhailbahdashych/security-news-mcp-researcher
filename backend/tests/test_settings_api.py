@@ -53,6 +53,7 @@ async def test_get_settings_returns_seeded_defaults(client: httpx2.AsyncClient) 
         "voyage_api_key_masked": "",
         "voyage_key_source": "none",
         "kb_embedding_model": "voyage-4",
+        "kb_embedding_models": ["voyage-4", "voyage-4-lite", "voyage-4-large"],
         "kb_capture_findings": False,
         "kb_compile_mode": "manual",
         "kb_compile_model": "claude-sonnet-5",
@@ -507,6 +508,48 @@ async def test_put_rejects_out_of_range_phase_two_values(
     client: httpx2.AsyncClient, payload: dict
 ) -> None:
     assert (await client.put("/api/settings", json=payload)).status_code == 422
+
+
+async def test_put_refuses_an_embedding_model_the_embedder_does_not_know(
+    client: httpx2.AsyncClient,
+) -> None:
+    """A typo used to be stored, which made ``update_settings`` see a model change
+    and empty the vector index — after which Embed now 502s on Voyage's 400 and
+    recovery costs a full paid re-embed. The 422 lands before anything is wiped."""
+    response = await client.put("/api/settings", json={"kb_embedding_model": "voyage-3.5"})
+
+    assert response.status_code == 422
+    assert "voyage-4" in str(response.json()["detail"])
+    body = (await client.get("/api/settings")).json()
+    assert body["kb_embedding_model"] == "voyage-4"
+
+
+async def test_the_allowed_embedding_models_are_on_the_wire_and_come_from_the_embedder(
+    client: httpx2.AsyncClient,
+) -> None:
+    """The UI renders a select from this list rather than hard-coding one, so the
+    embedder's own table stays the single source of what is selectable."""
+    from app.kb import embeddings
+
+    body = (await client.get("/api/settings")).json()
+
+    assert body["kb_embedding_models"] == list(embeddings.EMBEDDING_MODELS)
+    assert body["kb_embedding_model"] in body["kb_embedding_models"]
+
+
+async def test_a_hand_edited_embedding_model_is_reported_rather_than_hidden(
+    client: httpx2.AsyncClient, db_session
+) -> None:
+    """A value written straight into SQLite (or left by a newer build) must not
+    break the page: it is read back verbatim, next to the list of what is
+    accepted, so the user can see what is there and pick something valid."""
+    await settings_service.set_many(db_session, {"kb_embedding_model": "voyage-3.5"})
+    await db_session.commit()
+
+    body = (await client.get("/api/settings")).json()
+
+    assert body["kb_embedding_model"] == "voyage-3.5"
+    assert "voyage-3.5" not in body["kb_embedding_models"]
 
 
 @pytest.mark.parametrize("blank", ["", "   ", "\n\n", "\t"])

@@ -12,7 +12,7 @@ from fastapi import APIRouter
 
 from app.api.deps import AnthropicClient, AppSettings, DbSession
 from app.kb.capture import log_activity
-from app.kb.embeddings import discard_vectors
+from app.kb.embeddings import EMBEDDING_MODELS, discard_vectors
 from app.kb.schema import (
     KB_SCHEMA_VERSION_KEY,
     current_schema_version,
@@ -77,6 +77,9 @@ async def _read(session: DbSession, settings: AppSettings) -> SettingsRead:
         voyage_api_key_masked=settings_service.mask_key(voyage_key),
         voyage_key_source=await settings_service.get_voyage_key_source(session, settings),
         kb_embedding_model=await settings_service.get_str(session, "kb_embedding_model"),
+        # Not a preference and not stored, like `kb_compile_prompt_default`: what
+        # this build can embed with, so the UI's select needs no list of its own.
+        kb_embedding_models=list(EMBEDDING_MODELS),
         kb_capture_findings=await settings_service.get_bool(session, "kb_capture_findings"),
         kb_compile_mode=cast(
             CompileMode, await settings_service.get_choice(session, "kb_compile_mode")

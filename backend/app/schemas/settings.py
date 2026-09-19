@@ -6,6 +6,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.kb.embeddings import EMBEDDING_MODELS
+
 Effort = Literal["low", "medium", "high", "xhigh", "max"]
 ThinkingDisplay = Literal["summarized", "omitted"]
 KeySource = Literal["env", "stored", "none"]
@@ -66,6 +68,12 @@ class SettingsRead(BaseModel):
     voyage_api_key_masked: str
     voyage_key_source: KeySource
     kb_embedding_model: str
+    #: What ``kb_embedding_model`` may be set to, read-only: the Settings select is
+    #: built from this rather than from a hard-coded list, so the embedder's table
+    #: stays the one source. A value stored by hand (or by a newer build) is still
+    #: reported verbatim above and simply is not in here — the page can then show
+    #: what is configured *and* what is accepted, instead of hiding one of them.
+    kb_embedding_models: list[str]
     kb_capture_findings: bool
     kb_compile_mode: CompileMode
     kb_compile_model: str
@@ -136,6 +144,22 @@ class SettingsUpdate(BaseModel):
         """
         if value is not None and not value.strip():
             raise ValueError("the compile prompt cannot be empty")
+        return value
+
+    @field_validator("kb_embedding_model")
+    @classmethod
+    def _model_is_one_the_embedder_knows(cls, value: str | None) -> str | None:
+        """Only a model this build can batch for (``EMBEDDING_MODELS``).
+
+        Not a cosmetic check: ``update_settings`` reads a *changed* model as
+        "throw the vector index away", so a typo emptied ``kb_chunk_vec``, marked
+        every chunk pending and left Embed now 502-ing on Voyage's 400 — with a
+        full paid re-embed as the only way back. The 422 lands before the write.
+        Kept as a validator rather than a ``Literal`` so the set stays derived
+        from the embedder's own table and cannot drift from it.
+        """
+        if value is not None and value not in EMBEDDING_MODELS:
+            raise ValueError(f"must be one of {', '.join(EMBEDDING_MODELS)}")
         return value
 
 

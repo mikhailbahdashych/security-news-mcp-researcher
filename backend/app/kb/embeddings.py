@@ -50,6 +50,13 @@ MAX_TOKENS_BY_MODEL = {
     "voyage-4-large": 96_000,
 }
 
+#: Every model this build knows how to batch for — the default, whose ceiling is
+#: :data:`MAX_TOKENS_PER_REQUEST`, plus the two with ceilings of their own. The
+#: one source of what ``kb_embedding_model`` may be set to (``SettingsUpdate``
+#: refuses anything else) and of the list the Settings select is built from, so
+#: adding a model here is the whole change.
+EMBEDDING_MODELS: tuple[str, ...] = (DEFAULT_EMBEDDING_MODEL, *MAX_TOKENS_BY_MODEL)
+
 
 def max_tokens_for(model: str) -> int:
     """The per-request token ceiling *model* is batched to.
@@ -360,6 +367,7 @@ __all__ = [
     "CONNECT_TIMEOUT_S",
     "DEFAULT_EMBEDDING_MODEL",
     "DEFAULT_TIMEOUT_S",
+    "EMBEDDING_MODELS",
     "MAX_TEXTS_PER_REQUEST",
     "MAX_TOKENS_BY_MODEL",
     "MAX_TOKENS_PER_REQUEST",

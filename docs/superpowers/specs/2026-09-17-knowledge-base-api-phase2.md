@@ -114,7 +114,13 @@ An ordinary captured article never produces a row. That rule is I16 and is the s
 has_voyage_key: boolean          # a key is stored IN THIS DATABASE — not "a key is usable"
 voyage_api_key_masked: string    # mask_key() output, e.g. "…a1b2"; "" when nothing is stored
 voyage_key_source: 'env'|'stored'|'none'   # mirrors key_source exactly
+kb_embedding_models: string[]    # what kb_embedding_model may be set to, in this build
 ```
+
+`kb_embedding_models` is `app.kb.embeddings.EMBEDDING_MODELS` — the default plus every model with a
+ceiling of its own — so the Settings select is built from it instead of hard-coding a list. A value
+already stored that is **not** in it (hand-edited, or left by a newer build) is still reported
+verbatim in `kb_embedding_model`; the page shows both.
 
 Precedence, mirroring the Anthropic key: **process environment `VOYAGE_API_KEY` → `.env` (i.e.
 `Settings.voyage_api_key`) → the key stored in the DB.** Neither external value is ever written back
@@ -124,7 +130,7 @@ to the DB. `voyage_key_source === 'env'` with `has_voyage_key === false` is a no
 
 | field | type | default | validation | read by |
 |---|---|---|---|---|
-| `kb_embedding_model` | string | `"voyage-4"` | 1–200 chars | 2.1 |
+| `kb_embedding_model` | string | `"voyage-4"` | one of `kb_embedding_models`; anything else is a **422**, before the vector index is touched | 2.1 |
 | `kb_capture_findings` | boolean | `false` | — | 2.6 |
 | `kb_compile_mode` | `'manual'\|'auto'` | `"manual"` | closed set | 2.5 |
 | `kb_compile_model` | string | `"claude-sonnet-5"` | 1–200 chars | 2.5 |
