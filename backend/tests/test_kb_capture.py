@@ -1222,6 +1222,49 @@ async def test_a_later_article_is_not_flagged_against_a_note(session_factory):
     assert article.possible_duplicate_of is None
 
 
+async def test_a_pasted_url_is_flagged_against_an_article_already_held(session_factory):
+    """The likeliest duplicate in this app: a starred article and the same story
+    pasted as a URL. ``capture_url`` writes ``kind='manual'``, so the rule covers
+    both kinds — the vector leg's ``kinds=`` filter included."""
+    embedder = MarkerEmbedder()
+    starred = await capture_article(
+        session_factory,
+        embedder,
+        url="https://example.test/xz-one",
+        title=HEADLINE,
+        text=_marked("xz"),
+    )
+    pasted = await capture_article(
+        session_factory,
+        embedder,
+        url="https://example.test/xz-two",
+        title=HEADLINE_RETITLED,
+        text=_marked("xz"),
+        kind="manual",
+        captured_by="user",
+    )
+
+    assert pasted.possible_duplicate_of == starred.entry_id
+
+
+async def test_an_article_is_flagged_against_a_pasted_url_already_held(session_factory):
+    """The other direction, on the title leg: a manual save is a candidate too."""
+    pasted = await capture_article(
+        session_factory,
+        NullEmbedder(),
+        url="https://example.test/one",
+        title=HEADLINE,
+        text=ARTICLE,
+        kind="manual",
+        captured_by="user",
+    )
+    article = await _capture(
+        session_factory, url="https://example.test/two", title=HEADLINE_RETITLED
+    )
+
+    assert article.possible_duplicate_of == pasted.entry_id
+
+
 async def test_the_flag_is_a_column_and_the_trail_names_both_scores(session_factory, db_session):
     """``possible_duplicate_of`` is a column, never a string inside a detail (spec §8)
     — the detail carries the *evidence*, which is what makes 0.92 calibratable."""
