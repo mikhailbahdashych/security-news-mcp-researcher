@@ -91,12 +91,13 @@ history.
 **`.env`.** Copy `.env.example` → `.env`. `app.config.Settings` reads it via
 pydantic-settings (`env_file=("../.env", ".env")`, so it works whether you run from
 the repo root or from `backend/`). Fields: `DB_PATH`, `PORT`,
-`CORS_ORIGINS`, `ANTHROPIC_API_KEY`, `VOYAGE_API_KEY`, `LOG_LEVEL`. `PORT` is honoured by
+`ANTHROPIC_API_KEY`, `VOYAGE_API_KEY`, `LOG_LEVEL`. `PORT` is honoured by
 `make dev-api`, because it goes through `python -m app` (`backend/app/__main__.py`),
 which reads `Settings.port`.
-`CORS_ORIGINS` accepts a comma-separated list as well as a JSON array; `*` is refused
-(a `ValidationError` at startup) and the middleware never allows credentials, because
-this API has no auth to protect.
+
+**There is no CORS.** The SPA reaches the API through Vite's `/api` proxy, so it is
+same-origin and the app adds no `CORSMiddleware` — do not add one back. An API with no
+authentication at all, holding the user's Anthropic key, must not invite other origins.
 
 **API-key precedence: process environment → `.env` (i.e. `Settings.anthropic_api_key`)
 → the key stored in the DB.** `app/services/settings.py::external_api_key` reads

@@ -19,11 +19,11 @@ the repo-root `.env`; Vite reads only the environment, so a port set in `.env` a
 needs `PORT=... make dev-web` as well.
 
 Prerequisites: [uv](https://docs.astral.sh/uv/) and Node 22+.
-Copy `.env.example` to `.env` if you want to override defaults. `CORS_ORIGINS` takes a
-comma-separated list (`CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173`) as
-well as a JSON array; `*` is refused. Leave it empty unless a browser on some other
-origin has to call the API — `make dev-web` proxies `/api` through Vite, so the app
-itself is always same-origin.
+Copy `.env.example` to `.env` if you want to override defaults.
+
+The browser only ever talks to Vite, which proxies `/api` to the backend, so every
+request is same-origin and the API sends no CORS headers at all. It has no
+authentication either — that is the same decision seen from the other side.
 
 ## The Anthropic API key
 

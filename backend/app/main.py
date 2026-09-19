@@ -3,7 +3,6 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 
 from app import __version__
 from app.agent.turns import TurnRegistry, mark_interrupted
@@ -91,7 +90,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     # The single source of truth for this app: the lifespan and every dependency
-    # read the database path and the CORS origins from here.
+    # read the database path from here.
     app.state.settings = settings
     app.state.db_engine = None
     app.state.session_factory = None
@@ -102,14 +101,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # a turn starts, and the test suite (which skips the lifespan) needs one too.
     app.state.turn_registry = TurnRegistry()
 
-    if settings.cors_origins:
-        app.add_middleware(
-            CORSMiddleware,
-            allow_origins=settings.cors_origins,
-            allow_credentials=False,
-            allow_methods=["*"],
-            allow_headers=["*"],
-        )
+    # Deliberately no CORS middleware: the SPA reaches this API through Vite's
+    # `/api` proxy, so every request is same-origin. An API with no auth at all,
+    # holding the user's Anthropic key, has no business inviting other origins.
 
     # Deliberately no GZipMiddleware: it buffers responses, which turns the chat
     # SSE stream into a connection that appears to hang until the turn is over.
