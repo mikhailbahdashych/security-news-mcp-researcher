@@ -129,12 +129,15 @@ handler and was dropped.
 
 - **Feature branch + PR. The human merges. Never merge, never push to `main`.**
   Cut each branch from `main` and open its PR **against `main`**.
-  **One PR per feature — never a whole phase in one PR.** A phase is several PRs. Each
-  one has to be small enough to revert on its own: if reverting it would take code and
-  docs out of step, it is carrying more than one feature. Keep the commit count low —
-  squash the fix-round noise with `--amend` / `reset --soft` **before** opening it, so
-  the PR reads as the change and not as the diary of making it. (A 101-commit PR is not
-  reviewable and not revertible; do not produce one.)
+  **One PR per feature — never a whole phase in one PR.** The unit is *something the
+  owner might want to roll back on its own*: a phase is a few PRs (roughly one per task
+  or tight pair of tasks), not one and not ten, and one coherent chore — a cleanup, a
+  docs sync — is a single PR of a handful of logical commits. If reverting a PR would
+  take code and docs out of step, it is carrying more than one feature. Keep the commit
+  count low — squash the fix-round noise with `--amend` / `reset --soft` **before**
+  opening it, so the PR reads as the change and not as the diary of making it. (A
+  101-commit PR is not reviewable and not revertible; do not produce one.) When the cut
+  is not obvious, propose it in a line and let the owner pick before building it.
   Do not stack: a stacked PR merges into its *base branch*, not into `main` (that is how
   knowledge-base Phase 1 first missed `main`). Where one PR genuinely depends on another
   that is not merged yet, open it as a **draft on its parent** and **retarget it to
