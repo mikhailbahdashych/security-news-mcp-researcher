@@ -397,6 +397,11 @@ a gap is an entry folded into a neighbour.
   `ADDED_COLUMNS`, which is also why a dismissed duplicate is filed under `action: "merge"`. Task 4.1
   (curation) owns giving the trail a proper outcome and the strip a server-side source. — Cost: a
   stale row in a strip the user can ignore.
+- **P2-26. Only an article can be a duplicate, and only of another article.** The Phase 2 browser
+  pass generated a note from one inbox item; the note carries the item's headline and quotes it, so it
+  was flagged as a possible duplicate of the article it was written from — and a merge keeps the older
+  entry. Both near-duplicate legs now offer only `kind = 'article'` candidates and only an article is
+  checked. — Cost if wrong: two manual entries with the same title are never flagged.
 
 ---
 

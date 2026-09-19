@@ -509,8 +509,10 @@ backwards, at the copy that was already there. It only ever sets
 `kb_entries.possible_duplicate_of`; merging is a button, and
 `POST /entries/{id}/not-a-duplicate` clears the flag (idempotent; a dismissal that changes
 nothing writes no row; the trail row is filed under `action: "merge"` because
-`kb_activity.action` is a CHECK constraint and this app has no migrations — P2-23). **A
-model-authored finding takes no part, in either direction**: `findings.py` never flags at
+`kb_activity.action` is a CHECK constraint and this app has no migrations — P2-23). **Only an article can be a duplicate, and only of another article**
+(`capture.py::DUPLICATE_KIND`): a note generated from one inbox item carries that item's
+headline and quotes it, so it sat on top of its own source on both legs — found in the
+Phase 2 browser pass (P2-26). **A model-authored finding takes no part, in either direction**: `findings.py` never flags at
 its own capture, and neither leg offers a finding as a candidate (the vector leg sets
 `SearchFilters.exclude_model_authored`, the title leg filters `authorship != 'model'`), so a
 later article is never flagged against a finding — merging keeps the *older* entry, so a suggested
