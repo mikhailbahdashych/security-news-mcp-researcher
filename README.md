@@ -1,4 +1,4 @@
-# Security News MCP Researcher
+<h1 align="center">Security News MCP Researcher</h1>
 
 A local-only, single-user web app for security engineers: an RSS security-news inbox,
 an LLM research chat, a meeting-notes generator and a searchable knowledge base of what
