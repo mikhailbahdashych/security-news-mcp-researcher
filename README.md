@@ -216,3 +216,7 @@ make typecheck   # frontend: npx tsc -b — the only TypeScript type-check there
 | `backend/`  | FastAPI app (`app/`), tests, uv-managed dependencies     |
 | `frontend/` | Vite + React + TypeScript SPA                             |
 | `docs/`     | `DESIGN.md` (design record), `ROADMAP.md` (backlog)       |
+
+## License
+
+[MIT](/LICENSE)
